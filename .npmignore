@@ -1,0 +1,4 @@
+node_modules/
+.officegen/
+packages/*/tsconfig.tsbuildinfo
+npm-debug.log*
