@@ -118,6 +118,34 @@ describe("@officegen/formats MVP", () => {
     expect(dryRun.resolvedSelectors?.[0]?.matched).toBe(true);
   });
 
+  it("sets PPTX text without confusing a:t with a:tabLst in rich shapes", async () => {
+    const zip = new JSZip();
+    zip.file(
+      "ppt/slides/slide1.xml",
+      [
+        "<p:sld><p:sp><p:nvSpPr><p:cNvPr id=\"7\" name=\"Rich Text\"/></p:nvSpPr><p:txBody>",
+        "<a:p><a:pPr><a:tabLst><a:tab algn=\"l\" pos=\"0\"/></a:tabLst></a:pPr>",
+        "<a:r><a:t>Original rich text</a:t></a:r></a:p>",
+        "</p:txBody></p:sp></p:sld>"
+      ].join("")
+    );
+    const bytes = await zip.generateAsync({ type: "uint8array" });
+    const inspected = await inspect({ data: bytes, format: "pptx" });
+    const id = inspected.objectMap[0]?.stableObjectId;
+
+    const edited = await edit(
+      { data: bytes, format: "pptx" },
+      [{ op: "setText", selector: { stableObjectId: id }, text: "Changed rich text" }]
+    );
+    const editedZip = await JSZip.loadAsync(edited.bytes as Uint8Array);
+    const xml = await editedZip.file("ppt/slides/slide1.xml")?.async("string");
+    const reinspected = await inspect({ data: edited.bytes, format: "pptx" });
+
+    expect(xml).toContain("<a:tabLst>");
+    expect(xml).toContain("<a:t>Changed rich text</a:t>");
+    expect(reinspected.objectMap.map((entry) => entry.text)).toContain("Changed rich text");
+  });
+
   it("applies structural PPTX, DOCX, and XLSX edit ops and confirms through inspect", async () => {
     const pptx = await render(
       { title: "Deck", slides: [{ title: "First", body: "Body" }, { title: "Second", body: "Other" }] },

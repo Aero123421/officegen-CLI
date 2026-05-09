@@ -115,7 +115,7 @@ export function replaceFirstBlock(
 
 export function setFirstTextInBlock(block: string, tagName: string, text: string): string {
   const tag = escapeRegExp(tagName);
-  const pattern = new RegExp(`<${tag}([^>]*)>[\\s\\S]*?<\\/${tag}>`);
+  const pattern = new RegExp(`<${tag}(?=\\s|>)([^>]*)>[\\s\\S]*?<\\/${tag}>`);
   if (pattern.test(block)) return block.replace(pattern, `<${tag}$1>${escapeXmlText(text)}</${tagName}>`);
   return block;
 }
