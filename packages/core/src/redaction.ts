@@ -43,6 +43,7 @@ function pathReplacements(config: OfficegenConfig, run?: RunFolder): Array<{ roo
   const seen = new Set<string>();
   return roots
     .map(({ root, label }) => ({ root: root.replace(/[\\/]+$/, ""), label }))
+    .filter(({ root }) => isAbsoluteLikeRoot(root))
     .filter(({ root }) => root.length > 0)
     .filter(({ root }) => {
       const key = root.replace(/\\/g, "/").toLowerCase();
@@ -51,6 +52,10 @@ function pathReplacements(config: OfficegenConfig, run?: RunFolder): Array<{ roo
       return true;
     })
     .sort((a, b) => b.root.length - a.root.length);
+}
+
+function isAbsoluteLikeRoot(root: string): boolean {
+  return path.isAbsolute(root) || /^[A-Za-z]:[\\/]/.test(root) || /^\\\\/.test(root) || root.startsWith("/");
 }
 
 function rootMatcher(root: string): RegExp {
@@ -89,7 +94,7 @@ export function redactPathsInText(text: string, config: OfficegenConfig, locatio
     value = value.replace(homeMatch[0], replacement);
     redactions.push({ kind: "absolute-path", location, replacement });
   }
-  for (const posixMatch of [...value.matchAll(/(?<![\w:>/])\/(?!\/)[^"'\s,;)]+(?:\/[^"'\s,;)]+)+/g)]) {
+  for (const posixMatch of [...value.matchAll(/(?<![\w:>/.])\/(?!\/)[^"'\s,;)]+(?:\/[^"'\s,;)]+)+/g)]) {
     const raw = posixMatch[0];
     if (value.startsWith("#/")) continue;
     const prefix = raw.startsWith("/") ? "" : raw[0];

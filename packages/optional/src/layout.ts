@@ -125,6 +125,13 @@ function applyConstraint(box: LayoutBox, constraint: LayoutConstraint | undefine
     };
   }
 
+  next.width = clamp(next.width, constraint.minWidth, constraint.maxWidth);
+  next.height = clamp(next.height, constraint.minHeight, constraint.maxHeight);
+  if (constraint.bounds) {
+    next.x = clamp(next.x, constraint.bounds.x, constraint.bounds.x + constraint.bounds.width - next.width);
+    next.y = clamp(next.y, constraint.bounds.y, constraint.bounds.y + constraint.bounds.height - next.height);
+  }
+
   return next;
 }
 

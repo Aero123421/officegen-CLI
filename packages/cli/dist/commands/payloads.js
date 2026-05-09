@@ -22,7 +22,7 @@ export function capabilitiesPayload(context) {
         visibleCommands: enabled
             .filter((entry) => !context.agent || entry.visibleToAgents)
             .map((entry) => entry.commandGroup),
-        hiddenFromAgents: context.registry.filter((entry) => !entry.visibleToAgents).map((entry) => entry.feature),
+        hiddenFromAgents: enabled.filter((entry) => !entry.visibleToAgents).map((entry) => entry.feature),
         jsonBudgetBytes: context.jsonBudgetBytes ?? context.config.agent.defaultJsonBudgetBytes,
         commands: enabled
             .filter((entry) => !context.agent || entry.visibleToAgents)
@@ -544,22 +544,36 @@ export async function runPayload(context) {
         const command = String(step.command ?? step.type ?? "");
         const startedAt = new Date().toISOString();
         await appendTrace(folder, { event: "step.start", id, command, startedAt });
-        const result = await executeRunStep(context, folder, step, stepOutputs, index);
         const resultPath = path.join(folder.logsDir, `${String(index + 1).padStart(2, "0")}-${safeFileToken(id)}.result.json`);
-        await fs.writeFile(resultPath, `${JSON.stringify(result, null, 2)}\n`, "utf8");
-        const resultOut = typeof result.out === "string" ? String(result.out) : undefined;
-        if (resultOut)
-            stepOutputs.set(id, resultOut);
-        results.push({ id, command, resultPath, ok: true, ...(resultOut ? { out: resultOut } : {}) });
-        await appendTrace(folder, { event: "step.end", id, command, ok: true, resultPath, ...(resultOut ? { out: resultOut } : {}), finishedAt: new Date().toISOString() });
+        try {
+            const result = await executeRunStep(context, folder, step, stepOutputs, index);
+            await fs.writeFile(resultPath, `${JSON.stringify(result, null, 2)}\n`, "utf8");
+            const resultOut = typeof result.out === "string" ? String(result.out) : undefined;
+            if (resultOut) {
+                stepOutputs.set(id, resultOut);
+                await updateManifest(folder, (manifest) => {
+                    manifest.outputs.push({ path: resultOut, sha256: undefined });
+                });
+                const sha256 = await sha256File(resultOut).catch(() => undefined);
+                if (sha256) {
+                    await updateManifest(folder, (manifest) => {
+                        const record = manifest.outputs.find((output) => output.path === resultOut);
+                        if (record)
+                            record.sha256 = sha256;
+                    });
+                }
+            }
+            results.push({ id, command, resultPath, ok: true, ...(resultOut ? { out: resultOut } : {}) });
+            await appendTrace(folder, { event: "step.end", id, command, ok: true, resultPath, ...(resultOut ? { out: resultOut } : {}), finishedAt: new Date().toISOString() });
+        }
+        catch (error) {
+            const failure = runStepFailurePayload(id, command, error);
+            await fs.writeFile(resultPath, `${JSON.stringify(failure, null, 2)}\n`, "utf8");
+            results.push({ id, command, resultPath, ok: false });
+            await appendTrace(folder, { event: "step.end", id, command, ok: false, resultPath, error: failure.error, finishedAt: new Date().toISOString() });
+            throw error;
+        }
     }
-    const outputRecords = [];
-    for (const output of stepOutputs.values()) {
-        outputRecords.push({ path: output, sha256: await sha256File(output).catch(() => undefined) });
-    }
-    await updateManifest(folder, (manifest) => {
-        manifest.outputs.push(...outputRecords);
-    });
     return {
         schema: "officegen.run.result@1.2",
         runId: folder.runId,
@@ -661,6 +675,21 @@ function requireRunInput(command, input) {
         command: "run",
         message: `run step ${command} requires an input path.`
     }, 3);
+}
+function runStepFailurePayload(id, command, error) {
+    const payload = error instanceof CliFailure
+        ? error.payload
+        : {
+            code: "RUN_STEP_FAILED",
+            command: "run",
+            message: error instanceof Error ? error.message : String(error)
+        };
+    return {
+        schema: "officegen.run.step-error@1.2",
+        ok: false,
+        step: { id, command },
+        error: payload
+    };
 }
 function safeFileToken(value) {
     return value.replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 80) || "step";

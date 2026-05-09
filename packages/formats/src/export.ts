@@ -238,7 +238,7 @@ export async function findLibreOfficeExecutable(): Promise<string | undefined> {
 
 async function canRun(command: string): Promise<boolean> {
   return new Promise((resolve) => {
-    const child = spawn(command, ["--version"], { stdio: "ignore", windowsHide: true });
+    const child = spawn(command, ["--version"], { stdio: "ignore", windowsHide: true, env: safeExternalEnv() });
     child.on("error", () => resolve(false));
     child.on("exit", (code) => resolve(code === 0));
   });
@@ -246,7 +246,7 @@ async function canRun(command: string): Promise<boolean> {
 
 async function runProcess(command: string, args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { windowsHide: true });
+    const child = spawn(command, args, { windowsHide: true, env: safeExternalEnv() });
     let stderr = "";
     child.stderr.on("data", (chunk) => {
       stderr += String(chunk);
@@ -257,6 +257,31 @@ async function runProcess(command: string, args: string[]): Promise<void> {
       else reject(new OfficegenError("EXPORT_UNSUPPORTED", `LibreOffice conversion failed with exit code ${code}. ${stderr.trim()}`));
     });
   });
+}
+
+function safeExternalEnv(): NodeJS.ProcessEnv {
+  const allowed = [
+    "PATHEXT",
+    "ComSpec",
+    "SystemRoot",
+    "WINDIR",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "HOME",
+    "USERPROFILE",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE"
+  ];
+  const env: NodeJS.ProcessEnv = {};
+  const pathValue = process.platform === "win32" ? (process.env.Path ?? process.env.PATH) : (process.env.PATH ?? process.env.Path);
+  if (pathValue !== undefined) env[process.platform === "win32" ? "Path" : "PATH"] = pathValue;
+  for (const key of allowed) {
+    const value = process.env[key];
+    if (value !== undefined) env[key] = value;
+  }
+  return env;
 }
 
 async function findConvertedPdf(outDir: string, inputPath: string): Promise<string> {

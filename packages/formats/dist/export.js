@@ -193,14 +193,14 @@ export async function findLibreOfficeExecutable() {
 }
 async function canRun(command) {
     return new Promise((resolve) => {
-        const child = spawn(command, ["--version"], { stdio: "ignore", windowsHide: true });
+        const child = spawn(command, ["--version"], { stdio: "ignore", windowsHide: true, env: safeExternalEnv() });
         child.on("error", () => resolve(false));
         child.on("exit", (code) => resolve(code === 0));
     });
 }
 async function runProcess(command, args) {
     return new Promise((resolve, reject) => {
-        const child = spawn(command, args, { windowsHide: true });
+        const child = spawn(command, args, { windowsHide: true, env: safeExternalEnv() });
         let stderr = "";
         child.stderr.on("data", (chunk) => {
             stderr += String(chunk);
@@ -213,6 +213,32 @@ async function runProcess(command, args) {
                 reject(new OfficegenError("EXPORT_UNSUPPORTED", `LibreOffice conversion failed with exit code ${code}. ${stderr.trim()}`));
         });
     });
+}
+function safeExternalEnv() {
+    const allowed = [
+        "PATHEXT",
+        "ComSpec",
+        "SystemRoot",
+        "WINDIR",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "HOME",
+        "USERPROFILE",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE"
+    ];
+    const env = {};
+    const pathValue = process.platform === "win32" ? (process.env.Path ?? process.env.PATH) : (process.env.PATH ?? process.env.Path);
+    if (pathValue !== undefined)
+        env[process.platform === "win32" ? "Path" : "PATH"] = pathValue;
+    for (const key of allowed) {
+        const value = process.env[key];
+        if (value !== undefined)
+            env[key] = value;
+    }
+    return env;
 }
 async function findConvertedPdf(outDir, inputPath) {
     const expected = path.join(outDir, `${path.basename(inputPath, path.extname(inputPath))}.pdf`);

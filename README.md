@@ -19,7 +19,7 @@ npm install -g github:Aero123421/officegen-CLI
 For tagged releases, GitHub Actions publishes a checked GitHub Release tarball. This project does not publish the `officegen` name to the public npm registry, because that package name is already owned separately on npm.
 
 ```bash
-npm install -g https://github.com/Aero123421/officegen-CLI/releases/download/v2.1.0/officegen-v2.1.0.tgz
+npm install -g https://github.com/Aero123421/officegen-CLI/releases/download/v2.1.1/officegen-v2.1.1.tgz
 ```
 
 Check that it works:
@@ -137,8 +137,11 @@ Core commands:
 - `render` - render IR to PPTX, DOCX, XLSX, or PDF
 - `export` - convert to PDF or preview-oriented formats
 - `validate` - validate schemas and structures
+- `verify` - run openability, structural, and quality gates
 - `diagnose` - find likely quality or layout issues
 - `repair` - apply conservative repair operations or return suggested ops
+- `diff` - compare Office/PDF files semantically and visually
+- `run` - execute workflow plans with manifest and trace artifacts
 - `asset` - inspect, extract, and replace embedded media
 - `chart` - render simple chart SVG
 - `diagram` - render simple diagram SVG
@@ -218,7 +221,7 @@ Use `--json` for machine-readable output. Responses use the v1.2 envelope shape:
   "ok": true,
   "command": "capabilities",
   "runId": "...",
-  "cliVersion": "2.1.0",
+  "cliVersion": "2.1.1",
   "capabilitiesHash": "sha256:...",
   "pathsRedacted": true,
   "result": {},
@@ -289,7 +292,7 @@ Version bump all managed release files:
 ```bash
 npm run version:bump -- patch
 # or: npm run version:bump -- minor
-# or: npm run version:bump -- 2.1.0
+# or: npm run version:bump -- 2.1.1
 npm run version:check
 ```
 

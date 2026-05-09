@@ -24,4 +24,4 @@ export declare function insertParagraphAfter(xml: string, ordinal: number, text:
 };
 export declare function replaceOrCreateHeaderFooter(xml: string | undefined, kind: "header" | "footer", text: string): string;
 export declare function commentXml(id: number, author: string, text: string, date?: Date): string;
-export declare function insertedParagraphXml(text: string, author?: string, date?: Date): string;
+export declare function insertedParagraphXml(text: string, author?: string, date?: Date, revisionId?: number): string;

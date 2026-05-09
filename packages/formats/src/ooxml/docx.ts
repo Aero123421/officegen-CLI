@@ -77,8 +77,8 @@ export function commentXml(id: number, author: string, text: string, date = new 
   return `<w:comment w:id="${id}" w:author="${escapeXmlAttr(author)}" w:date="${date.toISOString()}">${paragraphXml(text, "w")}</w:comment>`;
 }
 
-export function insertedParagraphXml(text: string, author = "officegen", date = new Date()): string {
-  return `<w:p><w:ins w:author="${escapeXmlAttr(author)}" w:date="${date.toISOString()}" w:id="1"><w:r><w:t>${escapeXmlTextLocal(text)}</w:t></w:r></w:ins></w:p>`;
+export function insertedParagraphXml(text: string, author = "officegen", date = new Date(), revisionId = 1): string {
+  return `<w:p><w:ins w:author="${escapeXmlAttr(author)}" w:date="${date.toISOString()}" w:id="${revisionId}"><w:r><w:t>${escapeXmlTextLocal(text)}</w:t></w:r></w:ins></w:p>`;
 }
 
 function docxPartKind(path: string): DocxParagraph["partKind"] {

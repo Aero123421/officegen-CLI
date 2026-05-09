@@ -277,6 +277,22 @@ describe("@officegen/formats MVP", () => {
     expect(sheetXml?.match(/<row\b[^>]*\br="2"/g)).toHaveLength(1);
   });
 
+  it("updates shifted XLSX formula references when inserting rows", async () => {
+    const rendered = await render({ title: "Formula", sheets: [{ rows: [["A", "B", "Total"], [2, 3, ""]] }] }, { target: "xlsx" });
+    const withFormula = await edit(
+      { data: rendered.bytes, format: "xlsx" },
+      [{ op: "xlsx.setFormula", sheet: 1, cell: "C2", formula: "=SUM(A2:B2)" }]
+    );
+    const edited = await edit(
+      { data: withFormula.bytes, format: "xlsx" },
+      [{ op: "xlsx.insertRows", sheet: 1, rowIndex: 2, rows: [["Inserted", 1, 2]] }]
+    );
+    const zip = await JSZip.loadAsync(edited.bytes as Uint8Array);
+    const sheetXml = await zip.file("xl/worksheets/sheet1.xml")?.async("string");
+
+    expect(sheetXml).toContain('<c r="C3"><f>SUM(A3:B3)</f></c>');
+  });
+
   it("keeps XLSX chart objects in the approximate view object map", async () => {
     const zip = new JSZip();
     zip.file("xl/worksheets/sheet1.xml", '<worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Revenue</t></is></c></row></sheetData></worksheet>');
@@ -285,6 +301,41 @@ describe("@officegen/formats MVP", () => {
     const viewed = await view(inspected);
 
     expect(viewed.objectMap.some((entry) => entry.kind === "chart" && entry.selectorHints?.chartPath === "xl/charts/chart1.xml")).toBe(true);
+  });
+
+  it("updates XLSX chart caches and backing worksheet cells together", async () => {
+    const zip = new JSZip();
+    zip.file("xl/worksheets/sheet1.xml", [
+      '<worksheet><sheetData>',
+      '<row r="1"><c r="A1" t="inlineStr"><is><t>Quarter</t></is></c><c r="B1" t="inlineStr"><is><t>Old</t></is></c></row>',
+      '<row r="2"><c r="A2" t="inlineStr"><is><t>Q1</t></is></c><c r="B2"><v>10</v></c></row>',
+      '<row r="3"><c r="A3" t="inlineStr"><is><t>Q2</t></is></c><c r="B3"><v>20</v></c></row>',
+      '</sheetData></worksheet>'
+    ].join(""));
+    zip.file("xl/charts/chart1.xml", [
+      '<c:chartSpace><c:chart><c:plotArea><c:barChart><c:ser>',
+      '<c:tx><c:v>Old</c:v></c:tx>',
+      '<c:cat><c:strRef><c:f>Sheet1!$A$2:$A$3</c:f><c:strCache><c:ptCount val="2"/><c:pt idx="0"><c:v>Q1</c:v></c:pt><c:pt idx="1"><c:v>Q2</c:v></c:pt></c:strCache></c:strRef></c:cat>',
+      '<c:val><c:numRef><c:f>Sheet1!$B$2:$B$3</c:f><c:numCache><c:ptCount val="2"/><c:pt idx="0"><c:v>10</c:v></c:pt><c:pt idx="1"><c:v>20</c:v></c:pt></c:numCache></c:numRef></c:val>',
+      '</c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>'
+    ].join(""));
+    const bytes = await zip.generateAsync({ type: "uint8array" });
+    const inspected = await inspect({ data: bytes, format: "xlsx" });
+    const chartId = inspected.objectMap.find((entry) => entry.kind === "chart")?.stableObjectId;
+    const edited = await edit(
+      { data: bytes, format: "xlsx" },
+      [{ op: "xlsx.chart.setData", selector: { stableObjectId: chartId }, seriesName: "New", categories: ["N1", "N2"], values: [111, 222] }]
+    );
+    const editedZip = await JSZip.loadAsync(edited.bytes as Uint8Array);
+    const sheetXml = await editedZip.file("xl/worksheets/sheet1.xml")?.async("string");
+    const chartXml = await editedZip.file("xl/charts/chart1.xml")?.async("string");
+
+    expect(sheetXml).toContain("<t>New</t>");
+    expect(sheetXml).toContain("<t>N1</t>");
+    expect(sheetXml).toContain("<v>222</v>");
+    expect(chartXml).toContain("<c:v>New</c:v>");
+    expect(chartXml).toContain("<c:v>N2</c:v>");
+    expect(chartXml).toContain("<c:v>222</c:v>");
   });
 
   it("renders native Excel table objects and inspects workbook objects compactly", async () => {
@@ -355,6 +406,28 @@ describe("@officegen/formats MVP", () => {
     expect(text).toContain("Confidential");
     expect(text).toContain("Review this");
     expect(text).toContain("Inserted with tracking");
+    const zip = await JSZip.loadAsync(edited.bytes as Uint8Array);
+    const documentXml = await zip.file("word/document.xml")?.async("string");
+    expect(documentXml).toContain("commentRangeStart");
+    expect(documentXml).toContain("commentRangeEnd");
+  });
+
+  it("assigns unique DOCX redline ids across multiple tracked insertions", async () => {
+    const rendered = await render({ title: "Doc", sections: [{ title: "Body", body: "Paragraph" }] }, { target: "docx" });
+    const inspected = await inspect({ data: rendered.bytes, format: "docx" });
+    const paragraphId = inspected.objectMap.find((entry) => entry.text === "Paragraph")?.stableObjectId;
+    const edited = await edit(
+      { data: rendered.bytes, format: "docx" },
+      [
+        { op: "docx.addRedline", selector: { stableObjectId: paragraphId }, text: "First", author: "QA" },
+        { op: "docx.addRedline", selector: { stableObjectId: paragraphId }, text: "Second", author: "QA" }
+      ]
+    );
+    const zip = await JSZip.loadAsync(edited.bytes as Uint8Array);
+    const documentXml = await zip.file("word/document.xml")?.async("string") ?? "";
+    const ids = [...documentXml.matchAll(/<w:ins\b[^>]*\bw:id="(\d+)"/g)].map((match) => match[1]);
+
+    expect(ids.sort()).toEqual(["1", "2"]);
   });
 
   it("keeps DOCX stableObjectIds unique across repeated header/footer parts", async () => {
@@ -379,6 +452,16 @@ describe("@officegen/formats MVP", () => {
 
     expect(diff.changed).toBe(true);
     expect(diff.summary.changedTextObjects).toBe(1);
+    expect(diff.summary.visualRegressionScore).toBeGreaterThan(0);
+  });
+
+  it("does not treat different PDF drawing content as a zero visual diff", async () => {
+    const before = await render({ title: "PDF", sections: [{ title: "Page", body: "Alpha" }] }, { target: "pdf" });
+    const after = await render({ title: "PDF", sections: [{ title: "Page", body: "Beta" }] }, { target: "pdf" });
+    const diff = await diffDocuments({ data: before.bytes, format: "pdf" }, { data: after.bytes, format: "pdf" }, { visual: true });
+
+    expect(diff.changed).toBe(true);
+    expect(diff.visual?.renderer).toBe("pdf-bytes");
     expect(diff.summary.visualRegressionScore).toBeGreaterThan(0);
   });
 

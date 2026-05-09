@@ -39,6 +39,7 @@ function pathReplacements(config, run) {
     const seen = new Set();
     return roots
         .map(({ root, label }) => ({ root: root.replace(/[\\/]+$/, ""), label }))
+        .filter(({ root }) => isAbsoluteLikeRoot(root))
         .filter(({ root }) => root.length > 0)
         .filter(({ root }) => {
         const key = root.replace(/\\/g, "/").toLowerCase();
@@ -48,6 +49,9 @@ function pathReplacements(config, run) {
         return true;
     })
         .sort((a, b) => b.root.length - a.root.length);
+}
+function isAbsoluteLikeRoot(root) {
+    return path.isAbsolute(root) || /^[A-Za-z]:[\\/]/.test(root) || /^\\\\/.test(root) || root.startsWith("/");
 }
 function rootMatcher(root) {
     const escaped = root
@@ -84,7 +88,7 @@ export function redactPathsInText(text, config, location = "$", run) {
         value = value.replace(homeMatch[0], replacement);
         redactions.push({ kind: "absolute-path", location, replacement });
     }
-    for (const posixMatch of [...value.matchAll(/(?<![\w:>/])\/(?!\/)[^"'\s,;)]+(?:\/[^"'\s,;)]+)+/g)]) {
+    for (const posixMatch of [...value.matchAll(/(?<![\w:>/.])\/(?!\/)[^"'\s,;)]+(?:\/[^"'\s,;)]+)+/g)]) {
         const raw = posixMatch[0];
         if (value.startsWith("#/"))
             continue;

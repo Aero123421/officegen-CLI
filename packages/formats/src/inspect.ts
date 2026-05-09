@@ -244,12 +244,12 @@ async function inspectXlsx(input: Awaited<ReturnType<typeof normalizeInput>>, op
 async function inspectPdf(input: Awaited<ReturnType<typeof normalizeInput>>, options: InspectOptions): Promise<InspectResult> {
   const pdf = await PDFDocument.load(input.bytes, { ignoreEncryption: true });
   const extractedText = extractPdfTextPreview(input.bytes);
-  const ocr = options.ocr && !extractedText.pages.some(Boolean)
+  const ocr = options.ocr && extractedText.pages.some((pageText) => !pageText)
     ? options.config?.security.externalProcess === "allow" && options.config.security.renderers === "enabled"
       ? await tryOcrPdf(input.path, pdf.getPageCount())
       : { ok: false, engine: "tesseract", message: "OCR requires security.externalProcess=allow and security.renderers=enabled.", pages: [] }
     : undefined;
-  const textPages = ocr?.pages?.length ? ocr.pages : extractedText.pages;
+  const textPages = extractedText.pages.map((pageText, index) => pageText || ocr?.pages?.[index] || "");
   const summaryDepth = options.depth === "summary";
   const pages = pdf.getPages().map((page, index) => {
     const size = page.getSize();
@@ -268,7 +268,7 @@ async function inspectPdf(input: Awaited<ReturnType<typeof normalizeInput>>, opt
     trusted: trustedMeta(
       "officegen.inspect.result@1.2",
       input,
-      { pages: pages.length, textBlocks: extractedText.pages.filter(Boolean).length, images: extractedText.imageRefs },
+      { pages: pages.length, textBlocks: textPages.filter(Boolean).length, images: extractedText.imageRefs },
       [
         "PDF text extraction is best-effort and does not replace OCR or native renderer output.",
         ...(ocr ? [`OCR ${ocr.ok ? "completed" : "not available"}: ${ocr.message}`] : []),
@@ -359,7 +359,7 @@ async function firstRunnable(commands: string[]): Promise<string | undefined> {
 
 function runCapture(command: string, args: string[], timeoutMs: number): Promise<{ ok: boolean; code?: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
-    const child = spawn(command, args, { windowsHide: true });
+    const child = spawn(command, args, { windowsHide: true, env: safeExternalEnv() });
     let stdout = "";
     let stderr = "";
     const timer = setTimeout(() => {
@@ -377,6 +377,31 @@ function runCapture(command: string, args: string[], timeoutMs: number): Promise
       resolve({ ok: code === 0, code, stdout, stderr });
     });
   });
+}
+
+function safeExternalEnv(): NodeJS.ProcessEnv {
+  const allowed = [
+    "PATHEXT",
+    "ComSpec",
+    "SystemRoot",
+    "WINDIR",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "HOME",
+    "USERPROFILE",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE"
+  ];
+  const env: NodeJS.ProcessEnv = {};
+  const pathValue = process.platform === "win32" ? (process.env.Path ?? process.env.PATH) : (process.env.PATH ?? process.env.Path);
+  if (pathValue !== undefined) env[process.platform === "win32" ? "Path" : "PATH"] = pathValue;
+  for (const key of allowed) {
+    const value = process.env[key];
+    if (value !== undefined) env[key] = value;
+  }
+  return env;
 }
 
 function extractPdfTextPreview(bytes: Uint8Array): { pages: string[]; imageRefs: number; caveats: string[] } {

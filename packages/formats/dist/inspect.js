@@ -197,12 +197,12 @@ async function inspectXlsx(input, options) {
 async function inspectPdf(input, options) {
     const pdf = await PDFDocument.load(input.bytes, { ignoreEncryption: true });
     const extractedText = extractPdfTextPreview(input.bytes);
-    const ocr = options.ocr && !extractedText.pages.some(Boolean)
+    const ocr = options.ocr && extractedText.pages.some((pageText) => !pageText)
         ? options.config?.security.externalProcess === "allow" && options.config.security.renderers === "enabled"
             ? await tryOcrPdf(input.path, pdf.getPageCount())
             : { ok: false, engine: "tesseract", message: "OCR requires security.externalProcess=allow and security.renderers=enabled.", pages: [] }
         : undefined;
-    const textPages = ocr?.pages?.length ? ocr.pages : extractedText.pages;
+    const textPages = extractedText.pages.map((pageText, index) => pageText || ocr?.pages?.[index] || "");
     const summaryDepth = options.depth === "summary";
     const pages = pdf.getPages().map((page, index) => {
         const size = page.getSize();
@@ -218,7 +218,7 @@ async function inspectPdf(input, options) {
     });
     return {
         schema: "officegen.inspect.result@1.2",
-        trusted: trustedMeta("officegen.inspect.result@1.2", input, { pages: pages.length, textBlocks: extractedText.pages.filter(Boolean).length, images: extractedText.imageRefs }, [
+        trusted: trustedMeta("officegen.inspect.result@1.2", input, { pages: pages.length, textBlocks: textPages.filter(Boolean).length, images: extractedText.imageRefs }, [
             "PDF text extraction is best-effort and does not replace OCR or native renderer output.",
             ...(ocr ? [`OCR ${ocr.ok ? "completed" : "not available"}: ${ocr.message}`] : []),
             ...(extractedText.caveats.length ? extractedText.caveats : [])
@@ -309,7 +309,7 @@ async function firstRunnable(commands) {
 }
 function runCapture(command, args, timeoutMs) {
     return new Promise((resolve) => {
-        const child = spawn(command, args, { windowsHide: true });
+        const child = spawn(command, args, { windowsHide: true, env: safeExternalEnv() });
         let stdout = "";
         let stderr = "";
         const timer = setTimeout(() => {
@@ -327,6 +327,32 @@ function runCapture(command, args, timeoutMs) {
             resolve({ ok: code === 0, code, stdout, stderr });
         });
     });
+}
+function safeExternalEnv() {
+    const allowed = [
+        "PATHEXT",
+        "ComSpec",
+        "SystemRoot",
+        "WINDIR",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "HOME",
+        "USERPROFILE",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE"
+    ];
+    const env = {};
+    const pathValue = process.platform === "win32" ? (process.env.Path ?? process.env.PATH) : (process.env.PATH ?? process.env.Path);
+    if (pathValue !== undefined)
+        env[process.platform === "win32" ? "Path" : "PATH"] = pathValue;
+    for (const key of allowed) {
+        const value = process.env[key];
+        if (value !== undefined)
+            env[key] = value;
+    }
+    return env;
 }
 function extractPdfTextPreview(bytes) {
     const raw = Buffer.from(bytes).toString("latin1");

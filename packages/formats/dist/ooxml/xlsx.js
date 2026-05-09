@@ -93,7 +93,7 @@ export async function inspectSheets(zip) {
             sourcePath: path,
             xmlPath: path,
             selectorHints: { slicerPath: path },
-            editableOps: ["xlsx.slicer.inspect"],
+            editableOps: [],
             trust: { level: "untrusted", reason: "document-content" },
             untrusted: true
         });
@@ -131,6 +131,8 @@ export function insertRows(xml, rowIndex, rows) {
     }).replace(/\br="([A-Z]+)(\d+)"/g, (_match, col, row) => {
         const rowNo = Number(row);
         return `r="${col}${rowNo >= rowIndex ? rowNo + rows.length : rowNo}"`;
+    }).replace(/<f\b([^>]*)>([\s\S]*?)<\/f>/g, (_match, attrs, formula) => {
+        return `<f${attrs}>${shiftFormulaRows(formula, rowIndex, rows.length)}</f>`;
     });
     const rowXml = rows
         .map((row, offset) => {
@@ -140,6 +142,14 @@ export function insertRows(xml, rowIndex, rows) {
         .join("");
     const next = shifted.replace(/<\/sheetData>/, `${rowXml}</sheetData>`);
     return { changed: next !== xml, xml: next };
+}
+function shiftFormulaRows(formula, rowIndex, delta) {
+    return formula.replace(/(\$?[A-Z]{1,3})(\$?)(\d+)/g, (_match, col, absolute, row) => {
+        const rowNo = Number(row);
+        if (!Number.isFinite(rowNo) || rowNo < rowIndex)
+            return `${col}${absolute}${row}`;
+        return `${col}${absolute}${rowNo + delta}`;
+    });
 }
 export function appendRows(xml, rows) {
     const existing = extractWorksheetCells(xml);

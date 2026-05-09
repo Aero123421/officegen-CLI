@@ -80,6 +80,14 @@ describe("redaction", () => {
     expect(result.value.outPath).toBe("<project>/out.svg");
   });
 
+  it("does not corrupt relative OOXML relationship targets while redacting absolute POSIX paths", () => {
+    const config = getBuiltinConfig("substrate");
+    const result = redactPathsInText("../media/missing.png and /srv/build/private/report.docx", config);
+
+    expect(result.value).toContain("../media/missing.png");
+    expect(result.value).toContain("<absolutePath>");
+  });
+
   it("still redacts ordinary content and generic markup strings", () => {
     const config = getBuiltinConfig("substrate");
     config.paths.projectRoot = "D:\\codebase\\tool\\Officegen-CLI";

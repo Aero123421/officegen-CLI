@@ -393,9 +393,11 @@ async function applyOfficeOperation(
     if (target.kind !== "chart" || !target.xmlPath) throw new Error("SELECTOR_NOT_FOUND: selected object is not an XLSX chart.");
     const points = chartOp.categories.map((category, pointIndex) => ({ category, value: Number(chartOp.values[pointIndex] ?? 0) }));
     const xml = (await readZipText(zip, target.xmlPath)) ?? "";
+    assertSingleSeriesChart(xml, "xlsx.chart.setData");
     const next = replaceChartCaches(xml, chartOp.seriesName ?? target.label ?? "Series 1", points);
     if (next !== xml) zip.file(target.xmlPath, next);
-    return next !== xml;
+    const workbookChanged = await updateXlsxChartBackingRanges(zip, xml, chartOp.seriesName ?? target.label ?? "Series 1", points);
+    return next !== xml || workbookChanged;
   }
   if (format === "xlsx" && op === "xlsx.pivot.refreshDefinition") {
     const pivotOp = operation as { selector: EditSelector };
@@ -511,6 +513,7 @@ async function editPptxUpdateChartData(
     throw new Error("SCHEMA_INVALID: pptx.updateChartData requires categories and values arrays with equal length.");
   }
   const xml = (await readZipText(zip, chartPath)) ?? "";
+  assertSingleSeriesChart(xml, "pptx.updateChartData");
   const points = operation.categories.map((category, index) => ({
     category,
     value: Number(operation.values[index] ?? 0)
@@ -577,7 +580,10 @@ async function editDocxAddComment(zip: Awaited<ReturnType<typeof loadZip>>, oper
   zip.file("word/comments.xml", nextCommentsXml);
   const xml = (await readZipText(zip, target.sourcePath)) ?? "";
   const ordinal = Number(target.selectorHints?.paragraph ?? stableOrdinal(target.stableObjectId));
-  const next = replaceNthParagraph(xml, ordinal, (paragraph) => paragraph.replace(/<\/w:p>$/, `<w:r><w:commentReference w:id="${nextId}"/></w:r></w:p>`));
+  const next = replaceNthParagraph(xml, ordinal, (paragraph) => {
+    const withStart = paragraph.replace(/(<w:p\b[^>]*>)/, `$1<w:commentRangeStart w:id="${nextId}"/>`);
+    return withStart.replace(/<\/w:p>$/, `<w:commentRangeEnd w:id="${nextId}"/><w:r><w:commentReference w:id="${nextId}"/></w:r></w:p>`);
+  });
   if (next.changed) zip.file(target.sourcePath, next.xml);
   return next.changed;
 }
@@ -587,7 +593,8 @@ async function editDocxAddRedline(zip: Awaited<ReturnType<typeof loadZip>>, oper
   if (!target.sourcePath) throw new Error("SELECTOR_NOT_FOUND: selected DOCX paragraph has no sourcePath.");
   const xml = (await readZipText(zip, target.sourcePath)) ?? "";
   const ordinal = Number(target.selectorHints?.paragraph ?? stableOrdinal(target.stableObjectId));
-  const next = replaceNthParagraph(xml, ordinal, (paragraph) => `${paragraph}${insertedParagraphXml(operation.text, operation.author ?? "officegen")}`);
+  const nextId = nextDocxRevisionId(xml);
+  const next = replaceNthParagraph(xml, ordinal, (paragraph) => `${paragraph}${insertedParagraphXml(operation.text, operation.author ?? "officegen", new Date(), nextId)}`);
   if (next.changed) zip.file(target.sourcePath, next.xml);
   return next.changed;
 }
@@ -727,7 +734,7 @@ function replaceChartCaches(xml: string, seriesName: string, points: Array<{ cat
   const numberCache = `<c:numCache><c:formatCode>General</c:formatCode><c:ptCount val="${pointCount}"/>${points.map((point, index) => `<c:pt idx="${index}"><c:v>${Number.isFinite(point.value) ? point.value : 0}</c:v></c:pt>`).join("")}</c:numCache>`;
   let next = xml.replace(/<c:tx>\s*<c:strRef>[\s\S]*?<\/c:strRef>\s*<\/c:tx>|<c:tx>\s*<c:v>[\s\S]*?<\/c:v>\s*<\/c:tx>/, `<c:tx><c:v>${escapeXmlText(seriesName)}</c:v></c:tx>`);
   next = next.replace(/<c:cat>[\s\S]*?<\/c:cat>/, (cat) => {
-    let updated = cat.replace(/<c:f>[^<]*<\/c:f>/, `<c:f>Sheet1!$A$2:$A$${pointCount + 1}</c:f>`);
+    let updated = cat.replace(/<c:f>([^<]*)<\/c:f>/, (_match, formula: string) => `<c:f>${escapeXmlText(updateChartRangeFormula(formula, pointCount, "A"))}</c:f>`);
     if (/<c:multiLvlStrCache>[\s\S]*?<\/c:multiLvlStrCache>/.test(updated)) {
       updated = updated.replace(/<c:multiLvlStrCache>[\s\S]*?<\/c:multiLvlStrCache>/, multiLevelStringCache);
     } else if (/<c:strCache>[\s\S]*?<\/c:strCache>/.test(updated)) {
@@ -736,9 +743,81 @@ function replaceChartCaches(xml: string, seriesName: string, points: Array<{ cat
     return updated;
   });
   next = next.replace(/<c:val>[\s\S]*?<\/c:val>/, (val) => val
-    .replace(/<c:f>[^<]*<\/c:f>/, `<c:f>Sheet1!$B$2:$B$${pointCount + 1}</c:f>`)
+    .replace(/<c:f>([^<]*)<\/c:f>/, (_match, formula: string) => `<c:f>${escapeXmlText(updateChartRangeFormula(formula, pointCount, "B"))}</c:f>`)
     .replace(/<c:numCache>[\s\S]*?<\/c:numCache>/, numberCache));
   return next;
+}
+
+function assertSingleSeriesChart(xml: string, operation: string): void {
+  const seriesCount = (xml.match(/<c:ser\b/g) ?? []).length;
+  if (seriesCount > 1) {
+    throw new Error(`SCHEMA_INVALID: ${operation} currently supports single-series charts only; refusing partial multi-series update.`);
+  }
+}
+
+async function updateXlsxChartBackingRanges(
+  zip: Awaited<ReturnType<typeof loadZip>>,
+  chartXml: string,
+  seriesName: string,
+  points: Array<{ category: string; value: number }>
+): Promise<boolean> {
+  const catFormula = /<c:cat>[\s\S]*?<c:f>([^<]+)<\/c:f>[\s\S]*?<\/c:cat>/.exec(chartXml)?.[1];
+  const valFormula = /<c:val>[\s\S]*?<c:f>([^<]+)<\/c:f>[\s\S]*?<\/c:val>/.exec(chartXml)?.[1];
+  const categoryRange = catFormula ? parseA1RangeFormula(catFormula) : undefined;
+  const valueRange = valFormula ? parseA1RangeFormula(valFormula) : undefined;
+  if (!categoryRange || !valueRange || categoryRange.sheet !== valueRange.sheet) {
+    throw new Error("SCHEMA_INVALID: xlsx.chart.setData cannot resolve chart backing worksheet ranges.");
+  }
+  const sheetNumber = worksheetNumberFromName(categoryRange.sheet);
+  const path = sheetPath(sheetNumber);
+  const xml = await readZipText(zip, path);
+  if (!xml) throw new Error(`SELECTOR_NOT_FOUND: chart backing worksheet ${categoryRange.sheet} was not found.`);
+  let next = xml;
+  const valueHeaderRow = Math.max(1, valueRange.startRow - 1);
+  next = setCell(next, `${valueRange.startCol}${valueHeaderRow}`, seriesName).xml;
+  for (const [index, point] of points.entries()) {
+    const categoryRow = categoryRange.startRow + index;
+    const valueRow = valueRange.startRow + index;
+    next = setCell(next, `${categoryRange.startCol}${categoryRow}`, point.category).xml;
+    next = setCell(next, `${valueRange.startCol}${valueRow}`, Number.isFinite(point.value) ? point.value : 0).xml;
+  }
+  if (next !== xml) zip.file(path, next);
+  return next !== xml;
+}
+
+function parseA1RangeFormula(formula: string): { sheet: string; startCol: string; startRow: number; endCol: string; endRow: number } | undefined {
+  const normalized = formula.replace(/&apos;/g, "'").trim();
+  const match = /^(?:'([^']+)'|([^!]+))!\$?([A-Z]+)\$?(\d+):\$?([A-Z]+)\$?(\d+)$/i.exec(normalized);
+  if (!match) return undefined;
+  return {
+    sheet: match[1] ?? match[2] ?? "Sheet1",
+    startCol: (match[3] ?? "A").toUpperCase(),
+    startRow: Number(match[4] ?? 1),
+    endCol: (match[5] ?? "A").toUpperCase(),
+    endRow: Number(match[6] ?? 1)
+  };
+}
+
+function updateChartRangeFormula(formula: string, pointCount: number, fallbackColumn: string): string {
+  const range = parseA1RangeFormula(formula);
+  if (!range) return `Sheet1!$${fallbackColumn}$2:$${fallbackColumn}$${pointCount + 1}`;
+  return `${formatSheetName(range.sheet)}!$${range.startCol}$${range.startRow}:$${range.endCol}$${range.startRow + pointCount - 1}`;
+}
+
+function formatSheetName(name: string): string {
+  return /^[A-Za-z_][A-Za-z0-9_.]*$/.test(name) ? name : `'${name.replace(/'/g, "''")}'`;
+}
+
+function worksheetNumberFromName(name: string): number {
+  const match = /(\d+)$/.exec(name.trim());
+  return match ? Number(match[1]) : 1;
+}
+
+function nextDocxRevisionId(xml: string): number {
+  const ids = [...xml.matchAll(/<w:(?:ins|del)\b[^>]*\bw:id="(\d+)"/g)]
+    .map((match) => Number(match[1]))
+    .filter(Number.isFinite);
+  return Math.max(0, ...ids) + 1;
 }
 
 async function updateEmbeddedChartWorkbook(

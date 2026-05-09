@@ -61,8 +61,8 @@ export function replaceOrCreateHeaderFooter(xml, kind, text) {
 export function commentXml(id, author, text, date = new Date()) {
     return `<w:comment w:id="${id}" w:author="${escapeXmlAttr(author)}" w:date="${date.toISOString()}">${paragraphXml(text, "w")}</w:comment>`;
 }
-export function insertedParagraphXml(text, author = "officegen", date = new Date()) {
-    return `<w:p><w:ins w:author="${escapeXmlAttr(author)}" w:date="${date.toISOString()}" w:id="1"><w:r><w:t>${escapeXmlTextLocal(text)}</w:t></w:r></w:ins></w:p>`;
+export function insertedParagraphXml(text, author = "officegen", date = new Date(), revisionId = 1) {
+    return `<w:p><w:ins w:author="${escapeXmlAttr(author)}" w:date="${date.toISOString()}" w:id="${revisionId}"><w:r><w:t>${escapeXmlTextLocal(text)}</w:t></w:r></w:ins></w:p>`;
 }
 function docxPartKind(path) {
     if (/^word\/header/i.test(path))

@@ -1,6 +1,7 @@
 import { inspect } from "./inspect.js";
 import { view } from "./view.js";
 import { exportDocument } from "./export.js";
+import { normalizeInput } from "./shared.js";
 import { PDFDocument } from "pdf-lib";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
@@ -30,7 +31,9 @@ export async function diffDocuments(before, after, options = {}) {
         caveats: [
             visual?.fidelity === "native"
                 ? "Native visual regression compares trusted renderer PDF outputs; fidelity depends on installed renderer filters and fonts."
-                : "Visual diff is based on officegen's approximate SVG/HTML view, not a native Office rasterization.",
+                : visual?.renderer === "pdf-bytes"
+                    ? "PDF visual diff without native renderer compares page-aware PDF byte windows; it avoids zero-content false negatives but is not raster fidelity."
+                    : "Visual diff is based on officegen's approximate SVG/HTML view, not a native Office rasterization.",
             "StableObjectId matching is best-effort across generated files and preserves strongest value for edits within the same document lineage."
         ]
     };
@@ -58,6 +61,8 @@ function semanticDiff(before, after) {
 async function visualDiff(beforeInput, afterInput, before, after, options) {
     if (options.native)
         return nativeVisualDiff(beforeInput, afterInput, options);
+    if (before.trusted.format === "pdf" && after.trusted.format === "pdf")
+        return pdfByteVisualDiff(beforeInput, afterInput, options);
     const beforeView = await view(before, { format: "svg", maxPages: options.maxPages, config: options.config });
     const afterView = await view(after, { format: "svg", maxPages: options.maxPages, config: options.config });
     const pagesCompared = Math.min(beforeView.pages.length, afterView.pages.length);
@@ -76,6 +81,30 @@ async function visualDiff(beforeInput, afterInput, before, after, options) {
         fidelity: "approximate",
         pagesCompared,
         pageScores
+    };
+}
+async function pdfByteVisualDiff(beforeInput, afterInput, options) {
+    const beforeNormalized = await normalizeInput(beforeInput);
+    const afterNormalized = await normalizeInput(afterInput);
+    const beforeDoc = await PDFDocument.load(beforeNormalized.bytes, { ignoreEncryption: true });
+    const afterDoc = await PDFDocument.load(afterNormalized.bytes, { ignoreEncryption: true });
+    const pagesCompared = Math.min(beforeDoc.getPageCount(), afterDoc.getPageCount(), options.maxPages ?? Number.MAX_SAFE_INTEGER);
+    const beforeWindows = byteWindows(beforeNormalized.bytes, pagesCompared);
+    const afterWindows = byteWindows(afterNormalized.bytes, pagesCompared);
+    const pageScores = [];
+    for (let index = 0; index < pagesCompared; index += 1) {
+        pageScores.push({
+            page: index + 1,
+            beforeHash: textHash(beforeWindows[index] ?? ""),
+            afterHash: textHash(afterWindows[index] ?? ""),
+            score: normalizedStringDistance(beforeWindows[index] ?? "", afterWindows[index] ?? "")
+        });
+    }
+    return {
+        fidelity: "approximate",
+        pagesCompared,
+        pageScores,
+        renderer: "pdf-bytes"
     };
 }
 async function nativeVisualDiff(beforeInput, afterInput, options) {
