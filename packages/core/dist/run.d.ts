@@ -1,0 +1,10 @@
+import type { JsonValue, OfficegenConfig, RunFolder, RunManifest } from "./types.js";
+export declare function createRunId(date?: Date): string;
+export declare function getRunFolder(config: OfficegenConfig, runId: string): RunFolder;
+export declare function createEmptyManifest(config: OfficegenConfig, runId: string): RunManifest;
+export declare function createRunFolder(config: OfficegenConfig, runId?: string): Promise<RunFolder>;
+export declare function writeManifest(folder: RunFolder, manifest: RunManifest): Promise<void>;
+export declare function readManifest(folder: RunFolder): Promise<RunManifest>;
+export declare function updateManifest(folder: RunFolder, updater: (manifest: RunManifest) => RunManifest | void): Promise<RunManifest>;
+export declare function appendTrace(folder: RunFolder, record: JsonValue): Promise<void>;
+export declare function sha256File(filePath: string): Promise<string>;

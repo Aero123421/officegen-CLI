@@ -10,7 +10,6 @@
   "scripts": {
     "build": "tsc -b packages/core packages/formats packages/optional packages/cli",
     "clean": "node scripts/clean.mjs",
-    "prepare": "npm run build",
     "test": "vitest run",
     "typecheck": "tsc -b packages/core packages/formats packages/optional packages/cli --pretty false",
     "officegen": "node packages/cli/dist/main.js",

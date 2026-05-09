@@ -1,0 +1,152 @@
+import { makeStableObjectId, readZipText, sortedZipFiles, stableHashId } from "../shared.js";
+import { exactText, localText, preview, xmlAttr } from "./xml.js";
+export async function inspectSheets(zip) {
+    const paths = sortedZipFiles(zip);
+    const sheetPaths = paths.filter((path) => /^xl\/worksheets\/sheet\d+\.xml$/i.test(path)).sort(naturalSort);
+    const sharedStrings = await readSharedStrings(zip);
+    const objectMap = [];
+    const sheets = [];
+    for (const [sheetIndex, sheetPath] of sheetPaths.entries()) {
+        const xml = (await readZipText(zip, sheetPath)) ?? "";
+        const cells = extractWorksheetCells(xml).map((cell) => {
+            const type = xmlAttr(cell.attrs, "t");
+            const raw = exactText(cell.body, "v")[0] ?? "";
+            const inlineText = localText(cell.body, "t").join("");
+            const value = type === "s" ? sharedStrings[Number(raw)] ?? raw : type === "inlineStr" ? inlineText : raw;
+            const sheetScope = `s${String(sheetIndex + 1).padStart(3, "0")}`;
+            const stableObjectId = stableHashId("xlsx", sheetScope, "cell", `${sheetPath}#${cell.ref}`);
+            const bounds = boundsFromRef(cell.ref);
+            const entry = {
+                stableObjectId,
+                kind: "cell",
+                label: cell.ref,
+                text: value,
+                textPreview: preview(value),
+                sourcePath: sheetPath,
+                xmlPath: sheetPath,
+                bounds,
+                bbox: bounds ? [bounds.x, bounds.y, bounds.width, bounds.height] : undefined,
+                selectorHints: { sheet: sheetIndex + 1, cell: cell.ref },
+                trust: { level: "untrusted", reason: "document-content" },
+                untrusted: true
+            };
+            objectMap.push(entry);
+            return { stableObjectId, ref: cell.ref, value, sourcePath: sheetPath, untrusted: true };
+        });
+        sheets.push({
+            stableObjectId: makeStableObjectId("xlsx", "workbook", "sheet", sheetIndex + 1),
+            index: sheetIndex + 1,
+            sourcePath: sheetPath,
+            cells,
+            untrusted: true
+        });
+    }
+    return { sheets, objectMap, sharedStrings };
+}
+export async function readSharedStrings(zip) {
+    const sharedStringsXml = (await readZipText(zip, "xl/sharedStrings.xml")) ?? "";
+    return [...sharedStringsXml.matchAll(/<si\b[\s\S]*?<\/si>/g)].map((match) => localText(match[0], "t").join(""));
+}
+export function setCell(xml, ref, value) {
+    const cells = extractWorksheetCells(xml);
+    const existing = cells.find((cell) => cell.ref.toUpperCase() === ref.toUpperCase());
+    if (existing) {
+        const pattern = new RegExp(`<c\\b[^>]*\\br=["']${escapeRegExp(existing.ref)}["'][^>]*?(?:\\/>|>[\\s\\S]*?<\\/c>)`);
+        const next = xml.replace(pattern, inlineCellXml(existing.ref, value));
+        return { changed: next !== xml, xml: next };
+    }
+    const rowNo = rowFromRef(ref);
+    const rowPattern = new RegExp(`<row\\b([^>]*)\\br=["']${rowNo}["'][^>]*>[\\s\\S]*?<\\/row>`);
+    if (rowPattern.test(xml)) {
+        const next = xml.replace(rowPattern, (row) => row.replace(/<\/row>$/, `${inlineCellXml(ref, value)}</row>`));
+        return { changed: next !== xml, xml: next };
+    }
+    const rowXml = `<row r="${rowNo}">${inlineCellXml(ref, value)}</row>`;
+    const next = xml.replace(/<\/sheetData>/, `${rowXml}</sheetData>`);
+    return { changed: next !== xml, xml: next };
+}
+export function insertRows(xml, rowIndex, rows) {
+    if (!Number.isInteger(rowIndex) || rowIndex < 1 || !rows.length)
+        return { changed: false, xml };
+    const shifted = xml.replace(/(<row\b[^>]*\br=")(\d+)("[^>]*>[\s\S]*?<\/row>)/g, (_match, open, row, close) => {
+        const rowNo = Number(row);
+        return `${open}${rowNo >= rowIndex ? rowNo + rows.length : rowNo}${close}`;
+    }).replace(/\br="([A-Z]+)(\d+)"/g, (_match, col, row) => {
+        const rowNo = Number(row);
+        return `r="${col}${rowNo >= rowIndex ? rowNo + rows.length : rowNo}"`;
+    });
+    const rowXml = rows
+        .map((row, offset) => {
+        const rowNo = rowIndex + offset;
+        return `<row r="${rowNo}">${row.map((value, index) => inlineCellXml(`${columnName(index + 1)}${rowNo}`, String(value ?? ""))).join("")}</row>`;
+    })
+        .join("");
+    const next = shifted.replace(/<\/sheetData>/, `${rowXml}</sheetData>`);
+    return { changed: next !== xml, xml: next };
+}
+export function extractWorksheetCells(xml) {
+    const rows = [...xml.matchAll(/<row\b([^>]*)>([\s\S]*?)<\/row>/g)];
+    if (!rows.length)
+        return extractCellTags(xml, 1);
+    return rows.flatMap((rowMatch, rowIndex) => {
+        const rowAttrs = rowMatch[1] ?? "";
+        const rowBody = rowMatch[2] ?? "";
+        const rowNumber = Number(xmlAttr(rowAttrs, "r") ?? rowIndex + 1);
+        return extractCellTags(rowBody, Number.isFinite(rowNumber) && rowNumber > 0 ? rowNumber : rowIndex + 1);
+    });
+}
+export function sheetPath(index) {
+    return `xl/worksheets/sheet${index && index > 0 ? index : 1}.xml`;
+}
+function extractCellTags(xml, rowNumber) {
+    let ordinalInRow = 0;
+    return [...xml.matchAll(/<c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g)].map((match) => {
+        ordinalInRow += 1;
+        const attrs = match[1] ?? "";
+        return {
+            attrs,
+            body: match[2] ?? "",
+            ref: xmlAttr(attrs, "r") ?? `${columnName(ordinalInRow)}${rowNumber}`
+        };
+    });
+}
+function inlineCellXml(ref, value) {
+    return `<c r="${ref}" t="inlineStr"><is><t>${escapeXmlText(value)}</t></is></c>`;
+}
+function boundsFromRef(ref) {
+    const match = /^([A-Z]+)(\d+)$/i.exec(ref);
+    if (!match)
+        return undefined;
+    const col = columnIndex(match[1] ?? "A");
+    const row = Number(match[2]);
+    return { x: 32 + (col - 1) * 120, y: 48 + (row - 1) * 32, width: 120, height: 32 };
+}
+function columnIndex(name) {
+    let value = 0;
+    for (const char of name.toUpperCase())
+        value = value * 26 + (char.charCodeAt(0) - 64);
+    return value || 1;
+}
+function rowFromRef(ref) {
+    return Number(/\d+/.exec(ref)?.[0] ?? 1);
+}
+function columnName(index) {
+    let value = index;
+    let name = "";
+    while (value > 0) {
+        value -= 1;
+        name = String.fromCharCode(65 + (value % 26)) + name;
+        value = Math.floor(value / 26);
+    }
+    return name || "A";
+}
+function escapeXmlText(value) {
+    return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+function escapeRegExp(value) {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function naturalSort(a, b) {
+    return a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" });
+}
+//# sourceMappingURL=xlsx.js.map
