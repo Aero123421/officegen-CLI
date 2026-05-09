@@ -19,7 +19,7 @@ npm install -g github:Aero123421/officegen-CLI
 For tagged releases, GitHub Actions also publishes a checked npm tarball. This avoids git dependency preparation entirely:
 
 ```bash
-npm install -g https://github.com/Aero123421/officegen-CLI/releases/download/v1.2.7/officegen-v1.2.7.tgz
+npm install -g https://github.com/Aero123421/officegen-CLI/releases/download/v1.2.8/officegen-v1.2.8.tgz
 ```
 
 Check that it works:
@@ -215,7 +215,7 @@ Use `--json` for machine-readable output. Responses use the v1.2 envelope shape:
   "ok": true,
   "command": "capabilities",
   "runId": "...",
-  "cliVersion": "1.2.7",
+  "cliVersion": "1.2.8",
   "capabilitiesHash": "sha256:...",
   "pathsRedacted": true,
   "result": {},
@@ -278,7 +278,7 @@ Version bump all managed release files:
 ```bash
 npm run version:bump -- patch
 # or: npm run version:bump -- minor
-# or: npm run version:bump -- 1.2.7
+# or: npm run version:bump -- 1.2.8
 npm run version:check
 ```
 
