@@ -271,6 +271,17 @@ npm pack --dry-run
 npm run pack:smoke
 ```
 
+Version bump all managed release files:
+
+```bash
+npm run version:bump -- patch
+# or: npm run version:bump -- minor
+# or: npm run version:bump -- 1.2.7
+npm run version:check
+```
+
+The version bump command updates the root/workspace package manifests, `package-lock.json`, `OFFICEGEN_CLI_VERSION`, and README release examples together.
+
 GitHub Actions run CI on Linux and Windows, CodeQL analysis, and tagged release packaging. A release is created from a `vX.Y.Z` tag or the manual Release workflow; the workflow uploads `officegen-vX.Y.Z.tgz` and its `.sha256`.
 
 Clean generated build output:

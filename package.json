@@ -17,7 +17,9 @@
     "typecheck": "tsc -b packages/core packages/formats packages/optional packages/cli --pretty false",
     "officegen": "node packages/cli/dist/main.js",
     "binary:smoke": "node scripts/binary-smoke.mjs",
-    "pack:smoke": "node scripts/pack-smoke.mjs"
+    "pack:smoke": "node scripts/pack-smoke.mjs",
+    "version:bump": "node scripts/version-bump.mjs",
+    "version:check": "node scripts/version-bump.mjs --check"
   },
   "bin": {
     "officegen": "packages/cli/dist/main.js"
