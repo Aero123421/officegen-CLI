@@ -15,9 +15,10 @@ const defaultSpec = process.env.OFFICEGEN_GITHUB_INSTALL_SPEC ?? (remote
   : pathToFileURL(cwd).href);
 try {
   const npmCli = process.env.npm_execpath;
+  const installArgs = ["install", "-g", defaultSpec, "--prefix", temp, "--install-links"];
   const install = npmCli
-    ? spawnSync(process.execPath, [npmCli, "install", "-g", defaultSpec, "--prefix", temp], { stdio: "inherit", shell: false })
-    : spawnSync("npm", ["install", "-g", defaultSpec, "--prefix", temp], {
+    ? spawnSync(process.execPath, [npmCli, ...installArgs], { stdio: "inherit", shell: false })
+    : spawnSync("npm", installArgs, {
     stdio: "inherit",
     shell: process.platform === "win32"
       });
