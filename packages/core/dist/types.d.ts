@@ -1,5 +1,5 @@
 export declare const OFFICEGEN_SCHEMA_VERSION = "1.2";
-export declare const OFFICEGEN_CLI_VERSION = "1.2.6";
+export declare const OFFICEGEN_CLI_VERSION = "1.2.7";
 export declare const SCHEMA_REGISTRY_VERSION = "1.2.0";
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | {
