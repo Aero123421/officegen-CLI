@@ -19,7 +19,7 @@ npm install -g github:Aero123421/officegen-CLI
 For tagged releases, GitHub Actions also publishes a checked npm tarball. This avoids git dependency preparation entirely:
 
 ```bash
-npm install -g https://github.com/Aero123421/officegen-CLI/releases/download/v1.2.5/officegen-v1.2.5.tgz
+npm install -g https://github.com/Aero123421/officegen-CLI/releases/download/v1.2.6/officegen-v1.2.6.tgz
 ```
 
 Check that it works:
@@ -213,7 +213,7 @@ Use `--json` for machine-readable output. Responses use the v1.2 envelope shape:
   "ok": true,
   "command": "capabilities",
   "runId": "...",
-  "cliVersion": "1.2.5",
+  "cliVersion": "1.2.6",
   "capabilitiesHash": "sha256:...",
   "pathsRedacted": true,
   "result": {},
