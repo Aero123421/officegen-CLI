@@ -58,6 +58,10 @@ try {
     command: "officegen capabilities --json"
   }, null, 2));
 } finally {
-  await rm(prefix, { recursive: true, force: true });
+  if (process.platform === "win32" && process.env.CI) {
+    console.warn(`Skipping recursive cleanup on Windows CI: ${prefix}`);
+  } else {
+    await rm(prefix, { recursive: true, force: true });
+  }
   if (tarball) await rm(path.resolve(tarball), { force: true });
 }
