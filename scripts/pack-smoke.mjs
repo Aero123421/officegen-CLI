@@ -34,7 +34,7 @@ try {
   tarball = run(npm, ["pack", "--silent"], { capture: true }).trim().split(/\r?\n/).at(-1);
   if (!tarball) throw new Error("npm pack did not return a tarball path.");
 
-  run(npm, ["install", "--prefix", prefix, path.resolve(tarball), "--ignore-scripts=false", "--no-audit", "--no-fund"]);
+  run(npm, ["install", "--prefix", prefix, path.resolve(tarball), "--ignore-scripts", "--no-audit", "--no-fund"]);
 
   const version = run(npxOfficegen(prefix), ["--version"], { capture: true }).trim();
   const manifest = JSON.parse(await readFile(path.join(prefix, "node_modules", "officegen", "package.json"), "utf8"));
