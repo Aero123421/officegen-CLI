@@ -1,67 +1,40 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-const replacements = [
-  {
-    file: "packages/cli/dist/program.js",
-    from: /"@officegen\/core"/g,
-    to: "\"../../core/dist/index.js\""
-  },
-  {
-    file: "packages/cli/dist/commands/register.js",
-    from: /"@officegen\/core"/g,
-    to: "\"../../../core/dist/index.js\""
-  },
-  {
-    file: "packages/cli/dist/commands/payloads.js",
-    from: /"@officegen\/core"/g,
-    to: "\"../../../core/dist/index.js\""
-  },
-  {
-    file: "packages/cli/dist/commands/payloads.js",
-    from: /"@officegen\/formats"/g,
-    to: "\"../../../formats/dist/index.js\""
-  },
-  {
-    file: "packages/cli/dist/commands/payloads.js",
-    from: /"@officegen\/optional"/g,
-    to: "\"../../../optional/dist/index.js\""
-  },
-  {
-    file: "packages/cli/dist/shared/context.js",
-    from: /"@officegen\/core"/g,
-    to: "\"../../../core/dist/index.js\""
-  },
-  {
-    file: "packages/cli/dist/shared/envelope.js",
-    from: /"@officegen\/core"/g,
-    to: "\"../../../core/dist/index.js\""
-  },
-  {
-    file: "packages/cli/dist/shared/io.js",
-    from: /"@officegen\/core"/g,
-    to: "\"../../../core/dist/index.js\""
-  },
-  {
-    file: "packages/cli/dist/shared/io.js",
-    from: /"@officegen\/optional"/g,
-    to: "\"../../../optional/dist/index.js\""
-  },
-  {
-    file: "packages/formats/dist/shared.js",
-    from: /"@officegen\/core"/g,
-    to: "\"../../core/dist/index.js\""
-  },
-  {
-    file: "packages/optional/dist/design.js",
-    from: /"@officegen\/formats"/g,
-    to: "\"../../formats/dist/index.js\""
-  }
-];
+const root = process.cwd();
+const distRoots = ["packages/cli/dist", "packages/formats/dist", "packages/optional/dist"];
+const targets = {
+  "@officegen/core": path.resolve(root, "packages/core/dist/index.js"),
+  "@officegen/formats": path.resolve(root, "packages/formats/dist/index.js"),
+  "@officegen/optional": path.resolve(root, "packages/optional/dist/index.js")
+};
 
-for (const replacement of replacements) {
-  const filePath = path.resolve(replacement.file);
-  const before = await readFile(filePath, "utf8");
-  const after = before.replace(replacement.from, replacement.to);
-  if (after !== before) await writeFile(filePath, after, "utf8");
+for (const distRoot of distRoots) {
+  for (const file of await listJsFiles(path.resolve(root, distRoot))) {
+    const before = await readFile(file, "utf8");
+    let after = before;
+    for (const [specifier, target] of Object.entries(targets)) {
+      after = after.replaceAll(JSON.stringify(specifier), JSON.stringify(relativeModuleSpecifier(path.dirname(file), target)));
+    }
+    if (after !== before) await writeFile(file, after, "utf8");
+  }
+}
+
+async function listJsFiles(directory) {
+  const entries = await readdir(directory, { withFileTypes: true });
+  const files = [];
+  for (const entry of entries) {
+    const fullPath = path.join(directory, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...await listJsFiles(fullPath));
+    } else if (entry.isFile() && entry.name.endsWith(".js") && !entry.name.endsWith(".test.js")) {
+      files.push(fullPath);
+    }
+  }
+  return files;
+}
+
+function relativeModuleSpecifier(fromDir, target) {
+  const relative = path.relative(fromDir, target).replace(/\\/g, "/");
+  return relative.startsWith(".") ? relative : `./${relative}`;
 }

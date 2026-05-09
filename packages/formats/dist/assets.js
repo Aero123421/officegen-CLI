@@ -17,7 +17,7 @@ export async function inspectAsset(input) {
 }
 export async function extractAssets(input, options = {}) {
     const normalized = await normalizeInput(input, "unknown");
-    const zip = await loadZip(normalized);
+    const zip = await loadZip(normalized, { zipSafety: { config: options.config } });
     const mediaPrefix = normalized.format === "pptx" ? "ppt/media/" : normalized.format === "docx" ? "word/media/" : normalized.format === "xlsx" ? "xl/media/" : "";
     if (!mediaPrefix)
         throw new Error(`Unsupported asset extraction format: ${normalized.format}`);
@@ -50,7 +50,7 @@ export async function extractAssets(input, options = {}) {
 }
 export async function replaceAsset(input, options) {
     const normalized = await normalizeInput(input, "unknown");
-    const zip = await loadZip(normalized);
+    const zip = await loadZip(normalized, { zipSafety: { config: options.config } });
     const target = zip.file(options.assetPath);
     if (!target)
         throw new Error(`Asset path not found: ${options.assetPath}`);

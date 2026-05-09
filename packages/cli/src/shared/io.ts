@@ -23,6 +23,22 @@ export function resolveCliPath(context: RuntimeContext, inputPath: string): stri
   return path.isAbsolute(inputPath) ? inputPath : path.resolve(context.cwd, inputPath);
 }
 
+export async function validateInputPath(context: RuntimeContext, inputPath: string): Promise<string> {
+  try {
+    const validated = await validatePath(context.config, {
+      kind: "input",
+      path: inputPath
+    });
+    await enforceMaxInputFileBytes(context, validated.absolutePath, inputPath);
+    return validated.absolutePath;
+  } catch (error) {
+    if (error instanceof OfficegenError) {
+      throw pathFailure(context, error);
+    }
+    throw error;
+  }
+}
+
 export async function validatedOutOption(context: RuntimeContext): Promise<string | undefined> {
   const out = optionValue(context.argv, "--out");
   return out ? validateOutputPath(context, out) : undefined;
@@ -55,31 +71,35 @@ export async function validateOutputPath(
   }
 }
 
-export async function readJson(filePath: string): Promise<unknown> {
-  return JSON.parse(await fs.readFile(filePath, "utf8"));
+export async function readInputFile(context: RuntimeContext, inputPath: string): Promise<Buffer> {
+  return fs.readFile(await validateInputPath(context, inputPath));
 }
 
-export async function readJsonIfPresent(filePath: string): Promise<unknown> {
-  if (!filePath || filePath === path.resolve("")) return {};
+export async function readInputText(context: RuntimeContext, inputPath: string): Promise<string> {
+  return fs.readFile(await validateInputPath(context, inputPath), "utf8");
+}
+
+export async function readInputJson(context: RuntimeContext, inputPath: string): Promise<unknown> {
   try {
-    return await readJson(filePath);
+    return JSON.parse(await readInputText(context, inputPath));
   } catch (error) {
-    if (isNodeError(error) && error.code === "ENOENT") return {};
+    if (error instanceof SyntaxError) {
+      throw new CliFailure({
+        code: "INPUT_PARSE_ERROR",
+        category: "input",
+        severity: "error",
+        command: commandFromArgv(context.argv),
+        message: `Input JSON could not be parsed: ${error.message}`,
+        details: { input: inputPath }
+      }, 3);
+    }
     throw error;
   }
 }
 
-export async function copyJsonIfPresent(cwd: string, input: string, out: string): Promise<void> {
-  try {
-    const inputPath = path.resolve(cwd, input);
-    const outPath = path.resolve(cwd, out);
-    const raw = await fs.readFile(inputPath, "utf8");
-    JSON.parse(raw);
-    await fs.mkdir(path.dirname(outPath), { recursive: true });
-    await fs.writeFile(outPath, raw.endsWith("\n") ? raw : `${raw}\n`, "utf8");
-  } catch {
-    return;
-  }
+export async function readInputJsonIfPresent(context: RuntimeContext, inputPath: string | undefined): Promise<unknown> {
+  if (!inputPath) return {};
+  return readInputJson(context, inputPath);
 }
 
 export function normalizeEditOperations(raw: unknown): EditOperation[] {
@@ -153,8 +173,34 @@ export function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && "code" in error;
 }
 
+async function enforceMaxInputFileBytes(context: RuntimeContext, filePath: string, inputPath: string): Promise<void> {
+  const stats = await fs.stat(filePath);
+  const maxInputFileBytes = context.config.security.untrustedInput.maxInputFileBytes;
+  if (stats.size > maxInputFileBytes) {
+    throw new CliFailure({
+      code: "SECURITY_INPUT_TOO_LARGE",
+      category: "security",
+      severity: "error",
+      command: commandFromArgv(context.argv),
+      message: `Input file exceeds maxInputFileBytes (${stats.size} > ${maxInputFileBytes}).`,
+      details: { input: inputPath, size: stats.size, maxInputFileBytes }
+    }, 4);
+  }
+}
+
+function pathFailure(context: RuntimeContext, error: OfficegenError): CliFailure {
+  return new CliFailure({
+    code: error.payload.code,
+    category: error.payload.category,
+    severity: error.payload.severity,
+    command: commandFromArgv(context.argv),
+    message: userFacingPathMessage(error.payload.code, error.payload.message),
+    details: asRecord(error.payload.details)
+  }, error.payload.code.startsWith("SECURITY_") ? 4 : 3);
+}
+
 function userFacingPathMessage(code: string, fallback: string): string {
-  if (code === "SECURITY_PATH_OUTSIDE_ROOT") return "Output path must stay inside the project root.";
+  if (code === "SECURITY_PATH_OUTSIDE_ROOT") return "Path must stay inside the configured trusted roots.";
   if (code === "SECURITY_ABSOLUTE_OUT_DENIED") return "Absolute output paths are denied by default.";
   if (code === "SECURITY_SYMLINK_DENIED") return "Refusing to write through a symlink.";
   if (code === "SECURITY_HARDLINK_DENIED") return "Refusing to overwrite a hardlinked file.";

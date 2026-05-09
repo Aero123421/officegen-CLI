@@ -2,6 +2,7 @@ import { inspect, type InspectResult } from "./inspect.js";
 import {
   AGENT_UNTRUSTED_INSTRUCTION,
   type InputLike,
+  type OfficegenConfig,
   type ObjectMapEntry,
   escapeHtml,
   escapeXml,
@@ -11,6 +12,7 @@ import {
 export interface ViewOptions {
   format?: "svg" | "html";
   maxPages?: number;
+  config?: OfficegenConfig;
 }
 
 export interface ViewPage {
@@ -36,7 +38,7 @@ export interface ViewResult {
 }
 
 export async function view(input: InputLike | InspectResult, options: ViewOptions = {}): Promise<ViewResult> {
-  const inspected = isInspectResult(input) ? input : await inspect(input, { format: undefined, depth: "shallow" });
+  const inspected = isInspectResult(input) ? input : await inspect(input, { format: undefined, depth: "shallow", config: options.config });
   const pages = toPages(inspected, options);
   return {
     schema: "officegen.view.result@1.2",
@@ -186,4 +188,3 @@ function buildPdfPage(pageInfo: Record<string, unknown>, page: number, format: "
     objectMap
   };
 }
-

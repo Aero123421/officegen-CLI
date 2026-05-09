@@ -1,5 +1,6 @@
 import {
   type InputLike,
+  type OfficegenConfig,
   type ObjectMapEntry,
   getLoadedZipSafetyReport,
   isOfficeFormat,
@@ -52,6 +53,7 @@ export interface EditOptions {
   validateFirst?: boolean;
   idempotencyKey?: string;
   continueOnError?: boolean;
+  config?: OfficegenConfig;
 }
 
 export interface EditSelectorResolution {
@@ -104,7 +106,7 @@ export interface EditResult {
 export async function edit(input: InputLike, operations: EditOperation[], options: EditOptions = {}): Promise<EditResult> {
   const normalized = await normalizeInput(input, options.format ?? "unknown");
   const selectorResult = options.resolveSelectors || options.validateFirst !== false
-    ? await resolveEditSelectorsForNormalized(normalized, operations)
+    ? await resolveEditSelectorsForNormalized(normalized, operations, options.config)
     : undefined;
   const result = isOfficeFormat(normalized.format)
     ? await editOfficeXml(normalized, operations, options, selectorResult)
@@ -123,17 +125,18 @@ export const editDocument = edit;
 export async function resolveEditSelectors(
   input: InputLike,
   operations: EditOperation[],
-  options: Pick<EditOptions, "format"> = {}
+  options: Pick<EditOptions, "format" | "config"> = {}
 ): Promise<ResolveEditSelectorsResult> {
   const normalized = await normalizeInput(input, options.format ?? "unknown");
-  return resolveEditSelectorsForNormalized(normalized, operations);
+  return resolveEditSelectorsForNormalized(normalized, operations, options.config);
 }
 
 async function resolveEditSelectorsForNormalized(
   normalized: Awaited<ReturnType<typeof normalizeInput>>,
-  operations: EditOperation[]
+  operations: EditOperation[],
+  config?: OfficegenConfig
 ): Promise<ResolveEditSelectorsResult> {
-  const inspected = await inspect({ data: normalized.bytes, format: normalized.format });
+  const inspected = await inspect({ data: normalized.bytes, format: normalized.format }, { config });
   const resolutions = operations.flatMap((operation, index) => {
     const selector = selectorForOperation(operation);
     if (!selector) return [];
@@ -165,7 +168,7 @@ async function editOfficeXml(
   options: EditOptions,
   selectorResult: ResolveEditSelectorsResult | undefined
 ): Promise<EditResult> {
-  const zip = await loadZip(input);
+  const zip = await loadZip(input, { zipSafety: { config: options.config } });
   const atomic = options.atomic ?? true;
   const continueOnError = options.continueOnError ?? false;
   const opResults: EditOperationResult[] = [];

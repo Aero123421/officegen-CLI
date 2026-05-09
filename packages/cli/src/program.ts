@@ -27,7 +27,7 @@ export async function runCli(argv: string[], options: RunCliOptions = {}): Promi
   }
 
   if (!topCommand && argv.slice(2).some((arg) => arg.startsWith("-"))) {
-    await parseWithCommander(argv, context, stdout, stderr, now);
+    await parseWithCommanderSafely(argv, context, stdout, stderr, now, commandText);
     return;
   }
 
@@ -37,7 +37,7 @@ export async function runCli(argv: string[], options: RunCliOptions = {}): Promi
   }
 
   if (topCommand.startsWith("-")) {
-    await parseWithCommander(argv, context, stdout, stderr, now);
+    await parseWithCommanderSafely(argv, context, stdout, stderr, now, commandText);
     return;
   }
 
@@ -48,6 +48,23 @@ export async function runCli(argv: string[], options: RunCliOptions = {}): Promi
     return;
   }
 
+  try {
+    await parseWithCommander(argv, context, stdout, stderr, now);
+  } catch (error) {
+    const failure = toCliFailure(error, commandText);
+    process.exitCode = failure.exitCode;
+    writeResult(context, makeErrorEnvelope(context, commandText, failure.payload, now), context.json ? stdout : stderr);
+  }
+}
+
+async function parseWithCommanderSafely(
+  argv: string[],
+  context: RuntimeContext,
+  stdout: (text: string) => void,
+  stderr: (text: string) => void,
+  now: Date,
+  commandText: string
+): Promise<void> {
   try {
     await parseWithCommander(argv, context, stdout, stderr, now);
   } catch (error) {
@@ -92,6 +109,27 @@ function toCliFailure(error: unknown, commandText: string): CliFailure {
     if (isNodeError(error) && error.code === "ENOENT") {
       return new CliFailure({
         code: "INPUT_NOT_FOUND",
+        command: commandText,
+        message: error.message
+      }, 3);
+    }
+    if (error instanceof SyntaxError || /JSON\.parse|Unexpected token|Unexpected end of JSON/i.test(error.message)) {
+      return new CliFailure({
+        code: "INPUT_PARSE_ERROR",
+        command: commandText,
+        message: error.message
+      }, 3);
+    }
+    if (/WinAnsi cannot encode|cannot encode .* with WinAnsi/i.test(error.message)) {
+      return new CliFailure({
+        code: "RENDER_FONT_UNSUPPORTED",
+        command: commandText,
+        message: error.message
+      }, 3);
+    }
+    if (/Unsupported export|unsupported render target/i.test(error.message)) {
+      return new CliFailure({
+        code: "EXPORT_UNSUPPORTED",
         command: commandText,
         message: error.message
       }, 3);

@@ -1,4 +1,4 @@
-import { type InputLike } from "./shared.js";
+import { type InputLike, type OfficegenConfig } from "./shared.js";
 export interface AssetInfo {
     schema: "officegen.asset.info@1.2";
     source?: string;
@@ -12,6 +12,7 @@ export interface AssetInfo {
 export interface ExtractAssetsOptions {
     outDir?: string;
     images?: boolean;
+    config?: OfficegenConfig;
 }
 export interface ExtractAssetsResult {
     schema: "officegen.asset.extract.result@1.2";
@@ -25,6 +26,7 @@ export interface ReplaceAssetOptions {
     out?: string;
     assetPath: string;
     replacement: Uint8Array | Buffer;
+    config?: OfficegenConfig;
 }
 export declare function inspectAsset(input: InputLike): Promise<AssetInfo>;
 export declare function extractAssets(input: InputLike, options?: ExtractAssetsOptions): Promise<ExtractAssetsResult>;

@@ -1,4 +1,4 @@
-import { type InputLike, type ObjectMapEntry } from "./shared.js";
+import { type InputLike, type OfficegenConfig, type ObjectMapEntry } from "./shared.js";
 export type EditSelector = {
     stableObjectId?: string;
     contains?: string;
@@ -94,6 +94,7 @@ export interface EditOptions {
     validateFirst?: boolean;
     idempotencyKey?: string;
     continueOnError?: boolean;
+    config?: OfficegenConfig;
 }
 export interface EditSelectorResolution {
     operationIndex: number;
@@ -140,4 +141,4 @@ export interface EditResult {
 }
 export declare function edit(input: InputLike, operations: EditOperation[], options?: EditOptions): Promise<EditResult>;
 export declare const editDocument: typeof edit;
-export declare function resolveEditSelectors(input: InputLike, operations: EditOperation[], options?: Pick<EditOptions, "format">): Promise<ResolveEditSelectorsResult>;
+export declare function resolveEditSelectors(input: InputLike, operations: EditOperation[], options?: Pick<EditOptions, "format" | "config">): Promise<ResolveEditSelectorsResult>;

@@ -1,14 +1,17 @@
 import { type DocumentIR } from "./render.js";
 import { type InputLike } from "./shared.js";
+import { type OfficegenConfig } from "@officegen/core";
 export type ExportMode = "fast" | "internal" | "native";
 export interface ExportOptions {
     to: "pdf" | "svg" | "html" | "pptx" | "docx" | "xlsx";
     out?: string;
     mode?: ExportMode;
     pages?: number[];
+    config?: OfficegenConfig;
 }
 export interface PdfOperationOptions {
     out?: string;
+    config?: OfficegenConfig;
 }
 export interface ExportResult {
     schema: "officegen.export.result@1.2";

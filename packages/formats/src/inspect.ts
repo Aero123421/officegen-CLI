@@ -8,6 +8,7 @@ import {
   normalizeInput,
   sortedZipFiles,
   trustedMeta,
+  type OfficegenConfig,
   zipSafetyCaveats
 } from "./shared.js";
 import { inspectParagraphs } from "./ooxml/docx.js";
@@ -21,6 +22,7 @@ export interface InspectOptions {
   format?: "pptx" | "docx" | "xlsx" | "pdf" | "unknown";
   depth?: InspectDepth;
   include?: Array<"text" | "assets" | "relationships" | "rawPaths">;
+  config?: OfficegenConfig;
 }
 
 export interface InspectResult extends AgentSeparatedResult<Record<string, unknown>> {
@@ -40,7 +42,7 @@ export const inspectDocument = inspect;
 export const inspectOfficeFile = inspect;
 
 async function inspectPptx(input: Awaited<ReturnType<typeof normalizeInput>>, options: InspectOptions): Promise<InspectResult> {
-  const zip = await loadZip(input);
+  const zip = await loadZip(input, { zipSafety: { config: options.config } });
   const paths = sortedZipFiles(zip);
   const mediaPaths = paths.filter((path) => /^ppt\/media\//i.test(path));
   const { slides, objectMap } = await inspectSlides(zip);
@@ -76,7 +78,7 @@ async function inspectPptx(input: Awaited<ReturnType<typeof normalizeInput>>, op
 }
 
 async function inspectDocx(input: Awaited<ReturnType<typeof normalizeInput>>, options: InspectOptions): Promise<InspectResult> {
-  const zip = await loadZip(input);
+  const zip = await loadZip(input, { zipSafety: { config: options.config } });
   const paths = sortedZipFiles(zip);
   const { paragraphs, objectMap } = await inspectParagraphs(zip);
   const mediaPaths = paths.filter((path) => /^word\/media\//i.test(path));
@@ -112,7 +114,7 @@ async function inspectDocx(input: Awaited<ReturnType<typeof normalizeInput>>, op
 }
 
 async function inspectXlsx(input: Awaited<ReturnType<typeof normalizeInput>>, options: InspectOptions): Promise<InspectResult> {
-  const zip = await loadZip(input);
+  const zip = await loadZip(input, { zipSafety: { config: options.config } });
   const paths = sortedZipFiles(zip);
   const { sheets, objectMap, sharedStrings } = await inspectSheets(zip);
 

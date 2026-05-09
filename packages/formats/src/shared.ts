@@ -1,8 +1,11 @@
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { dirname, extname, basename } from "node:path";
 import { createHash } from "node:crypto";
-import { getBuiltinConfig, inspectZipSafety, type OfficegenConfig, type ZipSafetyReport } from "@officegen/core";
+import { getBuiltinConfig, inspectZipSafety, OfficegenError, type OfficegenConfig, type ZipSafetyReport } from "@officegen/core";
 import JSZip from "jszip";
+import type { PDFFont } from "pdf-lib";
+
+export type { OfficegenConfig } from "@officegen/core";
 
 export type OfficeFormat = "pptx" | "docx" | "xlsx" | "pdf" | "svg" | "html" | "unknown";
 export type Fidelity = "approximate" | "internal" | "near-native" | "native";
@@ -294,6 +297,19 @@ export async function zipToBytes(zip: JSZip): Promise<Uint8Array> {
 
 export function isOfficeFormat(format: OfficeFormat): format is "pptx" | "docx" | "xlsx" {
   return format === "pptx" || format === "docx" || format === "xlsx";
+}
+
+export function assertPdfStandardFontText(value: string, font: PDFFont, context: string): string {
+  try {
+    font.encodeText(value);
+    return value;
+  } catch {
+    throw new OfficegenError(
+      "RENDER_FONT_UNSUPPORTED",
+      "PDF text contains characters that cannot be encoded by the built-in WinAnsi PDF fonts. Use native export with CJK-capable fonts or provide Latin text for direct PDF output.",
+      { context, preview: value.slice(0, 80) }
+    );
+  }
 }
 
 function normalizeZipSafetyOptions(options: boolean | ZipSafetyLoadOptions): Required<Pick<ZipSafetyLoadOptions, "enabled" | "throwOnError">> & ZipSafetyLoadOptions {

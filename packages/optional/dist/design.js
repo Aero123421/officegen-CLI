@@ -1,7 +1,6 @@
 import { readFile } from "node:fs/promises";
-import { createHash } from "node:crypto";
 import path from "node:path";
-import { loadZip } from "../../formats/dist/index.js";
+import { loadZip, stableHashId } from "../../formats/dist/index.js";
 import { featureRoot, hashFile, listJsonFiles, mergePlainObjects, nowIso, readJsonFile, requireFeature, sha256Buffer, sha256Json, slugify, untrustedContentWarning, validation, writeJsonFile, writeTextFile } from "./common.js";
 export async function initDesign(options) {
     requireFeature(options, "design", "design init");
@@ -203,7 +202,7 @@ export async function capturePptxDesignSignals(sourcePath, options = {}) {
             densityScore
         });
         previewCandidates.push({
-            stableObjectId: stableObjectId("slide", slideNo, 1),
+            stableObjectId: stableSlideObjectId(slidePath),
             slide: slideNo,
             title,
             textSnippet: textObjectsOnSlide.map((object) => object.text).filter(Boolean).join(" ").slice(0, 240),
@@ -213,7 +212,7 @@ export async function capturePptxDesignSignals(sourcePath, options = {}) {
             densityScore
         });
         slideSignals.push({
-            stableObjectId: stableObjectId("slide", slideNo, 1),
+            stableObjectId: stableSlideObjectId(slidePath),
             slide: slideNo,
             title,
             slideType,
@@ -432,8 +431,8 @@ function extractSlideObjects(xml, slide, source, slideSize) {
         const text = extractXmlTexts(block, "t").join(" ").replace(/\s+/g, " ").trim();
         objects.push({
             stableObjectId: shapeId
-                ? stableHashObjectId("pptx", `s${String(slide).padStart(3, "0")}`, "shape", `${source}#${shapeId}`)
-                : stableObjectId("shape", slide, shapeOrdinal),
+                ? stableHashId("pptx", slideScope(source), "shape", `${source}#${shapeId}`)
+                : stableObjectId("shape", source, shapeOrdinal),
             slide,
             kind: "shape",
             ordinal: shapeOrdinal,
@@ -450,7 +449,7 @@ function extractSlideObjects(xml, slide, source, slideSize) {
     for (const block of extractBlocks(xml, "p:pic")) {
         pictureOrdinal += 1;
         objects.push({
-            stableObjectId: stableObjectId("picture", slide, pictureOrdinal),
+            stableObjectId: stableObjectId("picture", source, pictureOrdinal),
             slide,
             kind: "picture",
             ordinal: pictureOrdinal,
@@ -466,7 +465,7 @@ function extractSlideObjects(xml, slide, source, slideSize) {
         frameOrdinal += 1;
         const kind = /<c:chart\b/i.test(block) ? "chart" : /<dgm:/i.test(block) ? "diagram" : "diagram";
         objects.push({
-            stableObjectId: stableObjectId(kind, slide, frameOrdinal),
+            stableObjectId: stableObjectId(kind, source, frameOrdinal),
             slide,
             kind,
             ordinal: frameOrdinal,
@@ -478,10 +477,10 @@ function extractSlideObjects(xml, slide, source, slideSize) {
         });
     }
     if (/<c:chart\b/i.test(xml) && !objects.some((object) => object.kind === "chart")) {
-        objects.push({ stableObjectId: stableObjectId("chart", slide, 1), slide, kind: "chart", ordinal: 1, source, colors: [], fontSizes: [] });
+        objects.push({ stableObjectId: stableObjectId("chart", source, 1), slide, kind: "chart", ordinal: 1, source, colors: [], fontSizes: [] });
     }
     if (/<dgm:/i.test(xml) && !objects.some((object) => object.kind === "diagram")) {
-        objects.push({ stableObjectId: stableObjectId("diagram", slide, 1), slide, kind: "diagram", ordinal: 1, source, colors: [], fontSizes: [] });
+        objects.push({ stableObjectId: stableObjectId("diagram", source, 1), slide, kind: "diagram", ordinal: 1, source, colors: [], fontSizes: [] });
     }
     return objects;
 }
@@ -738,11 +737,22 @@ function isGenericShapeName(name) {
 function firstXmlText(xml, localName) {
     return extractXmlTexts(xml, localName)[0];
 }
-function stableObjectId(kind, slide, ordinal) {
-    return `pptx:s${String(slide).padStart(3, "0")}:${kind}:${String(ordinal).padStart(4, "0")}`;
+function stableSlideObjectId(sourcePath) {
+    return stableHashId("pptx", "deck", "slide", sourcePath);
 }
-function stableHashObjectId(format, scope, kind, value) {
-    return `${format}:${scope}:${kind}:${createHash("sha1").update(value).digest("hex").slice(0, 10)}`;
+function stableObjectId(kind, sourcePath, ordinal) {
+    return `pptx:${slideScope(sourcePath)}:${kind}:${String(ordinal).padStart(4, "0")}`;
+}
+function slideScope(sourcePath) {
+    return `slide-${stablePathToken(sourcePath)}`;
+}
+function stablePathToken(sourcePath) {
+    let hash = 2166136261;
+    for (const char of sourcePath.toLowerCase()) {
+        hash ^= char.charCodeAt(0);
+        hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(16).padStart(8, "0").slice(0, 8);
 }
 function naturalSort(left, right) {
     return left.localeCompare(right, undefined, { numeric: true, sensitivity: "base" });

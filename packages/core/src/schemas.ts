@@ -75,7 +75,7 @@ const selectorSchema: JsonObject = {
 };
 
 function editOperationSchemas(): JsonObject[] {
-  const base = {
+  const fields = {
     selector: selectorSchema,
     from: { type: "string" },
     to: { type: "string" },
@@ -98,29 +98,38 @@ function editOperationSchemas(): JsonObject[] {
     width: { type: "number", minimum: 0 },
     height: { type: "number", minimum: 0 }
   };
-  const op = (name: string, required: string[], extra: Record<string, unknown> = {}): JsonObject => ({
+  const pickFields = (allowed: string[]): Record<string, unknown> =>
+    Object.fromEntries(allowed.map((field) => [field, fields[field as keyof typeof fields]]));
+  const op = (
+    name: string,
+    required: string[],
+    allowed: string[],
+    extra: Record<string, unknown> = {},
+    constraints: Record<string, unknown> = {}
+  ): JsonObject => ({
     type: "object",
     required: ["op", ...required],
     additionalProperties: false,
+    ...constraints,
     properties: {
-      ...base,
+      ...pickFields(allowed),
       ...extra,
       op: { const: name }
     }
   });
   return [
-    op("replaceText", ["from", "to"]),
-    op("setText", ["selector", "text"]),
-    op("pptx.duplicateSlide", [], {}),
-    op("pptx.reorderSlides", ["order"]),
-    op("pptx.insertBulletItems", ["selector", "items"]),
-    op("pptx.replaceBulletItems", ["selector", "items"]),
-    op("docx.insertParagraphAfter", ["selector", "text"]),
-    op("xlsx.insertRows", ["rowIndex", "rows"]),
-    op("xlsx.setCell", ["cell", "value"]),
-    op("xlsx.updateTable", ["startCell", "rows"]),
-    op("pdf.textOverlay", ["page", "text", "x", "y"]),
-    op("pdf.annotation", ["page", "text", "x", "y"])
+    op("replaceText", ["from", "to"], ["selector", "from", "to"]),
+    op("setText", ["selector", "text"], ["selector", "text"]),
+    op("pptx.duplicateSlide", [], ["slide", "after", "selector"], {}, { anyOf: [{ required: ["slide"] }, { required: ["selector"] }] }),
+    op("pptx.reorderSlides", ["order"], ["order"]),
+    op("pptx.insertBulletItems", ["selector", "items"], ["selector", "items"]),
+    op("pptx.replaceBulletItems", ["selector", "items"], ["selector", "items"]),
+    op("docx.insertParagraphAfter", ["selector", "text"], ["selector", "text"]),
+    op("xlsx.insertRows", ["rowIndex", "rows"], ["sheet", "rowIndex", "rows"]),
+    op("xlsx.setCell", ["cell", "value"], ["sheet", "cell", "value"]),
+    op("xlsx.updateTable", ["startCell", "rows"], ["sheet", "startCell", "rows"]),
+    op("pdf.textOverlay", ["page", "text", "x", "y"], ["page", "text", "x", "y", "size", "color"]),
+    op("pdf.annotation", ["page", "text", "x", "y"], ["page", "text", "x", "y", "width", "height"])
   ];
 }
 
@@ -129,6 +138,12 @@ const editOpsSchema: JsonObject = {
   type: "object",
   required: ["schema", "target", "ops"],
   additionalProperties: false,
+  allOf: [
+    targetOpsCompatibility("pptx", "^(replaceText|setText|pptx\\.)"),
+    targetOpsCompatibility("docx", "^(replaceText|setText|docx\\.)"),
+    targetOpsCompatibility("xlsx", "^(replaceText|setText|xlsx\\.)"),
+    targetOpsCompatibility("pdf", "^pdf\\.")
+  ],
   properties: {
     schema: schemaField("officegen.edit.ops@1.2"),
     target: { enum: ["pptx", "docx", "xlsx", "pdf"] },
@@ -152,6 +167,29 @@ const editOpsSchema: JsonObject = {
   }
 };
 
+function targetOpsCompatibility(target: string, pattern: string): JsonObject {
+  return {
+    if: {
+      properties: { target: { const: target } },
+      required: ["target"]
+    },
+    then: {
+      properties: {
+        ops: {
+          type: "array",
+          items: {
+            type: "object",
+            required: ["op"],
+            properties: {
+              op: { type: "string", pattern }
+            }
+          }
+        }
+      }
+    }
+  };
+}
+
 const documentIrSchema: JsonObject = {
   $id: "officegen.ir.document@1.2",
   type: "object",
@@ -168,7 +206,7 @@ const documentIrSchema: JsonObject = {
         author: { type: "string" }
       }
     },
-    targets: { type: "array", minItems: 1, items: { enum: ["pptx", "docx", "xlsx", "pdf", "html"] } },
+    targets: { type: "array", minItems: 1, items: { enum: ["pptx", "docx", "xlsx", "pdf"] } },
     design: { type: "object", additionalProperties: true },
     assets: { type: "array", items: { type: "object", additionalProperties: true } },
     sections: {

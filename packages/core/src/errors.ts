@@ -13,6 +13,7 @@ const REQUIRED_ERROR_CODES: OfficegenErrorCode[] = [
   "UNKNOWN_OPTION",
   "CAPABILITIES_STALE",
   "INPUT_NOT_FOUND",
+  "INPUT_PARSE_ERROR",
   "SCHEMA_INVALID",
   "SCHEMA_DEPRECATED",
   "SCHEMA_MIGRATION_REQUIRED",
@@ -20,6 +21,8 @@ const REQUIRED_ERROR_CODES: OfficegenErrorCode[] = [
   "SECURITY_ABSOLUTE_OUT_DENIED",
   "SECURITY_SYMLINK_DENIED",
   "SECURITY_HARDLINK_DENIED",
+  "SECURITY_INPUT_TOO_LARGE",
+  "SECURITY_EXTERNAL_PROCESS_DENIED",
   "SECURITY_ZIP_BOMB_DETECTED",
   "SECURITY_XML_ENTITY_DENIED",
   "SECURITY_MACRO_DETECTED",
@@ -37,6 +40,8 @@ const REQUIRED_ERROR_CODES: OfficegenErrorCode[] = [
   "CHART_SPEC_INVALID",
   "DIAGRAM_SPEC_INVALID",
   "VIEW_FIDELITY_LOW",
+  "RENDER_FONT_UNSUPPORTED",
+  "TARGET_EXTENSION_MISMATCH",
   "EXPORT_UNSUPPORTED"
 ];
 
@@ -44,7 +49,7 @@ const defaultCategory = (code: OfficegenErrorCode): string => {
   if (code.startsWith("FEATURE_") || code === "UNKNOWN_COMMAND" || code === "UNKNOWN_OPTION" || code === "CAPABILITIES_STALE") {
     return "capability";
   }
-  if (code === "INPUT_NOT_FOUND") return "input";
+  if (code === "INPUT_NOT_FOUND" || code === "INPUT_PARSE_ERROR") return "input";
   if (code.startsWith("SCHEMA_")) return "schema";
   if (code.startsWith("SECURITY_")) return "security";
   if (code.startsWith("PLUGIN_")) return "plugin";
@@ -72,6 +77,7 @@ const messages: Partial<Record<OfficegenErrorCode, string>> = {
   UNKNOWN_OPTION: "The option is not supported by this command.",
   CAPABILITIES_STALE: "The embedded capabilities hash does not match the active configuration.",
   INPUT_NOT_FOUND: "The input file was not found.",
+  INPUT_PARSE_ERROR: "The input file could not be parsed.",
   SCHEMA_INVALID: "The JSON document does not match the requested schema.",
   SCHEMA_DEPRECATED: "The requested schema is deprecated.",
   SCHEMA_MIGRATION_REQUIRED: "The JSON document requires schema migration.",
@@ -79,6 +85,8 @@ const messages: Partial<Record<OfficegenErrorCode, string>> = {
   SECURITY_ABSOLUTE_OUT_DENIED: "Absolute output paths are denied by policy.",
   SECURITY_SYMLINK_DENIED: "Symlink or reparse-point traversal is denied by policy.",
   SECURITY_HARDLINK_DENIED: "Writing to hardlinked files is denied by policy.",
+  SECURITY_INPUT_TOO_LARGE: "The input file exceeds the configured size limit.",
+  SECURITY_EXTERNAL_PROCESS_DENIED: "External process execution is denied by policy.",
   SECURITY_ZIP_BOMB_DETECTED: "The archive exceeds safe zip limits.",
   SECURITY_XML_ENTITY_DENIED: "XML entity declarations are denied by policy.",
   SECURITY_MACRO_DETECTED: "The input file contains VBA or macro parts.",
@@ -96,6 +104,8 @@ const messages: Partial<Record<OfficegenErrorCode, string>> = {
   CHART_SPEC_INVALID: "The chart specification is invalid.",
   DIAGRAM_SPEC_INVALID: "The diagram specification is invalid.",
   VIEW_FIDELITY_LOW: "The generated view has low fidelity.",
+  RENDER_FONT_UNSUPPORTED: "The PDF renderer cannot encode the requested text with the active font.",
+  TARGET_EXTENSION_MISMATCH: "The requested render target does not match the output file extension.",
   EXPORT_UNSUPPORTED: "The requested export conversion is unsupported."
 };
 

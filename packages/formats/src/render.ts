@@ -1,12 +1,14 @@
-import { writeOutput } from "./shared.js";
+import { extname } from "node:path";
+import { OfficegenError, type OfficegenConfig } from "@officegen/core";
+import { assertPdfStandardFontText, writeOutput } from "./shared.js";
 import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 
 export type RenderTarget = "pptx" | "docx" | "xlsx" | "pdf";
 
 export interface DocumentIR {
   title?: string;
-  kind?: RenderTarget;
-  targets?: RenderTarget[];
+  kind?: string;
+  targets?: string[];
   sections?: Array<{
     id?: string;
     title?: string;
@@ -21,7 +23,8 @@ export interface DocumentIR {
 
 export interface RenderOptions {
   out?: string;
-  target?: RenderTarget;
+  target?: string;
+  config?: OfficegenConfig;
 }
 
 export interface RenderResult {
@@ -33,7 +36,7 @@ export interface RenderResult {
 }
 
 export async function render(ir: DocumentIR, options: RenderOptions = {}): Promise<RenderResult> {
-  const target = options.target ?? ir.kind ?? inferTarget(options.out) ?? ir.targets?.find(isRenderTarget) ?? "pdf";
+  const target = resolveRenderTarget(ir, options);
   if (target === "pptx") return renderPptx(ir, options);
   if (target === "docx") return renderDocx(ir, options);
   if (target === "xlsx") return renderXlsx(ir, options);
@@ -124,10 +127,11 @@ async function renderPdf(ir: DocumentIR, options: RenderOptions): Promise<Render
   for (const section of sections) {
     const page = pdf.addPage([612, 792]);
     const { height } = page.getSize();
-    page.drawText(section.title ?? ir.title ?? "Untitled", { x: 54, y: height - 72, size: 22, font: bold, color: rgb(0.07, 0.07, 0.07) });
+    const title = assertPdfStandardFontText(section.title ?? ir.title ?? "Untitled", bold, "render.pdf.title");
+    page.drawText(title, { x: 54, y: height - 72, size: 22, font: bold, color: rgb(0.07, 0.07, 0.07) });
     let y = height - 112;
     for (const line of toLines(section.body)) {
-      page.drawText(line.slice(0, 95), { x: 54, y, size: 11, font, color: rgb(0.16, 0.16, 0.16) });
+      page.drawText(assertPdfStandardFontText(line.slice(0, 95), font, "render.pdf.body"), { x: 54, y, size: 11, font, color: rgb(0.16, 0.16, 0.16) });
       y -= 18;
       if (y < 54) break;
     }
@@ -143,13 +147,48 @@ async function renderPdf(ir: DocumentIR, options: RenderOptions): Promise<Render
   };
 }
 
-function inferTarget(out?: string): RenderTarget | undefined {
-  const ext = out?.split(".").pop()?.toLowerCase();
-  return ext === "pptx" || ext === "docx" || ext === "xlsx" || ext === "pdf" ? ext : undefined;
+function resolveRenderTarget(ir: DocumentIR, options: RenderOptions): RenderTarget {
+  const explicit = options.target ?? ir.kind;
+  const outputTarget = inferTargetFromOutput(options.out);
+  if (explicit !== undefined) {
+    const target = parseRenderTarget(explicit, "render target");
+    assertOutputTargetMatches(target, outputTarget, options.out);
+    return target;
+  }
+  if (outputTarget !== undefined) return outputTarget;
+  if (ir.targets !== undefined && ir.targets.length > 0) {
+    return parseRenderTarget(ir.targets[0], "IR targets[0]");
+  }
+  return "pdf";
+}
+
+function inferTargetFromOutput(out?: string): RenderTarget | undefined {
+  if (!out) return undefined;
+  const ext = extname(out).slice(1).toLowerCase();
+  if (!ext) return undefined;
+  return parseRenderTarget(ext, "output extension");
 }
 
 function isRenderTarget(value: unknown): value is RenderTarget {
   return value === "pptx" || value === "docx" || value === "xlsx" || value === "pdf";
+}
+
+function parseRenderTarget(value: unknown, source: string): RenderTarget {
+  if (isRenderTarget(value)) return value;
+  throw new OfficegenError(
+    "EXPORT_UNSUPPORTED",
+    `Unsupported ${source}: ${String(value)}. Supported render targets are pptx, docx, xlsx, and pdf.`,
+    { source, value: String(value), supported: ["pptx", "docx", "xlsx", "pdf"] }
+  );
+}
+
+function assertOutputTargetMatches(target: RenderTarget, outputTarget: RenderTarget | undefined, out?: string): void {
+  if (outputTarget === undefined || outputTarget === target) return;
+  throw new OfficegenError(
+    "TARGET_EXTENSION_MISMATCH",
+    `Render target ${target} does not match output extension .${outputTarget}${out ? ` for ${out}` : ""}.`,
+    { target, outputTarget, ...(out ? { out } : {}) }
+  );
 }
 
 function toLines(value?: string | string[]): string[] {

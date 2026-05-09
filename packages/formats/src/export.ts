@@ -1,10 +1,11 @@
 import { inspect } from "./inspect.js";
 import { render, type DocumentIR } from "./render.js";
-import { type InputLike, inspectInputZipSafety, normalizeInput, writeOutput, zipSafetyCaveats } from "./shared.js";
+import { type InputLike, assertPdfStandardFontText, inspectInputZipSafety, normalizeInput, writeOutput, zipSafetyCaveats } from "./shared.js";
 import { spawn } from "node:child_process";
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { OfficegenError, type OfficegenConfig } from "@officegen/core";
 import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 
 export type ExportMode = "fast" | "internal" | "native";
@@ -14,10 +15,12 @@ export interface ExportOptions {
   out?: string;
   mode?: ExportMode;
   pages?: number[];
+  config?: OfficegenConfig;
 }
 
 export interface PdfOperationOptions {
   out?: string;
+  config?: OfficegenConfig;
 }
 
 export interface ExportResult {
@@ -37,8 +40,9 @@ export interface ExportResult {
 }
 
 export async function exportDocument(input: InputLike | DocumentIR, options: ExportOptions): Promise<ExportResult> {
+  assertOutputExtensionMatches(options.to, options.out);
   if (typeof input === "object" && !("data" in input) && !("path" in input) && !isByteInput(input)) {
-    const rendered = await render(input as DocumentIR, { target: options.to as "pptx" | "docx" | "xlsx" | "pdf", out: options.out });
+    const rendered = await render(input as DocumentIR, { target: options.to, out: options.out, config: options.config });
     return {
       schema: "officegen.export.result@1.2",
       from: "ir",
@@ -60,11 +64,12 @@ export async function exportDocument(input: InputLike | DocumentIR, options: Exp
   }
 
   if (options.mode === "native" && options.to === "pdf") {
+    assertNativeExportAllowed(options.config);
     return exportOfficeToPdfWithLibreOffice(normalized, options);
   }
 
   if (options.to === "pdf") {
-    const inspected = await inspect({ data: normalized.bytes, format: normalized.format });
+    const inspected = await inspect({ data: normalized.bytes, format: normalized.format }, { config: options.config });
     const pdf = await PDFDocument.create();
     const font = await pdf.embedFont(StandardFonts.Helvetica);
     const pages =
@@ -77,11 +82,11 @@ export async function exportDocument(input: InputLike | DocumentIR, options: Exp
             : [];
     for (const [index, pageInfo] of pages.entries()) {
       const page = pdf.addPage([612, 792]);
-      page.drawText(pdfSafeText(String(pageInfo.title ?? `Page ${index + 1}`)), { x: 54, y: 735, size: 18, font, color: rgb(0.07, 0.07, 0.07) });
+      page.drawText(assertPdfStandardFontText(String(pageInfo.title ?? `Page ${index + 1}`), font, "export.pdf.title"), { x: 54, y: 735, size: 18, font, color: rgb(0.07, 0.07, 0.07) });
       const text = String(pageInfo.text ?? "");
       let y = 700;
       for (const line of text.split(/\r?\n/).slice(0, 36)) {
-        page.drawText(pdfSafeText(line).slice(0, 95), { x: 54, y, size: 10, font, color: rgb(0.2, 0.2, 0.2) });
+        page.drawText(assertPdfStandardFontText(line.slice(0, 95), font, "export.pdf.body"), { x: 54, y, size: 10, font, color: rgb(0.2, 0.2, 0.2) });
         y -= 16;
       }
     }
@@ -93,16 +98,16 @@ export async function exportDocument(input: InputLike | DocumentIR, options: Exp
     ]);
   }
 
-  throw new Error(`Unsupported export: ${normalized.format} to ${options.to}`);
+  throw new OfficegenError("EXPORT_UNSUPPORTED", `Unsupported export: ${normalized.format} to ${options.to}`, {
+    from: normalized.format,
+    to: options.to
+  });
 }
 
 export const exportFile = exportDocument;
 
-function pdfSafeText(value: string): string {
-  return value.replace(/[^\x09\x0A\x0D\x20-\x7E\xA0-\xFF]/g, "?");
-}
-
 export async function mergePdfs(inputs: InputLike[], options: PdfOperationOptions = {}): Promise<ExportResult> {
+  assertOutputExtensionMatches("pdf", options.out);
   const output = await PDFDocument.create();
   for (const input of inputs) {
     const normalized = await normalizeInput(input, "pdf");
@@ -116,6 +121,7 @@ export async function mergePdfs(inputs: InputLike[], options: PdfOperationOption
 }
 
 export async function splitPdf(input: InputLike, ranges: Array<number[]>, options: PdfOperationOptions = {}): Promise<Array<ExportResult>> {
+  assertOutputExtensionMatches("pdf", options.out);
   const normalized = await normalizeInput(input, "pdf");
   const source = await PDFDocument.load(normalized.bytes, { ignoreEncryption: true });
   const results: ExportResult[] = [];
@@ -133,6 +139,7 @@ export async function splitPdf(input: InputLike, ranges: Array<number[]>, option
 }
 
 export async function reorderPdf(input: InputLike, order: number[], options: PdfOperationOptions = {}): Promise<ExportResult> {
+  assertOutputExtensionMatches("pdf", options.out);
   const normalized = await normalizeInput(input, "pdf");
   const source = await PDFDocument.load(normalized.bytes, { ignoreEncryption: true });
   const output = await PDFDocument.create();
@@ -162,16 +169,16 @@ async function exportOfficeToPdfWithLibreOffice(
   options: ExportOptions
 ): Promise<ExportResult> {
   if (!input.path) {
-    throw new Error("EXPORT_UNSUPPORTED: native Office-to-PDF export requires an input file path.");
+    throw new OfficegenError("EXPORT_UNSUPPORTED", "Native Office-to-PDF export requires an input file path.");
   }
   if (!["pptx", "docx", "xlsx"].includes(input.format)) {
-    throw new Error(`EXPORT_UNSUPPORTED: native PDF export is not supported for ${input.format}.`);
+    throw new OfficegenError("EXPORT_UNSUPPORTED", `Native PDF export is not supported for ${input.format}.`);
   }
-  const zipSafety = await inspectInputZipSafety(input);
+  const zipSafety = await inspectInputZipSafety(input, { config: options.config });
 
   const executable = await findLibreOfficeExecutable();
   if (!executable) {
-    throw new Error("EXPORT_UNSUPPORTED: LibreOffice/soffice was not found. Install LibreOffice or use --mode fast for approximate PDF export.");
+    throw new OfficegenError("EXPORT_UNSUPPORTED", "LibreOffice/soffice was not found. Install LibreOffice or use --mode fast for approximate PDF export.");
   }
 
   const outDir = options.out ? path.dirname(options.out) : await mkdtemp(path.join(os.tmpdir(), "officegen-pdf-"));
@@ -241,7 +248,7 @@ async function runProcess(command: string, args: string[]): Promise<void> {
     child.on("error", reject);
     child.on("exit", (code) => {
       if (code === 0) resolve();
-      else reject(new Error(`EXPORT_UNSUPPORTED: LibreOffice conversion failed with exit code ${code}. ${stderr.trim()}`));
+      else reject(new OfficegenError("EXPORT_UNSUPPORTED", `LibreOffice conversion failed with exit code ${code}. ${stderr.trim()}`));
     });
   });
 }
@@ -251,10 +258,34 @@ async function findConvertedPdf(outDir: string, inputPath: string): Promise<stri
   const files = await readdir(outDir);
   const match = files.find((file) => file.toLowerCase() === path.basename(expected).toLowerCase())
     ?? files.find((file) => file.toLowerCase().endsWith(".pdf"));
-  if (!match) throw new Error("EXPORT_UNSUPPORTED: LibreOffice did not produce a PDF.");
+  if (!match) throw new OfficegenError("EXPORT_UNSUPPORTED", "LibreOffice did not produce a PDF.");
   return path.join(outDir, match);
 }
 
 function isByteInput(value: object): value is Uint8Array {
   return value instanceof Uint8Array || value instanceof ArrayBuffer;
+}
+
+function assertNativeExportAllowed(config: OfficegenConfig | undefined): void {
+  if (config?.security.externalProcess === "allow" && config.security.renderers === "enabled") return;
+  throw new OfficegenError(
+    "SECURITY_EXTERNAL_PROCESS_DENIED",
+    "Native LibreOffice export is disabled by the active configuration. Set security.externalProcess to allow and security.renderers to enabled to use native export.",
+    {
+      externalProcess: config?.security.externalProcess ?? "deny",
+      renderers: config?.security.renderers ?? "disabled"
+    },
+    { feature: "renderer" }
+  );
+}
+
+function assertOutputExtensionMatches(target: ExportOptions["to"], out?: string): void {
+  if (!out) return;
+  const ext = path.extname(out).slice(1).toLowerCase();
+  if (!ext || ext === target) return;
+  throw new OfficegenError(
+    "TARGET_EXTENSION_MISMATCH",
+    `Export target ${target} does not match output extension .${ext} for ${out}.`,
+    { target, outputExtension: ext, out }
+  );
 }

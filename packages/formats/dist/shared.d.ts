@@ -1,5 +1,7 @@
 import { type OfficegenConfig, type ZipSafetyReport } from "@officegen/core";
 import JSZip from "jszip";
+import type { PDFFont } from "pdf-lib";
+export type { OfficegenConfig } from "@officegen/core";
 export type OfficeFormat = "pptx" | "docx" | "xlsx" | "pdf" | "svg" | "html" | "unknown";
 export type Fidelity = "approximate" | "internal" | "near-native" | "native";
 export interface InputObject {
@@ -91,3 +93,4 @@ export declare function replaceAllLiteral(input: string, from: string, to: strin
 export declare function zipPathBasename(path: string): string;
 export declare function zipToBytes(zip: JSZip): Promise<Uint8Array>;
 export declare function isOfficeFormat(format: OfficeFormat): format is "pptx" | "docx" | "xlsx";
+export declare function assertPdfStandardFontText(value: string, font: PDFFont, context: string): string;

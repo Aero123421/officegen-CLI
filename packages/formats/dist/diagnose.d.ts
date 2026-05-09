@@ -1,5 +1,5 @@
 import { type InspectResult } from "./inspect.js";
-import { type InputLike } from "./shared.js";
+import { type InputLike, type OfficegenConfig } from "./shared.js";
 export type IssueSeverity = "info" | "warning" | "error";
 export interface DiagnoseIssue {
     code: string;
@@ -10,6 +10,7 @@ export interface DiagnoseIssue {
 }
 export interface DiagnoseOptions {
     maxTextLength?: number;
+    config?: OfficegenConfig;
 }
 export interface DiagnoseResult {
     schema: "officegen.diagnose.result@1.2";

@@ -52,16 +52,17 @@ import {
 import { commandFromArgv, getTopCommand, hasFlag, optionValue, positionalArgs } from "../shared/argv.js";
 import {
   asRecord,
-  copyJsonIfPresent,
   normalizeEditOperations,
   numberOption,
   optionalContext,
-  readJson,
-  readJsonIfPresent,
+  readInputFile,
+  readInputJson,
+  readInputJsonIfPresent,
+  readInputText,
   requireInput,
-  resolveCliPath,
   schemaHiddenFromAgent,
   stringRecord,
+  validateInputPath,
   validatedOutOption,
   validateOutputPath
 } from "../shared/io.js";
@@ -254,7 +255,7 @@ export async function validatePayload(context: RuntimeContext): Promise<unknown>
       message: "schema validate requires --schema <schema-id>."
     }, 2);
   }
-  const payload = await readJson(resolveCliPath(context, input));
+  const payload = await readInputJson(context, input);
   const validation = validateSchema(schemaId, payload);
   if (!validation.ok) {
     throw new CliFailure({
@@ -275,8 +276,18 @@ export async function validatePayload(context: RuntimeContext): Promise<unknown>
 export async function schemaMigratePayload(context: RuntimeContext): Promise<unknown> {
   const input = positionalArgs(context.argv, 4)[0];
   const out = optionValue(context.argv, "--out");
+  if (!input) {
+    throw new CliFailure({
+      code: "SCHEMA_INVALID",
+      command: "schema migrate",
+      message: "schema migrate requires an input JSON file."
+    }, 2);
+  }
+  const payload = input ? await readInputJson(context, input) : undefined;
   if (input && out) {
-    await copyJsonIfPresent(context.cwd, input, await validateOutputPath(context, out));
+    const outPath = await validateOutputPath(context, out);
+    await fs.mkdir(path.dirname(outPath), { recursive: true });
+    await fs.writeFile(outPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
   }
   return {
     schema: "officegen.schema.migration.result@1.2",
@@ -315,26 +326,27 @@ export function errorLookup(code: string | undefined): unknown {
 
 export async function inspectPayload(context: RuntimeContext): Promise<unknown> {
   const input = requireInput(context, 3, "inspect");
-  return inspect(resolveCliPath(context, input), {
+  return inspect(await validateInputPath(context, input), withFormatConfig(context, {
     depth: (optionValue(context.argv, "--depth") as "summary" | "shallow" | "full" | undefined) ?? "summary"
-  });
+  }));
 }
 
 export async function viewPayload(context: RuntimeContext): Promise<unknown> {
   const input = requireInput(context, 3, "view");
-  const format = optionValue(context.argv, "--format") ?? "svg";
-  if (format !== "svg" && format !== "html") {
+  const requestedFormat = optionValue(context.argv, "--format") ?? "svg";
+  if (requestedFormat !== "svg" && requestedFormat !== "html") {
     throw new CliFailure({
       code: "EXPORT_UNSUPPORTED",
       command: "view",
-      message: `view --format ${format} is not supported. Supported formats are svg and html.`,
-      details: { format, supported: ["svg", "html"] }
+      message: `view --format ${requestedFormat} is not supported. Supported formats are svg and html.`,
+      details: { format: requestedFormat, supported: ["svg", "html"] }
     }, 3);
   }
-  const result = await view(resolveCliPath(context, input), {
+  const format: "svg" | "html" = requestedFormat === "html" ? "html" : "svg";
+  const result = await view(await validateInputPath(context, input), withFormatConfig(context, {
     format,
     maxPages: numberOption(context, "--max-pages")
-  });
+  }));
   const out = optionValue(context.argv, "--out");
   if (out) {
     const outDir = await validateOutputPath(context, out, { directory: true });
@@ -358,7 +370,7 @@ export async function editPayload(context: RuntimeContext): Promise<unknown> {
       message: "edit requires --ops <edit-ops.json> so no-op edits are not reported as success."
     }, 2);
   }
-  const raw = await readJson(resolveCliPath(context, opsPath));
+  const raw = await readInputJson(context, opsPath);
   const editOptions = asRecord(asRecord(raw).options);
   const operations = normalizeEditOperations(raw);
   const editOpsValidation = validateSchema("officegen.edit.ops@1.2", editOpsValidationPayload(raw, operations, input));
@@ -370,7 +382,7 @@ export async function editPayload(context: RuntimeContext): Promise<unknown> {
       details: { errors: editOpsValidation.errors }
     }, 3);
   }
-  return edit(resolveCliPath(context, input), operations, {
+  return edit(await validateInputPath(context, input), operations, withFormatConfig(context, {
     out: await validatedOutOption(context),
     dryRun: hasFlag(context.argv, "--dry-run"),
     resolveSelectors: hasFlag(context.argv, "--resolve-selectors"),
@@ -378,7 +390,7 @@ export async function editPayload(context: RuntimeContext): Promise<unknown> {
     validateFirst: booleanOption(editOptions, "validateFirst"),
     continueOnError: booleanOption(editOptions, "continueOnError"),
     idempotencyKey: typeof editOptions.idempotencyKey === "string" ? editOptions.idempotencyKey : undefined
-  });
+  }));
 }
 
 function editOpsValidationPayload(raw: unknown, operations: ReturnType<typeof normalizeEditOperations>, input: string): unknown {
@@ -413,7 +425,7 @@ function stripUndefined(value: unknown): unknown {
 
 export async function renderPayload(context: RuntimeContext): Promise<unknown> {
   const input = requireInput(context, 3, "render");
-  const ir = await readJson(resolveCliPath(context, input));
+  const ir = await readInputJson(context, input);
   const validation = validateSchema("officegen.ir.document@1.2", ir);
   if (!validation.ok) {
     throw new CliFailure({
@@ -423,69 +435,69 @@ export async function renderPayload(context: RuntimeContext): Promise<unknown> {
       details: { errors: validation.errors }
     }, 3);
   }
-  return render(ir as Parameters<typeof render>[0], {
+  return render(ir as Parameters<typeof render>[0], withFormatConfig(context, {
     out: await validatedOutOption(context),
     target: optionValue(context.argv, "--target") as RenderTarget | undefined
-  });
+  }));
 }
 
 export async function exportPayload(context: RuntimeContext): Promise<unknown> {
   const input = requireInput(context, 3, "export");
   const to = (optionValue(context.argv, "--to") ?? "pdf") as "pdf" | "svg" | "html" | "pptx" | "docx" | "xlsx";
-  return exportDocument(resolveCliPath(context, input), {
+  return exportDocument(await validateInputPath(context, input), withFormatConfig(context, {
     to,
     out: await validatedOutOption(context),
     mode: (optionValue(context.argv, "--mode") as "fast" | "internal" | "native" | undefined) ?? "fast"
-  });
+  }));
 }
 
 export async function diagnosePayload(context: RuntimeContext): Promise<unknown> {
   const input = requireInput(context, 3, "diagnose");
-  return diagnose(resolveCliPath(context, input));
+  return diagnose(await validateInputPath(context, input), withFormatConfig(context, {}));
 }
 
 export async function repairPayload(context: RuntimeContext): Promise<unknown> {
   const input = requireInput(context, 3, "repair");
   const issuesPath = optionValue(context.argv, "--issues");
-  const issues = issuesPath ? await readJson(resolveCliPath(context, issuesPath)) : undefined;
-  return repair(resolveCliPath(context, input), {
+  const issues = issuesPath ? await readInputJson(context, issuesPath) : undefined;
+  return repair(await validateInputPath(context, input), withFormatConfig(context, {
     out: await validatedOutOption(context),
     dryRun: hasFlag(context.argv, "--dry-run"),
     issues: issues as never
-  });
+  }));
 }
 
 export async function assetPayload(context: RuntimeContext, subcommand?: string): Promise<unknown> {
   const input = requireInput(context, subcommand ? 4 : 3, "asset");
-  if (subcommand === "inspect" || !subcommand) return inspectAsset(resolveCliPath(context, input));
+  if (subcommand === "inspect" || !subcommand) return inspectAsset(await validateInputPath(context, input));
   if (subcommand === "extract") {
     const out = optionValue(context.argv, "--out");
-    return extractAssets(resolveCliPath(context, input), {
+    return extractAssets(await validateInputPath(context, input), withFormatConfig(context, {
       outDir: out ? await validateOutputPath(context, out, { directory: true }) : undefined,
       images: hasFlag(context.argv, "--images")
-    });
+    }));
   }
   if (subcommand === "replace") {
     const assetPath = optionValue(context.argv, "--asset") ?? optionValue(context.argv, "--selector") ?? "";
     const replacementPath = positionalArgs(context.argv, 5)[0] ?? positionalArgs(context.argv, 4)[1];
     if (!assetPath || !replacementPath) throw new Error("asset replace requires --asset <zip-path> and replacement file.");
-    return replaceAsset(resolveCliPath(context, input), {
+    return replaceAsset(await validateInputPath(context, input), withFormatConfig(context, {
       assetPath,
-      replacement: await fs.readFile(resolveCliPath(context, replacementPath)),
+      replacement: await readInputFile(context, replacementPath),
       out: await validatedOutOption(context)
-    });
+    }));
   }
   return { schema: "officegen.asset.result@1.2", status: "wired", subcommand };
 }
 
 export async function chartPayload(context: RuntimeContext): Promise<unknown> {
   const input = requireInput(context, 4, "chart render");
-  return renderChart(await readJson(resolveCliPath(context, input)), { out: await validatedOutOption(context) });
+  return renderChart(await readInputJson(context, input), withFormatConfig(context, { out: await validatedOutOption(context) }));
 }
 
 export async function diagramPayload(context: RuntimeContext): Promise<unknown> {
   const input = requireInput(context, 4, "diagram render");
-  return renderDiagram(await fs.readFile(resolveCliPath(context, input), "utf8"), { out: await validatedOutOption(context) });
+  return renderDiagram(await readInputText(context, input), withFormatConfig(context, { out: await validatedOutOption(context) }));
 }
 
 export async function templatePayload(context: RuntimeContext, subcommand?: string): Promise<unknown> {
@@ -495,14 +507,16 @@ export async function templatePayload(context: RuntimeContext, subcommand?: stri
   if (subcommand === "inspect") return inspectTemplate({ ...optional, id });
   if (subcommand === "candidates") {
     const sourceOrQuery = positionalArgs(context.argv, 4)[0];
-    const sourcePath = sourceOrQuery && /\.[A-Za-z0-9]+$/.test(sourceOrQuery) ? resolveCliPath(context, sourceOrQuery) : undefined;
+    const sourcePath = sourceOrQuery && /\.[A-Za-z0-9]+$/.test(sourceOrQuery)
+      ? await validateInputPath(context, sourceOrQuery)
+      : undefined;
     return templateCandidates({ ...optional, query: sourcePath ? undefined : sourceOrQuery, sourcePath });
   }
   if (subcommand === "create") {
     const sourcePath = positionalArgs(context.argv, 4)[0];
     return createTemplate({
       ...optional,
-      sourcePath: sourcePath ? resolveCliPath(context, sourcePath) : undefined,
+      sourcePath: sourcePath ? await validateInputPath(context, sourcePath) : undefined,
       template: {
         id,
         name: id,
@@ -512,11 +526,11 @@ export async function templatePayload(context: RuntimeContext, subcommand?: stri
     });
   }
   if (subcommand === "apply-map") {
-    const mapping = await readJsonIfPresent(resolveCliPath(context, optionValue(context.argv, "--map") ?? positionalArgs(context.argv, 5)[0] ?? ""));
+    const mapping = await readInputJsonIfPresent(context, optionValue(context.argv, "--map") ?? positionalArgs(context.argv, 5)[0]);
     return applyTemplateMap({ ...optional, id, mapping: stringRecord(mapping), outputPath: await validatedOutOption(context) });
   }
   if (subcommand === "fill") {
-    const values = await readJsonIfPresent(resolveCliPath(context, optionValue(context.argv, "--data") ?? positionalArgs(context.argv, 5)[0] ?? ""));
+    const values = await readInputJsonIfPresent(context, optionValue(context.argv, "--data") ?? positionalArgs(context.argv, 5)[0]);
     return fillTemplate({ ...optional, id, values: asRecord(values), outputPath: await validatedOutOption(context) });
   }
   if (subcommand === "validate") return validateTemplate({ ...optional, id });
@@ -531,11 +545,22 @@ export async function designPayload(context: RuntimeContext, subcommand?: string
   if (subcommand === "init") return initDesign({ ...optional, id, name: id });
   if (subcommand === "update" || subcommand === "edit") {
     const patchPath = optionValue(context.argv, "--data") ?? positionalArgs(context.argv, 5)[0];
-    const patch = patchPath ? asRecord(await readJson(resolveCliPath(context, patchPath))) : {};
+    const patch = patchPath ? asRecord(await readInputJson(context, patchPath)) : {};
     return updateDesign({ ...optional, id, patch });
   }
-  if (subcommand === "capture") return captureDesign({ ...optional, id, sourcePath: resolveCliPath(context, positionalArgs(context.argv, 4)[0] ?? "") });
-  if (subcommand === "apply") return applyDesign({ ...optional, id, targetPath: positionalArgs(context.argv, 4)[0], outputPath: await validatedOutOption(context) });
+  if (subcommand === "capture") {
+    const sourcePath = requireInput(context, 4, "design capture");
+    return captureDesign({ ...optional, id, sourcePath: await validateInputPath(context, sourcePath) });
+  }
+  if (subcommand === "apply") {
+    const targetPath = positionalArgs(context.argv, 4)[0];
+    return applyDesign({
+      ...optional,
+      id,
+      targetPath: targetPath ? await validateInputPath(context, targetPath) : undefined,
+      outputPath: await validatedOutOption(context)
+    });
+  }
   if (subcommand === "validate") return validateDesign({ ...optional, id });
   return groupPayload(context, subcommand);
 }
@@ -545,9 +570,13 @@ function booleanOption(record: Record<string, unknown>, key: string): boolean | 
   return record[key] === true;
 }
 
+function withFormatConfig<T extends object>(context: RuntimeContext, options: T): T {
+  return { ...options, config: context.config } as T;
+}
+
 export async function layoutPayload(context: RuntimeContext): Promise<unknown> {
   const input = positionalArgs(context.argv, 4)[0];
-  const plan = input ? asRecord(await readJson(resolveCliPath(context, input))) : {};
+  const plan = input ? asRecord(await readInputJson(context, input)) : {};
   return applyLayoutConstraints({
     ...optionalContext(context),
     boxes: Array.isArray(plan.boxes) ? plan.boxes as Parameters<typeof applyLayoutConstraints>[0]["boxes"] : [],
@@ -586,7 +615,8 @@ export async function pluginPayload(context: RuntimeContext, subcommand?: string
         message: "plugin install requires explicit --trust sha256:<hash>."
       }, 8);
     }
-    const manifest = asRecord(await readJson(resolveCliPath(context, name)));
+    const manifestPath = await validateInputPath(context, name);
+    const manifest = asRecord(await readInputJson(context, name));
     try {
       return await installPlugin({
         ...optional,
@@ -595,7 +625,7 @@ export async function pluginPayload(context: RuntimeContext, subcommand?: string
           version: String(manifest.version ?? "0.0.0"),
           ...manifest
         },
-        sourcePath: name,
+        sourcePath: manifestPath,
         trust
       });
     } catch (error) {
@@ -628,7 +658,7 @@ export function wiredPayload(feature: FeatureKey): (context: RuntimeContext) => 
 
 export async function scaffoldPayload(context: RuntimeContext): Promise<unknown> {
   const requestedKind = optionValue(context.argv, "--kind") ?? "pptx";
-  const kind = ["pptx", "docx", "xlsx", "pdf", "html"].includes(requestedKind) ? requestedKind : "pptx";
+  const kind = ["pptx", "docx", "xlsx", "pdf"].includes(requestedKind) ? requestedKind : "pptx";
   const title = optionValue(context.argv, "--title") ?? "Untitled";
   const out = optionValue(context.argv, "--out");
   const document = {
@@ -645,7 +675,7 @@ export async function scaffoldPayload(context: RuntimeContext): Promise<unknown>
         title,
         blocks: [
           { type: "heading", text: title },
-          { type: "paragraph", text: "概要をここに入力してください。" }
+          { type: "paragraph", text: "Add the outline here." }
         ]
       }
     ]

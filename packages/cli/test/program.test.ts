@@ -266,6 +266,81 @@ describe("officegen CLI command surface", () => {
     expect(process.exitCode).toBe(3);
   });
 
+  it("denies absolute input paths when configured", async () => {
+    const cwd = await tempWorkspace({
+      security: {
+        allowAbsoluteInputPaths: false
+      }
+    });
+    const inputPath = path.join(cwd, "deck.ir.json");
+    await writeFile(inputPath, "{\"schema\":\"officegen.ir.document@1.2\"}", "utf8");
+
+    const captured = await run(["schema", "validate", inputPath, "--schema", "officegen.ir.document@1.2", "--json"], cwd);
+    const envelope = parseEnvelope(captured);
+
+    expect(envelope.ok).toBe(false);
+    expect(envelope.error.code).toBe("SECURITY_PATH_OUTSIDE_ROOT");
+    expect(process.exitCode).toBe(4);
+  });
+
+  it("denies input files above maxInputFileBytes before reading", async () => {
+    const cwd = await tempWorkspace({
+      security: {
+        untrustedInput: {
+          maxInputFileBytes: 8
+        }
+      }
+    });
+    await writeFile(path.join(cwd, "large.json"), "{\"large\":true}", "utf8");
+
+    const captured = await run(["schema", "validate", "large.json", "--schema", "officegen.ir.document@1.2", "--json"], cwd);
+    const envelope = parseEnvelope(captured);
+
+    expect(envelope.ok).toBe(false);
+    expect(envelope.error.code).toBe("SECURITY_INPUT_TOO_LARGE");
+    expect(envelope.error.details.maxInputFileBytes).toBe(8);
+    expect(process.exitCode).toBe(4);
+  });
+
+  it("does not report schema migrate success when input JSON cannot be parsed", async () => {
+    const cwd = await tempWorkspace();
+    await writeFile(path.join(cwd, "bad.json"), "{", "utf8");
+
+    const captured = await run(["schema", "migrate", "bad.json", "--out", "migrated.json", "--json"], cwd);
+    const envelope = parseEnvelope(captured);
+
+    expect(envelope.ok).toBe(false);
+    expect(envelope.error.code).toBe("INPUT_PARSE_ERROR");
+    await expect(readFile(path.join(cwd, "migrated.json"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    expect(process.exitCode).toBe(3);
+  });
+
+  it("writes schema migrate output for valid JSON input", async () => {
+    const cwd = await tempWorkspace();
+    const document = {
+      schema: "officegen.ir.document@1.2",
+      title: "Proposal",
+      targets: ["pdf"],
+      metadata: { title: "Proposal" },
+      sections: [
+        {
+          id: "section-1",
+          title: "Proposal",
+          blocks: [{ type: "paragraph", text: "Hello" }]
+        }
+      ]
+    };
+    await writeFile(path.join(cwd, "deck.ir.json"), `${JSON.stringify(document)}\n`, "utf8");
+
+    const captured = await run(["schema", "migrate", "deck.ir.json", "--out", "migrated.json", "--json"], cwd);
+    const envelope = parseEnvelope(captured);
+    const migrated = JSON.parse(await readFile(path.join(cwd, "migrated.json"), "utf8"));
+
+    expect(envelope.ok).toBe(true);
+    expect(envelope.result.migrated).toBe(true);
+    expect(migrated).toEqual(document);
+  });
+
   it("keeps JSON schema pointers intact in validation errors", async () => {
     const cwd = await tempWorkspace();
     await writeFile(path.join(cwd, "bad.json"), "{\"bad\":true}", "utf8");

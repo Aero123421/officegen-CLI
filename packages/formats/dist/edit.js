@@ -8,7 +8,7 @@ import { PDFDocument, rgb, StandardFonts } from "pdf-lib";
 export async function edit(input, operations, options = {}) {
     const normalized = await normalizeInput(input, options.format ?? "unknown");
     const selectorResult = options.resolveSelectors || options.validateFirst !== false
-        ? await resolveEditSelectorsForNormalized(normalized, operations)
+        ? await resolveEditSelectorsForNormalized(normalized, operations, options.config)
         : undefined;
     const result = isOfficeFormat(normalized.format)
         ? await editOfficeXml(normalized, operations, options, selectorResult)
@@ -25,10 +25,10 @@ export async function edit(input, operations, options = {}) {
 export const editDocument = edit;
 export async function resolveEditSelectors(input, operations, options = {}) {
     const normalized = await normalizeInput(input, options.format ?? "unknown");
-    return resolveEditSelectorsForNormalized(normalized, operations);
+    return resolveEditSelectorsForNormalized(normalized, operations, options.config);
 }
-async function resolveEditSelectorsForNormalized(normalized, operations) {
-    const inspected = await inspect({ data: normalized.bytes, format: normalized.format });
+async function resolveEditSelectorsForNormalized(normalized, operations, config) {
+    const inspected = await inspect({ data: normalized.bytes, format: normalized.format }, { config });
     const resolutions = operations.flatMap((operation, index) => {
         const selector = selectorForOperation(operation);
         if (!selector)
@@ -55,7 +55,7 @@ async function resolveEditSelectorsForNormalized(normalized, operations) {
     };
 }
 async function editOfficeXml(input, operations, options, selectorResult) {
-    const zip = await loadZip(input);
+    const zip = await loadZip(input, { zipSafety: { config: options.config } });
     const atomic = options.atomic ?? true;
     const continueOnError = options.continueOnError ?? false;
     const opResults = [];

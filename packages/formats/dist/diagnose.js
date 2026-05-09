@@ -1,6 +1,6 @@
 import { inspect } from "./inspect.js";
 export async function diagnose(input, options = {}) {
-    const inspected = isInspectResult(input) ? input : await inspect(input, { depth: "shallow" });
+    const inspected = isInspectResult(input) ? input : await inspect(input, { depth: "shallow", config: options.config });
     const issues = [];
     const maxTextLength = options.maxTextLength ?? 220;
     for (const entry of inspected.objectMap) {

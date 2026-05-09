@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import JSZip from "jszip";
 import { describe, expect, it } from "vitest";
+import { inspect } from "@officegen/formats";
 import { createOptionalCapabilities } from "./common.js";
 import { captureDesign, capturePptxDesignSignals, initDesign, type DesignSourceCapture } from "./design.js";
 import { createTemplate, templateCandidates } from "./template.js";
@@ -28,11 +29,33 @@ describe("@officegen/optional PPTX template and design signals", () => {
     expect(signals?.diagramPresence).toMatchObject({ count: 1, slides: [2] });
     expect(signals?.slideSignals[0]?.slideType).toBe("chart");
     expect(signals?.schemaCandidates.map((field) => field.name)).toContain("quarter");
-    expect(signals?.templateMapSuggested.mapping.quarter).toMatch(/^pptx:s001:shape:/);
+    expect(signals?.templateMapSuggested.mapping.quarter).toMatch(/^pptx:slide-[a-f0-9]{8}:shape:/);
     expect(signals?.trust.trusted.schema).toBe("officegen.design.signals.trusted@1.2");
     expect(signals?.trust.untrusted.textSamples.join(" ")).toContain("Quarterly Review");
     expect(await readFile(signals?.artifactPaths?.contextPath ?? "", "utf8")).toContain("PPTX design context");
     expect(await readFile(signals?.artifactPaths?.templateMapSuggestedPath ?? "", "utf8")).toContain("quarter");
+  });
+
+  it("emits suggested template selectors that match inspect/edit stable IDs", async () => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), "officegen-optional-selectors-"));
+    const deckPath = path.join(cwd, "source.pptx");
+    await writeFile(deckPath, await makePptxFixture());
+    const optional = {
+      cwd,
+      capabilities: createOptionalCapabilities(["template", "design"])
+    };
+
+    const signals = await capturePptxDesignSignals(deckPath, {
+      cwd,
+      artifactsDir: ".officegen/optional/design/selectors"
+    });
+    const inspected = await inspect(deckPath, { format: "pptx" });
+    const inspectedQuarterId = inspected.objectMap.find((entry) => entry.text === "Quarter: {{quarter}}")?.stableObjectId;
+    const candidates = await templateCandidates({ ...optional, sourcePath: deckPath });
+
+    expect(signals?.templateMapSuggested.mapping.quarter).toBe(inspectedQuarterId);
+    expect(candidates[0]?.template.mapping?.quarter).toBe(inspectedQuarterId);
+    expect(inspectedQuarterId).toMatch(/^pptx:slide-[a-f0-9]{8}:shape:/);
   });
 
   it("creates and captures source-derived template/design records from a PPTX", async () => {
@@ -58,7 +81,7 @@ describe("@officegen/optional PPTX template and design signals", () => {
       }
     });
     expect(created.fields?.map((field) => field.name)).toContain("quarter");
-    expect(created.mapping?.quarter).toMatch(/^pptx:s001:shape:/);
+    expect(created.mapping?.quarter).toMatch(/^pptx:slide-[a-f0-9]{8}:shape:/);
     expect(created.sourceCapture?.trust?.agentInstruction).toContain("untrusted");
 
     await initDesign({ ...optional, id: "deck-design" });

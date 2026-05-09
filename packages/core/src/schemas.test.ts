@@ -34,6 +34,54 @@ describe("schema registry", () => {
       target: "xlsx",
       ops: [{ op: "xlsx.setCell", cell: "A1", value: "ok" }]
     }).ok).toBe(true);
+    expect(validateSchema("officegen.edit.ops@1.2", {
+      schema: "officegen.edit.ops@1.2",
+      target: "pptx",
+      ops: [{ op: "pptx.duplicateSlide", slide: 1 }]
+    }).ok).toBe(true);
+    expect(validateSchema("officegen.edit.ops@1.2", {
+      schema: "officegen.edit.ops@1.2",
+      target: "xlsx",
+      ops: [{ op: "pptx.duplicateSlide", slide: 1 }]
+    }).ok).toBe(false);
+    expect(validateSchema("officegen.edit.ops@1.2", {
+      schema: "officegen.edit.ops@1.2",
+      target: "pdf",
+      ops: [{ op: "setText", selector: { stableObjectId: "pdf:document:page:0001" }, text: "Nope" }]
+    }).ok).toBe(false);
+  });
+
+  it("rejects structural edit ops with missing or unrelated arguments", () => {
+    const invalidOps = [
+      { op: "pptx.duplicateSlide" },
+      { op: "pptx.duplicateSlide", after: 1 },
+      { op: "pptx.reorderSlides" },
+      { op: "pptx.reorderSlides", order: [1, 2], text: "ignored" },
+      { op: "pptx.insertBulletItems", selector: { stableObjectId: "pptx:slide-a1b2c3d4:shape:0001" } },
+      { op: "docx.insertParagraphAfter", text: "Inserted" },
+      { op: "xlsx.insertRows", rowIndex: 2 },
+      { op: "xlsx.updateTable", startCell: "A1" },
+      { op: "pdf.textOverlay", page: 1, text: "Overlay", x: 10 },
+      { op: "pdf.annotation", page: 1, text: "Note", x: 10, y: 10, color: "#f00" }
+    ];
+
+    for (const editOp of invalidOps) {
+      expect(
+        validateSchema("officegen.edit.ops@1.2", {
+          schema: "officegen.edit.ops@1.2",
+          target: "pptx",
+          ops: [editOp]
+        }).ok
+      ).toBe(false);
+    }
+
+    expect(
+      validateSchema("officegen.edit.ops@1.2", {
+        schema: "officegen.edit.ops@1.2",
+        target: "pptx",
+        ops: [{ op: "pptx.duplicateSlide", selector: { stableObjectId: "pptx:slide-a1b2c3d4:shape:0001" }, after: 1 }]
+      }).ok
+    ).toBe(true);
   });
 
   it("returns actionable validation failures for unknown schemas and schema id mismatches", () => {

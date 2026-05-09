@@ -1,5 +1,5 @@
 import { inspect, type InspectResult } from "./inspect.js";
-import { type InputLike } from "./shared.js";
+import { type InputLike, type OfficegenConfig } from "./shared.js";
 
 export type IssueSeverity = "info" | "warning" | "error";
 
@@ -13,6 +13,7 @@ export interface DiagnoseIssue {
 
 export interface DiagnoseOptions {
   maxTextLength?: number;
+  config?: OfficegenConfig;
 }
 
 export interface DiagnoseResult {
@@ -22,7 +23,7 @@ export interface DiagnoseResult {
 }
 
 export async function diagnose(input: InputLike | InspectResult, options: DiagnoseOptions = {}): Promise<DiagnoseResult> {
-  const inspected = isInspectResult(input) ? input : await inspect(input, { depth: "shallow" });
+  const inspected = isInspectResult(input) ? input : await inspect(input, { depth: "shallow", config: options.config });
   const issues: DiagnoseIssue[] = [];
   const maxTextLength = options.maxTextLength ?? 220;
 
@@ -66,4 +67,3 @@ export const diagnoseDocument = diagnose;
 function isInspectResult(value: unknown): value is InspectResult {
   return Boolean(value && typeof value === "object" && (value as InspectResult).schema === "officegen.inspect.result@1.2");
 }
-

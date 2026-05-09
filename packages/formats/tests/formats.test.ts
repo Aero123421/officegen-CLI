@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import JSZip from "jszip";
+import { getBuiltinConfig } from "@officegen/core";
 import { edit, exportDocument, inspect, inspectInputZipSafety, render, renderChart, renderDiagram, resolveEditSelectors, view } from "../src/index.js";
 
 describe("@officegen/formats MVP", () => {
@@ -31,6 +32,27 @@ describe("@officegen/formats MVP", () => {
     expect(viewed.fidelity).toBe("approximate");
     expect(viewed.pages[0]?.content).toContain("<svg");
     expect(viewed.caveats.length).toBeGreaterThan(0);
+  });
+
+  it("rejects unsupported render target inference instead of falling back to PDF", async () => {
+    await expect(render({ title: "Web", targets: ["html"] })).rejects.toMatchObject({
+      payload: { code: "EXPORT_UNSUPPORTED" }
+    });
+    await expect(render({ title: "Vector", kind: "svg" })).rejects.toMatchObject({
+      payload: { code: "EXPORT_UNSUPPORTED" }
+    });
+  });
+
+  it("rejects render target and output extension mismatches", async () => {
+    await expect(render({ title: "Mismatch" }, { target: "pdf", out: "mismatch.pptx" })).rejects.toMatchObject({
+      payload: { code: "TARGET_EXTENSION_MISMATCH" }
+    });
+  });
+
+  it("surfaces PDF WinAnsi text limitations as OfficegenError", async () => {
+    await expect(render({ title: "\u65e5\u672c\u8a9e", sections: [{ body: "Hello" }] }, { target: "pdf" })).rejects.toMatchObject({
+      payload: { code: "RENDER_FONT_UNSUPPORTED" }
+    });
   });
 
   it("renders charts and diagrams as standalone SVG without external processes", async () => {
@@ -293,12 +315,37 @@ describe("@officegen/formats MVP", () => {
     await expect(inspect({ data: bytes, format: "pptx" })).rejects.toThrow(/Zip safety check failed/);
   });
 
-  it("requires explicit file-backed native renderer for Office-to-PDF export", async () => {
+  it("denies native renderer export unless active config explicitly allows it", async () => {
     const rendered = await render({ title: "Native export", slides: [{ title: "Slide", body: "Body" }] }, { target: "pptx" });
 
     await expect(
       exportDocument({ data: rendered.bytes, format: "pptx" }, { to: "pdf", mode: "native" })
-    ).rejects.toThrow(/EXPORT_UNSUPPORTED: native Office-to-PDF export requires an input file path/);
+    ).rejects.toMatchObject({
+      payload: { code: "SECURITY_EXTERNAL_PROCESS_DENIED" }
+    });
+  });
+
+  it("requires explicit file-backed native renderer for Office-to-PDF export", async () => {
+    const rendered = await render({ title: "Native export", slides: [{ title: "Slide", body: "Body" }] }, { target: "pptx" });
+    const config = getBuiltinConfig("enterprise");
+    config.security.externalProcess = "allow";
+    config.security.renderers = "enabled";
+
+    await expect(
+      exportDocument({ data: rendered.bytes, format: "pptx" }, { to: "pdf", mode: "native", config })
+    ).rejects.toMatchObject({
+      payload: { code: "EXPORT_UNSUPPORTED" }
+    });
+  });
+
+  it("rejects export target and output extension mismatches", async () => {
+    const rendered = await render({ title: "Export mismatch", slides: [{ title: "Slide", body: "Body" }] }, { target: "pptx" });
+
+    await expect(
+      exportDocument({ data: rendered.bytes, format: "pptx" }, { to: "pdf", out: "export-mismatch.html" })
+    ).rejects.toMatchObject({
+      payload: { code: "TARGET_EXTENSION_MISMATCH" }
+    });
   });
 
   it("skips PDF edit operations that target pages outside the document", async () => {

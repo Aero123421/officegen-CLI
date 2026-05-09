@@ -2,6 +2,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   type InputLike,
+  type OfficegenConfig,
   getLoadedZipSafetyReport,
   loadZip,
   normalizeInput,
@@ -28,6 +29,7 @@ export interface AssetInfo {
 export interface ExtractAssetsOptions {
   outDir?: string;
   images?: boolean;
+  config?: OfficegenConfig;
 }
 
 export interface ExtractAssetsResult {
@@ -40,6 +42,7 @@ export interface ReplaceAssetOptions {
   out?: string;
   assetPath: string;
   replacement: Uint8Array | Buffer;
+  config?: OfficegenConfig;
 }
 
 export async function inspectAsset(input: InputLike): Promise<AssetInfo> {
@@ -59,7 +62,7 @@ export async function inspectAsset(input: InputLike): Promise<AssetInfo> {
 
 export async function extractAssets(input: InputLike, options: ExtractAssetsOptions = {}): Promise<ExtractAssetsResult> {
   const normalized = await normalizeInput(input, "unknown");
-  const zip = await loadZip(normalized);
+  const zip = await loadZip(normalized, { zipSafety: { config: options.config } });
   const mediaPrefix =
     normalized.format === "pptx" ? "ppt/media/" : normalized.format === "docx" ? "word/media/" : normalized.format === "xlsx" ? "xl/media/" : "";
   if (!mediaPrefix) throw new Error(`Unsupported asset extraction format: ${normalized.format}`);
@@ -93,7 +96,7 @@ export async function extractAssets(input: InputLike, options: ExtractAssetsOpti
 
 export async function replaceAsset(input: InputLike, options: ReplaceAssetOptions): Promise<{ schema: "officegen.asset.replace.result@1.2"; changed: boolean; out?: string; bytes?: Uint8Array; caveats: string[] }> {
   const normalized = await normalizeInput(input, "unknown");
-  const zip = await loadZip(normalized);
+  const zip = await loadZip(normalized, { zipSafety: { config: options.config } });
   const target = zip.file(options.assetPath);
   if (!target) throw new Error(`Asset path not found: ${options.assetPath}`);
   zip.file(options.assetPath, options.replacement);

@@ -1,7 +1,6 @@
 import { readFile } from "node:fs/promises";
-import { createHash } from "node:crypto";
 import path from "node:path";
-import { loadZip } from "@officegen/formats";
+import { loadZip, stableHashId } from "@officegen/formats";
 
 import {
   OptionalContext,
@@ -518,7 +517,7 @@ export async function capturePptxDesignSignals(
     });
 
     previewCandidates.push({
-      stableObjectId: stableObjectId("slide", slideNo, 1),
+      stableObjectId: stableSlideObjectId(slidePath),
       slide: slideNo,
       title,
       textSnippet: textObjectsOnSlide.map((object) => object.text).filter(Boolean).join(" ").slice(0, 240),
@@ -529,7 +528,7 @@ export async function capturePptxDesignSignals(
     });
 
     slideSignals.push({
-      stableObjectId: stableObjectId("slide", slideNo, 1),
+      stableObjectId: stableSlideObjectId(slidePath),
       slide: slideNo,
       title,
       slideType,
@@ -769,8 +768,8 @@ function extractSlideObjects(xml: string, slide: number, source: string, slideSi
     const text = extractXmlTexts(block, "t").join(" ").replace(/\s+/g, " ").trim();
     objects.push({
       stableObjectId: shapeId
-        ? stableHashObjectId("pptx", `s${String(slide).padStart(3, "0")}`, "shape", `${source}#${shapeId}`)
-        : stableObjectId("shape", slide, shapeOrdinal),
+        ? stableHashId("pptx", slideScope(source), "shape", `${source}#${shapeId}`)
+        : stableObjectId("shape", source, shapeOrdinal),
       slide,
       kind: "shape",
       ordinal: shapeOrdinal,
@@ -788,7 +787,7 @@ function extractSlideObjects(xml: string, slide: number, source: string, slideSi
   for (const block of extractBlocks(xml, "p:pic")) {
     pictureOrdinal += 1;
     objects.push({
-      stableObjectId: stableObjectId("picture", slide, pictureOrdinal),
+      stableObjectId: stableObjectId("picture", source, pictureOrdinal),
       slide,
       kind: "picture",
       ordinal: pictureOrdinal,
@@ -805,7 +804,7 @@ function extractSlideObjects(xml: string, slide: number, source: string, slideSi
     frameOrdinal += 1;
     const kind = /<c:chart\b/i.test(block) ? "chart" : /<dgm:/i.test(block) ? "diagram" : "diagram";
     objects.push({
-      stableObjectId: stableObjectId(kind, slide, frameOrdinal),
+      stableObjectId: stableObjectId(kind, source, frameOrdinal),
       slide,
       kind,
       ordinal: frameOrdinal,
@@ -818,10 +817,10 @@ function extractSlideObjects(xml: string, slide: number, source: string, slideSi
   }
 
   if (/<c:chart\b/i.test(xml) && !objects.some((object) => object.kind === "chart")) {
-    objects.push({ stableObjectId: stableObjectId("chart", slide, 1), slide, kind: "chart", ordinal: 1, source, colors: [], fontSizes: [] });
+    objects.push({ stableObjectId: stableObjectId("chart", source, 1), slide, kind: "chart", ordinal: 1, source, colors: [], fontSizes: [] });
   }
   if (/<dgm:/i.test(xml) && !objects.some((object) => object.kind === "diagram")) {
-    objects.push({ stableObjectId: stableObjectId("diagram", slide, 1), slide, kind: "diagram", ordinal: 1, source, colors: [], fontSizes: [] });
+    objects.push({ stableObjectId: stableObjectId("diagram", source, 1), slide, kind: "diagram", ordinal: 1, source, colors: [], fontSizes: [] });
   }
   return objects;
 }
@@ -1101,12 +1100,25 @@ function firstXmlText(xml: string, localName: string): string | undefined {
   return extractXmlTexts(xml, localName)[0];
 }
 
-function stableObjectId(kind: string, slide: number, ordinal: number): string {
-  return `pptx:s${String(slide).padStart(3, "0")}:${kind}:${String(ordinal).padStart(4, "0")}`;
+function stableSlideObjectId(sourcePath: string): string {
+  return stableHashId("pptx", "deck", "slide", sourcePath);
 }
 
-function stableHashObjectId(format: string, scope: string, kind: string, value: string): string {
-  return `${format}:${scope}:${kind}:${createHash("sha1").update(value).digest("hex").slice(0, 10)}`;
+function stableObjectId(kind: string, sourcePath: string, ordinal: number): string {
+  return `pptx:${slideScope(sourcePath)}:${kind}:${String(ordinal).padStart(4, "0")}`;
+}
+
+function slideScope(sourcePath: string): string {
+  return `slide-${stablePathToken(sourcePath)}`;
+}
+
+function stablePathToken(sourcePath: string): string {
+  let hash = 2166136261;
+  for (const char of sourcePath.toLowerCase()) {
+    hash ^= char.charCodeAt(0);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0").slice(0, 8);
 }
 
 function naturalSort(left: string, right: string): number {

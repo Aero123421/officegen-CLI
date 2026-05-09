@@ -1,7 +1,7 @@
 import { inspect } from "./inspect.js";
 import { AGENT_UNTRUSTED_INSTRUCTION, escapeHtml, escapeXml, makeStableObjectId } from "./shared.js";
 export async function view(input, options = {}) {
-    const inspected = isInspectResult(input) ? input : await inspect(input, { format: undefined, depth: "shallow" });
+    const inspected = isInspectResult(input) ? input : await inspect(input, { format: undefined, depth: "shallow", config: options.config });
     const pages = toPages(inspected, options);
     return {
         schema: "officegen.view.result@1.2",

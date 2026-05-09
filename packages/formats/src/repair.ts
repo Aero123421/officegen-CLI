@@ -1,11 +1,12 @@
 import { edit, type EditOperation } from "./edit.js";
 import { diagnose, type DiagnoseIssue, type DiagnoseResult } from "./diagnose.js";
-import { type InputLike } from "./shared.js";
+import { type InputLike, type OfficegenConfig } from "./shared.js";
 
 export interface RepairOptions {
   out?: string;
   dryRun?: boolean;
   issues?: DiagnoseIssue[] | DiagnoseResult;
+  config?: OfficegenConfig;
 }
 
 export interface RepairResult {
@@ -22,7 +23,7 @@ export async function repair(input: InputLike, options: RepairOptions = {}): Pro
     ? options.issues
     : options.issues?.schema === "officegen.diagnose.result@1.2"
       ? options.issues.issues
-      : (await diagnose(input)).issues;
+      : (await diagnose(input, { config: options.config })).issues;
   const suggestedOps = issueList.flatMap((issue) => (issue.suggestedOps ?? []) as EditOperation[]);
   if (!suggestedOps.length || options.dryRun) {
     return {
@@ -34,7 +35,7 @@ export async function repair(input: InputLike, options: RepairOptions = {}): Pro
       caveats: ["No automatically safe repair operations were available; suggestedOps can be reviewed by an agent or user."]
     };
   }
-  const edited = await edit(input, suggestedOps, { out: options.out });
+  const edited = await edit(input, suggestedOps, { out: options.out, config: options.config });
   return {
     schema: "officegen.repair.result@1.2",
     applied: edited.applied,
@@ -46,4 +47,3 @@ export async function repair(input: InputLike, options: RepairOptions = {}): Pro
 }
 
 export const repairDocument = repair;
-

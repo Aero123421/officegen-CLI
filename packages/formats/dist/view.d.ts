@@ -1,8 +1,9 @@
 import { type InspectResult } from "./inspect.js";
-import { type InputLike, type ObjectMapEntry } from "./shared.js";
+import { type InputLike, type OfficegenConfig, type ObjectMapEntry } from "./shared.js";
 export interface ViewOptions {
     format?: "svg" | "html";
     maxPages?: number;
+    config?: OfficegenConfig;
 }
 export interface ViewPage {
     page: number;

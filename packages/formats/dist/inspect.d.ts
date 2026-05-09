@@ -1,9 +1,10 @@
-import { type AgentSeparatedResult, type InputLike } from "./shared.js";
+import { type AgentSeparatedResult, type InputLike, type OfficegenConfig } from "./shared.js";
 export type InspectDepth = "summary" | "shallow" | "full";
 export interface InspectOptions {
     format?: "pptx" | "docx" | "xlsx" | "pdf" | "unknown";
     depth?: InspectDepth;
     include?: Array<"text" | "assets" | "relationships" | "rawPaths">;
+    config?: OfficegenConfig;
 }
 export interface InspectResult extends AgentSeparatedResult<Record<string, unknown>> {
     schema: "officegen.inspect.result@1.2";

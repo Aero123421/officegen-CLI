@@ -1,10 +1,11 @@
 import { type EditOperation } from "./edit.js";
 import { type DiagnoseIssue, type DiagnoseResult } from "./diagnose.js";
-import { type InputLike } from "./shared.js";
+import { type InputLike, type OfficegenConfig } from "./shared.js";
 export interface RepairOptions {
     out?: string;
     dryRun?: boolean;
     issues?: DiagnoseIssue[] | DiagnoseResult;
+    config?: OfficegenConfig;
 }
 export interface RepairResult {
     schema: "officegen.repair.result@1.2";

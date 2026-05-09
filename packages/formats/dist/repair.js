@@ -5,7 +5,7 @@ export async function repair(input, options = {}) {
         ? options.issues
         : options.issues?.schema === "officegen.diagnose.result@1.2"
             ? options.issues.issues
-            : (await diagnose(input)).issues;
+            : (await diagnose(input, { config: options.config })).issues;
     const suggestedOps = issueList.flatMap((issue) => (issue.suggestedOps ?? []));
     if (!suggestedOps.length || options.dryRun) {
         return {
@@ -17,7 +17,7 @@ export async function repair(input, options = {}) {
             caveats: ["No automatically safe repair operations were available; suggestedOps can be reviewed by an agent or user."]
         };
     }
-    const edited = await edit(input, suggestedOps, { out: options.out });
+    const edited = await edit(input, suggestedOps, { out: options.out, config: options.config });
     return {
         schema: "officegen.repair.result@1.2",
         applied: edited.applied,

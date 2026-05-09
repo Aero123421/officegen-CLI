@@ -18,7 +18,7 @@ export async function inspect(input, options = {}) {
 export const inspectDocument = inspect;
 export const inspectOfficeFile = inspect;
 async function inspectPptx(input, options) {
-    const zip = await loadZip(input);
+    const zip = await loadZip(input, { zipSafety: { config: options.config } });
     const paths = sortedZipFiles(zip);
     const mediaPaths = paths.filter((path) => /^ppt\/media\//i.test(path));
     const { slides, objectMap } = await inspectSlides(zip);
@@ -47,7 +47,7 @@ async function inspectPptx(input, options) {
     };
 }
 async function inspectDocx(input, options) {
-    const zip = await loadZip(input);
+    const zip = await loadZip(input, { zipSafety: { config: options.config } });
     const paths = sortedZipFiles(zip);
     const { paragraphs, objectMap } = await inspectParagraphs(zip);
     const mediaPaths = paths.filter((path) => /^word\/media\//i.test(path));
@@ -76,7 +76,7 @@ async function inspectDocx(input, options) {
     };
 }
 async function inspectXlsx(input, options) {
-    const zip = await loadZip(input);
+    const zip = await loadZip(input, { zipSafety: { config: options.config } });
     const paths = sortedZipFiles(zip);
     const { sheets, objectMap, sharedStrings } = await inspectSheets(zip);
     const macros = paths.filter((path) => /vbaProject\.bin$/i.test(path));

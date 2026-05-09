@@ -1,8 +1,9 @@
+import { type OfficegenConfig } from "@officegen/core";
 export type RenderTarget = "pptx" | "docx" | "xlsx" | "pdf";
 export interface DocumentIR {
     title?: string;
-    kind?: RenderTarget;
-    targets?: RenderTarget[];
+    kind?: string;
+    targets?: string[];
     sections?: Array<{
         id?: string;
         title?: string;
@@ -26,7 +27,8 @@ export interface DocumentIR {
 }
 export interface RenderOptions {
     out?: string;
-    target?: RenderTarget;
+    target?: string;
+    config?: OfficegenConfig;
 }
 export interface RenderResult {
     schema: "officegen.render.result@1.2";
