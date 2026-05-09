@@ -6,9 +6,12 @@ export type RenderTarget = "pptx" | "docx" | "xlsx" | "pdf";
 export interface DocumentIR {
   title?: string;
   kind?: RenderTarget;
+  targets?: RenderTarget[];
   sections?: Array<{
+    id?: string;
     title?: string;
     body?: string | string[];
+    blocks?: Array<{ type?: string; text?: string; rows?: Array<Record<string, unknown> | unknown[]> }>;
     rows?: Array<Record<string, unknown> | unknown[]>;
     items?: string[];
   }>;
@@ -30,7 +33,7 @@ export interface RenderResult {
 }
 
 export async function render(ir: DocumentIR, options: RenderOptions = {}): Promise<RenderResult> {
-  const target = options.target ?? ir.kind ?? inferTarget(options.out) ?? "pdf";
+  const target = options.target ?? ir.kind ?? inferTarget(options.out) ?? ir.targets?.find(isRenderTarget) ?? "pdf";
   if (target === "pptx") return renderPptx(ir, options);
   if (target === "docx") return renderDocx(ir, options);
   if (target === "xlsx") return renderXlsx(ir, options);
@@ -43,7 +46,7 @@ async function renderPptx(ir: DocumentIR, options: RenderOptions): Promise<Rende
   const mod = (await import("pptxgenjs")) as unknown as { default: new () => any };
   const pptx = new mod.default();
   pptx.layout = "LAYOUT_WIDE";
-  const slides = ir.slides?.length ? ir.slides : (ir.sections ?? [{ title: ir.title ?? "Untitled", body: "" }]);
+  const slides = ir.slides?.length ? ir.slides : normalizedSections(ir);
   for (const section of slides) {
     const slide = pptx.addSlide();
     slide.background = { color: "FFFFFF" };
@@ -64,9 +67,10 @@ async function renderPptx(ir: DocumentIR, options: RenderOptions): Promise<Rende
 
 async function renderDocx(ir: DocumentIR, options: RenderOptions): Promise<RenderResult> {
   const docx = await import("docx");
+  const sections = normalizedSections(ir);
   const children = [
     new docx.Paragraph({ text: ir.title ?? "Untitled", heading: docx.HeadingLevel.TITLE }),
-    ...(ir.sections ?? []).flatMap((section) => [
+    ...sections.flatMap((section) => [
       ...(section.title ? [new docx.Paragraph({ text: section.title, heading: docx.HeadingLevel.HEADING_1 })] : []),
       ...toLines(section.body).map((line) => new docx.Paragraph({ children: [new docx.TextRun(line)] }))
     ])
@@ -86,7 +90,7 @@ async function renderDocx(ir: DocumentIR, options: RenderOptions): Promise<Rende
 async function renderXlsx(ir: DocumentIR, options: RenderOptions): Promise<RenderResult> {
   const ExcelJS = (await import("exceljs")) as unknown as { default: any };
   const workbook = new ExcelJS.default.Workbook();
-  const sheets = ir.sheets?.length ? ir.sheets : [{ name: ir.title ?? "Sheet1", rows: ir.sections?.flatMap((section) => section.rows ?? []) ?? [] }];
+  const sheets = ir.sheets?.length ? ir.sheets : [{ name: ir.title ?? "Sheet1", rows: rowsFromSections(ir) }];
   for (const sheetSpec of sheets) {
     const sheet = workbook.addWorksheet(sanitizeSheetName(sheetSpec.name ?? "Sheet"));
     const rows = sheetSpec.rows ?? [];
@@ -116,7 +120,7 @@ async function renderPdf(ir: DocumentIR, options: RenderOptions): Promise<Render
   const pdf = await PDFDocument.create();
   const font = await pdf.embedFont(StandardFonts.Helvetica);
   const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
-  const sections = ir.sections?.length ? ir.sections : [{ title: ir.title ?? "Untitled", body: "" }];
+  const sections = normalizedSections(ir);
   for (const section of sections) {
     const page = pdf.addPage([612, 792]);
     const { height } = page.getSize();
@@ -144,9 +148,37 @@ function inferTarget(out?: string): RenderTarget | undefined {
   return ext === "pptx" || ext === "docx" || ext === "xlsx" || ext === "pdf" ? ext : undefined;
 }
 
+function isRenderTarget(value: unknown): value is RenderTarget {
+  return value === "pptx" || value === "docx" || value === "xlsx" || value === "pdf";
+}
+
 function toLines(value?: string | string[]): string[] {
   if (Array.isArray(value)) return value.flatMap((item) => String(item).split(/\r?\n/));
   return String(value ?? "").split(/\r?\n/).filter(Boolean);
+}
+
+function normalizedSections(ir: DocumentIR): Array<{ title?: string; body?: string | string[]; rows?: Array<Record<string, unknown> | unknown[]> }> {
+  const sections = ir.sections?.length ? ir.sections : [{ title: ir.title ?? "Untitled", body: "" }];
+  return sections.map((section) => ({
+    ...section,
+    title: section.title ?? ir.title ?? "Untitled",
+    body: section.body ?? bodyFromBlocks(section.blocks)
+  }));
+}
+
+function bodyFromBlocks(blocks?: Array<{ type?: string; text?: string }>): string {
+  return (blocks ?? [])
+    .map((block) => block.text ?? "")
+    .filter(Boolean)
+    .join("\n");
+}
+
+function rowsFromSections(ir: DocumentIR): Array<Record<string, unknown> | unknown[]> {
+  const rows = (ir.sections ?? []).flatMap((section) => [
+    ...(section.rows ?? []),
+    ...section.blocks?.flatMap((block) => block.rows ?? []) ?? []
+  ]);
+  return rows.length ? rows : [["title", "body"], [ir.title ?? "Untitled", bodyFromBlocks(ir.sections?.[0]?.blocks)]];
 }
 
 function sanitizeSheetName(name: string): string {

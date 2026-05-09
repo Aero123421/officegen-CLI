@@ -13,6 +13,13 @@ import {
   validation,
   writeJsonFile
 } from "./common.js";
+import {
+  capturePptxDesignSignals,
+  type DesignContextCandidate,
+  type DesignMapCandidate,
+  type DesignPreviewCandidate,
+  type PptxDesignSignals
+} from "./design.js";
 
 export type TemplateFieldType = "string" | "number" | "boolean" | "date" | "json";
 
@@ -47,6 +54,10 @@ export interface TemplateCandidate {
   template: TemplateDefinition;
   score: number;
   reasons: string[];
+  sourceMetadata?: PptxDesignSignals["metadata"];
+  previewCandidates?: DesignPreviewCandidate[];
+  contextCandidates?: DesignContextCandidate[];
+  mapCandidates?: DesignMapCandidate[];
 }
 
 export interface TemplateCreateOptions extends OptionalContext {
@@ -57,6 +68,7 @@ export interface TemplateQueryOptions extends OptionalContext {
   query?: string;
   tags?: string[];
   fields?: string[];
+  sourcePath?: string;
 }
 
 export interface TemplateIdOptions extends OptionalContext {
@@ -106,11 +118,15 @@ export async function templateCandidates(options: TemplateQueryOptions = {}): Pr
   const query = options.query?.trim().toLowerCase();
   const tags = new Set((options.tags ?? []).map((tag) => tag.toLowerCase()));
   const fields = new Set((options.fields ?? []).map((field) => field.toLowerCase()));
+  const sourceSignals = options.sourcePath
+    ? await capturePptxDesignSignals(path.resolve(options.cwd ?? process.cwd(), options.sourcePath))
+    : undefined;
 
   return templates
     .map((template) => {
       const reasons: string[] = [];
       let score = 0;
+      const mapCandidates = sourceSignals ? matchTemplateMapCandidates(template, sourceSignals) : undefined;
       const searchable = [template.id, template.name, template.description, ...(template.tags ?? [])]
         .filter(Boolean)
         .join(" ")
@@ -133,12 +149,33 @@ export async function templateCandidates(options: TemplateQueryOptions = {}): Pr
         reasons.push(`fields:${matchedFields.map((field) => field.name).join(",")}`);
       }
 
-      if (!query && tags.size === 0 && fields.size === 0) {
+      if (sourceSignals) {
+        score += 1;
+        reasons.push("source:pptx");
+        if (mapCandidates && mapCandidates.length > 0) {
+          score += mapCandidates.length;
+          reasons.push(`map:${mapCandidates.map((candidate) => candidate.field).join(",")}`);
+        }
+      }
+
+      if (!query && tags.size === 0 && fields.size === 0 && !sourceSignals) {
         score = 1;
         reasons.push("available");
       }
 
-      return { template, score, reasons };
+      return {
+        template,
+        score,
+        reasons,
+        ...(sourceSignals
+          ? {
+              sourceMetadata: sourceSignals.metadata,
+              previewCandidates: sourceSignals.previewCandidates,
+              contextCandidates: sourceSignals.contextCandidates,
+              mapCandidates
+            }
+          : {})
+      };
     })
     .filter((candidate) => candidate.score > 0)
     .sort((left, right) => right.score - left.score || left.template.id.localeCompare(right.template.id));
@@ -237,6 +274,32 @@ function assertTemplateValid(template: TemplateDefinition): void {
   if (!result.ok) {
     throw new Error(`Invalid template: ${result.errors.join("; ")}`);
   }
+}
+
+function matchTemplateMapCandidates(
+  template: TemplateDefinition,
+  sourceSignals: PptxDesignSignals
+): DesignMapCandidate[] {
+  const templateFields = new Set((template.fields ?? []).map((field) => normalizeField(field.name)).filter(Boolean));
+  if (templateFields.size === 0) return sourceSignals.mapCandidates.slice(0, 8);
+
+  const matched: DesignMapCandidate[] = [];
+  for (const candidate of sourceSignals.mapCandidates) {
+    const normalizedCandidate = normalizeField(candidate.field);
+    if (!normalizedCandidate) continue;
+    if (
+      templateFields.has(normalizedCandidate) ||
+      [...templateFields].some((field) => field.includes(normalizedCandidate) || normalizedCandidate.includes(field))
+    ) {
+      matched.push(candidate);
+    }
+    if (matched.length >= 8) break;
+  }
+  return matched;
+}
+
+function normalizeField(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
 
 function templatePath(context: OptionalContext, id: string): string {

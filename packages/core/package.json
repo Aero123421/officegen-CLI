@@ -1,9 +1,15 @@
 {
   "name": "@officegen/core",
-  "version": "0.1.0",
+  "version": "1.2.0",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "files": [
+    "dist/**/*.js",
+    "dist/**/*.d.ts",
+    "!dist/**/*.test.*",
+    "package.json"
+  ],
   "scripts": {
     "build": "tsc -b"
   },

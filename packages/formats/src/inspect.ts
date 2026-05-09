@@ -4,12 +4,12 @@ import {
   type InputLike,
   type ObjectMapEntry,
   extractXmlTexts,
+  extractXmlTextsFromTag,
   loadZip,
   makeStableObjectId,
   normalizeInput,
   readZipText,
   sortedZipFiles,
-  stripXmlTags,
   trustedMeta
 } from "./shared.js";
 import { PDFDocument } from "pdf-lib";
@@ -48,7 +48,7 @@ async function inspectPptx(input: Awaited<ReturnType<typeof normalizeInput>>, op
 
   for (const [slideIndex, slidePath] of slidePaths.entries()) {
     const xml = (await readZipText(zip, slidePath)) ?? "";
-    const texts = extractXmlTexts(xml, "t");
+    const texts = extractXmlTextsFromTag(xml, "a:t");
     const slideNo = slideIndex + 1;
     const textObjects = texts.map((text, textIndex) => {
       const entry: ObjectMapEntry = {
@@ -167,20 +167,19 @@ async function inspectXlsx(input: Awaited<ReturnType<typeof normalizeInput>>, op
   const sheetPaths = paths.filter((path) => /^xl\/worksheets\/sheet\d+\.xml$/i.test(path)).sort(naturalSort);
   const sharedStringsXml = (await readZipText(zip, "xl/sharedStrings.xml")) ?? "";
   const sharedStrings = [...sharedStringsXml.matchAll(/<si[\s\S]*?<\/si>/g)].map((match) =>
-    extractXmlTexts(match[0], "t").join("")
+    extractXmlTextsFromTag(match[0], "t").join("")
   );
   const objectMap: ObjectMapEntry[] = [];
   const sheets = [];
 
   for (const [sheetIndex, sheetPath] of sheetPaths.entries()) {
     const xml = (await readZipText(zip, sheetPath)) ?? "";
-    const cells = [...xml.matchAll(/<c([^>]*)>([\s\S]*?)<\/c>/g)].map((match, cellIndex) => {
-      const attrs = match[1] ?? "";
-      const body = match[2] ?? "";
-      const ref = /r="([^"]+)"/.exec(attrs)?.[1] ?? `cell${cellIndex + 1}`;
-      const type = /t="([^"]+)"/.exec(attrs)?.[1];
-      const raw = extractXmlTexts(body, "v")[0] ?? extractXmlTexts(body, "t")[0] ?? stripXmlTags(body);
-      const value = type === "s" ? sharedStrings[Number(raw)] ?? raw : raw;
+    const cells = extractWorksheetCells(xml).map((cell, cellIndex) => {
+      const ref = cell.ref;
+      const type = getXmlAttribute(cell.attrs, "t");
+      const raw = extractXmlTextsFromTag(cell.body, "v")[0] ?? "";
+      const inlineText = extractXmlTextsFromTag(cell.body, "t").join("");
+      const value = type === "s" ? sharedStrings[Number(raw)] ?? raw : type === "inlineStr" ? inlineText : raw;
       const stableObjectId = makeStableObjectId("xlsx", `s${String(sheetIndex + 1).padStart(3, "0")}`, "cell", cellIndex + 1);
       const entry: ObjectMapEntry = {
         stableObjectId,
@@ -262,3 +261,49 @@ function naturalSort(a: string, b: string): number {
   return a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" });
 }
 
+interface WorksheetCell {
+  attrs: string;
+  body: string;
+  ref: string;
+}
+
+function extractWorksheetCells(xml: string): WorksheetCell[] {
+  const rows = [...xml.matchAll(/<row\b([^>]*)>([\s\S]*?)<\/row>/g)];
+  if (!rows.length) return extractCellTags(xml, 1);
+  return rows.flatMap((rowMatch, rowIndex) => {
+    const rowAttrs = rowMatch[1] ?? "";
+    const rowBody = rowMatch[2] ?? "";
+    const rowNumber = Number(getXmlAttribute(rowAttrs, "r") ?? rowIndex + 1);
+    return extractCellTags(rowBody, Number.isFinite(rowNumber) && rowNumber > 0 ? rowNumber : rowIndex + 1);
+  });
+}
+
+function extractCellTags(xml: string, rowNumber: number): WorksheetCell[] {
+  let ordinalInRow = 0;
+  return [...xml.matchAll(/<c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g)].map((match) => {
+    ordinalInRow += 1;
+    const attrs = match[1] ?? "";
+    return {
+      attrs,
+      body: match[2] ?? "",
+      ref: getXmlAttribute(attrs, "r") ?? `${columnName(ordinalInRow)}${rowNumber}`
+    };
+  });
+}
+
+function getXmlAttribute(attrs: string, name: string): string | undefined {
+  const pattern = new RegExp(`(?:^|\\s)${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`);
+  const match = pattern.exec(attrs);
+  return match?.[1] ?? match?.[2];
+}
+
+function columnName(index: number): string {
+  let value = index;
+  let name = "";
+  while (value > 0) {
+    value -= 1;
+    name = String.fromCharCode(65 + (value % 26)) + name;
+    value = Math.floor(value / 26);
+  }
+  return name || "A";
+}

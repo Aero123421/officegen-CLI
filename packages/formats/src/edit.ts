@@ -1,5 +1,6 @@
 import {
   type InputLike,
+  type ObjectMapEntry,
   isOfficeFormat,
   loadZip,
   normalizeInput,
@@ -8,6 +9,7 @@ import {
   writeOutput,
   zipToBytes
 } from "./shared.js";
+import { inspect } from "./inspect.js";
 import { PDFDocument, rgb, StandardFonts } from "pdf-lib";
 
 export type EditOperation =
@@ -19,7 +21,33 @@ export type EditOperation =
 export interface EditOptions {
   out?: string;
   dryRun?: boolean;
+  resolveSelectors?: boolean;
   format?: "pptx" | "docx" | "xlsx" | "pdf" | "unknown";
+}
+
+export interface EditSelectorResolution {
+  operationIndex: number;
+  selector: { stableObjectId?: string; contains?: string };
+  stableObjectId?: string;
+  matched: boolean;
+  matchCount: number;
+  matches: Array<{
+    stableObjectId: string;
+    kind: string;
+    label?: string;
+    text?: string;
+    sourcePath?: string;
+    xmlPath?: string;
+  }>;
+  reason?: "not-found" | "unsupported-selector";
+}
+
+export interface ResolveEditSelectorsResult {
+  schema: "officegen.edit.selectors@1.2";
+  format: string;
+  resolutions: EditSelectorResolution[];
+  objectMap: ObjectMapEntry[];
+  caveats: string[];
 }
 
 export interface EditResult {
@@ -30,17 +58,86 @@ export interface EditResult {
   skipped: number;
   out?: string;
   bytes?: Uint8Array;
+  resolvedSelectors?: EditSelectorResolution[];
   caveats: string[];
 }
 
 export async function edit(input: InputLike, operations: EditOperation[], options: EditOptions = {}): Promise<EditResult> {
   const normalized = await normalizeInput(input, options.format ?? "unknown");
-  if (isOfficeFormat(normalized.format)) return editOfficeXml(normalized, operations, options);
-  if (normalized.format === "pdf") return editPdf(normalized, operations, options);
+  const selectorResult = options.resolveSelectors ? await resolveEditSelectorsForNormalized(normalized, operations) : undefined;
+  const result = isOfficeFormat(normalized.format)
+    ? await editOfficeXml(normalized, operations, options)
+    : normalized.format === "pdf"
+      ? await editPdf(normalized, operations, options)
+      : undefined;
+  if (result) {
+    if (selectorResult) result.resolvedSelectors = selectorResult.resolutions;
+    return result;
+  }
   throw new Error(`Unsupported edit format: ${normalized.format}`);
 }
 
 export const editDocument = edit;
+
+export async function resolveEditSelectors(
+  input: InputLike,
+  operations: EditOperation[],
+  options: Pick<EditOptions, "format"> = {}
+): Promise<ResolveEditSelectorsResult> {
+  const normalized = await normalizeInput(input, options.format ?? "unknown");
+  return resolveEditSelectorsForNormalized(normalized, operations);
+}
+
+async function resolveEditSelectorsForNormalized(
+  normalized: Awaited<ReturnType<typeof normalizeInput>>,
+  operations: EditOperation[]
+): Promise<ResolveEditSelectorsResult> {
+  const inspected = await inspect({ data: normalized.bytes, format: normalized.format });
+  const resolutions = operations.flatMap((operation, index) => {
+    const selector = selectorForOperation(operation);
+    if (!selector) return [];
+    const matches = selector.stableObjectId
+      ? inspected.objectMap.filter((entry) => entry.stableObjectId === selector.stableObjectId)
+      : selector.contains
+        ? inspected.objectMap.filter((entry) => entry.text?.includes(selector.contains as string))
+        : [];
+    return [
+      {
+        operationIndex: index,
+        selector,
+        stableObjectId: selector.stableObjectId,
+        matched: matches.length > 0,
+        matchCount: matches.length,
+        matches: matches.map(selectorMatch),
+        reason: matches.length ? undefined : selector.stableObjectId || selector.contains ? "not-found" : "unsupported-selector"
+      } satisfies EditSelectorResolution
+    ];
+  });
+  return {
+    schema: "officegen.edit.selectors@1.2",
+    format: inspected.trusted.format,
+    resolutions,
+    objectMap: inspected.objectMap,
+    caveats: ["Selector resolution is based on the current inspect objectMap stableObjectId values."]
+  };
+}
+
+function selectorForOperation(operation: EditOperation): { stableObjectId?: string; contains?: string } | undefined {
+  if (operation.type === "setText") return operation.selector;
+  if (operation.type === "replaceText") return operation.selector;
+  return undefined;
+}
+
+function selectorMatch(entry: ObjectMapEntry): EditSelectorResolution["matches"][number] {
+  return {
+    stableObjectId: entry.stableObjectId,
+    kind: entry.kind,
+    label: entry.label,
+    text: entry.text,
+    sourcePath: entry.sourcePath,
+    xmlPath: entry.xmlPath
+  };
+}
 
 async function editOfficeXml(
   input: Awaited<ReturnType<typeof normalizeInput>>,
@@ -216,7 +313,8 @@ function replaceByStableObjectId(
   if (format === "xlsx" && kind === "cell") {
     const sheetNo = Number(scope.replace(/^s/, ""));
     if (path !== `xl/worksheets/sheet${sheetNo}.xml`) return { changed: false, matchedPath: false, xml };
-    return replaceNthBlock(xml, /<c([^>]*)>[\s\S]*?<\/c>/g, ordinal, (cell) => {
+    return replaceNthBlock(xml, /<c\b[^>]*?(?:\/>|>[\s\S]*?<\/c>)/g, ordinal, (cell) => {
+      if (/\/>$/.test(cell)) return cell.replace(/\/>$/, `><v>${escapeXmlText(text)}</v></c>`);
       if (/<v>[\s\S]*?<\/v>/.test(cell)) return cell.replace(/<v>[\s\S]*?<\/v>/, `<v>${escapeXmlText(text)}</v>`);
       return cell.replace(/<\/c>$/, `<v>${escapeXmlText(text)}</v></c>`);
     });

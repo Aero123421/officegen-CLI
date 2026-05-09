@@ -11,6 +11,16 @@ const envelopeSchema: JsonObject = {
   $id: "officegen.envelope@1.2",
   type: "object",
   required: ["schema", "ok", "cliVersion", "pathsRedacted", "warnings", "diagnostics", "artifacts", "nextSuggestedCommands"],
+  allOf: [
+    {
+      if: { properties: { ok: { const: true } }, required: ["ok"] },
+      then: { required: ["result"] }
+    },
+    {
+      if: { properties: { ok: { const: false } }, required: ["ok"] },
+      then: { required: ["error", "availableCommands"] }
+    }
+  ],
   properties: {
     schema: schemaField("officegen.envelope@1.2"),
     ok: { type: "boolean" },
@@ -335,8 +345,15 @@ export class SchemaRegistry {
       };
     }
     const ok = validate(value);
-    return ok ? { ok: true } : { ok: false, errors: validate.errors ?? [] };
+    return ok ? { ok: true } : { ok: false, errors: cloneErrors(validate.errors ?? []) };
   }
+}
+
+function cloneErrors(errors: ErrorObject[]): ErrorObject[] {
+  return errors.map((error) => ({
+    ...error,
+    params: { ...error.params }
+  }));
 }
 
 export const defaultSchemaRegistry = new SchemaRegistry();

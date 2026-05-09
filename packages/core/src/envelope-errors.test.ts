@@ -35,4 +35,53 @@ describe("errors and envelope", () => {
     expect(envelope.availableCommands).toContain("inspect");
     expect(validation.ok).toBe(true);
   });
+
+  it("rejects envelopes that do not match their ok discriminator", () => {
+    expect(
+      validateSchema("officegen.envelope@1.2", {
+        schema: "officegen.envelope@1.2",
+        ok: true,
+        cliVersion: "1.2.0",
+        pathsRedacted: true,
+        warnings: [],
+        diagnostics: [],
+        artifacts: [],
+        nextSuggestedCommands: []
+      }).ok
+    ).toBe(false);
+
+    expect(
+      validateSchema("officegen.envelope@1.2", {
+        schema: "officegen.envelope@1.2",
+        ok: false,
+        cliVersion: "1.2.0",
+        pathsRedacted: true,
+        warnings: [],
+        diagnostics: [],
+        artifacts: [],
+        nextSuggestedCommands: [],
+        availableCommands: []
+      }).ok
+    ).toBe(false);
+  });
+
+  it("rejects error envelopes missing required error payload fields", () => {
+    const validation = validateSchema("officegen.envelope@1.2", {
+      schema: "officegen.envelope@1.2",
+      ok: false,
+      cliVersion: "1.2.0",
+      pathsRedacted: true,
+      error: { code: "FEATURE_DISABLED", message: "disabled" },
+      warnings: [],
+      diagnostics: [],
+      artifacts: [],
+      availableCommands: [],
+      nextSuggestedCommands: []
+    });
+
+    expect(validation.ok).toBe(false);
+    if (!validation.ok) {
+      expect(validation.errors.some((error) => error.instancePath === "/error" && error.keyword === "required")).toBe(true);
+    }
+  });
 });

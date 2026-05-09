@@ -1,6 +1,6 @@
 {
-  "name": "officegen-cli-workspace",
-  "version": "0.0.0",
+  "name": "officegen-cli",
+  "version": "1.2.0",
   "private": false,
   "description": "Officegen CLI workspace",
   "type": "module",

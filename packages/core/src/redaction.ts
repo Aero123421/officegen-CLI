@@ -1,12 +1,13 @@
 import path from "node:path";
+import { homedir } from "node:os";
 import type { JsonValue, OfficegenConfig, RedactionRecord, RedactionResult, RunFolder } from "./types.js";
 
 const secretPatterns: Array<{ kind: "secret-like-token"; pattern: RegExp; replacement: string }> = [
   { kind: "secret-like-token", pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, replacement: "<redacted:secret-like-token>" },
   { kind: "secret-like-token", pattern: /\bBearer\s+[A-Za-z0-9._~+/=-]{12,}\b/g, replacement: "Bearer <redacted:secret-like-token>" },
   { kind: "secret-like-token", pattern: /\b(?:sk|pk|api|key|token|secret)[-_]?[A-Za-z0-9]{16,}\b/gi, replacement: "<redacted:secret-like-token>" },
-  { kind: "secret-like-token", pattern: /\b(?:password|pwd|secret|token|api[_-]?key)=([^;&\s]{6,})/gi, replacement: "$&" },
-  { kind: "secret-like-token", pattern: /([?&](?:token|key|secret|signature)=)[^&#\s]+/gi, replacement: "$1<redacted:secret-like-token>" },
+  { kind: "secret-like-token", pattern: /\b[A-Za-z0-9_.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret)[A-Za-z0-9_.-]*\s*=\s*["']?([^"'\s;&]{6,})["']?/gi, replacement: "$&" },
+  { kind: "secret-like-token", pattern: /([?&](?:access[_-]?token|api[_-]?key|token|key|secret|signature)=)[^&#\s]+/gi, replacement: "$1<redacted:secret-like-token>" },
   { kind: "secret-like-token", pattern: /\b(?:Cookie|Set-Cookie):\s*[^\n\r]+/gi, replacement: "Cookie: <redacted:secret-like-token>" }
 ];
 
@@ -15,7 +16,7 @@ export function redactSecretsInText(text: string, location = "$"): RedactionResu
   const redactions: RedactionRecord[] = [];
   for (const { pattern, replacement } of secretPatterns) {
     value = value.replace(pattern, (match, ...args: unknown[]) => {
-      const finalReplacement = replacement === "$&" ? String(match).replace(/=.+$/, "=<redacted:secret-like-token>") : replacement.replace("$1", String(args[0] ?? ""));
+      const finalReplacement = replacement === "$&" ? String(match).replace(/=.*/, "=<redacted:secret-like-token>") : replacement.replace("$1", String(args[0] ?? ""));
       redactions.push({ kind: "secret-like-token", location, replacement: finalReplacement });
       return finalReplacement;
     });
@@ -23,31 +24,80 @@ export function redactSecretsInText(text: string, location = "$"): RedactionResu
   return { value, redactions };
 }
 
-function normalize(filePath: string): string {
-  return process.platform === "win32" ? filePath.toLowerCase() : filePath;
+function expandHome(filePath: string): string {
+  return filePath === "~" || filePath.startsWith("~/") || filePath.startsWith("~\\")
+    ? path.join(homedir(), filePath.slice(2))
+    : filePath;
 }
 
 function pathReplacements(config: OfficegenConfig, run?: RunFolder): Array<{ root: string; label: string }> {
   const roots = [
-    { root: path.resolve(config.paths.projectRoot), label: "<project>" },
-    { root: path.resolve(config.paths.userConfigDir), label: "<userConfig>" }
+    { root: config.paths.projectRoot, label: "<project>" },
+    { root: path.resolve(expandHome(config.paths.projectRoot)), label: "<project>" },
+    { root: config.paths.userConfigDir, label: "<userConfig>" },
+    { root: path.resolve(expandHome(config.paths.userConfigDir)), label: "<userConfig>" },
+    { root: homedir(), label: "<userHome>" },
+    { root: path.resolve(homedir()), label: "<userHome>" }
   ];
-  if (run) roots.push({ root: path.resolve(run.root), label: "<run>" });
-  return roots.sort((a, b) => b.root.length - a.root.length);
+  if (run) roots.push({ root: run.root, label: "<run>" }, { root: path.resolve(run.root), label: "<run>" });
+  const seen = new Set<string>();
+  return roots
+    .map(({ root, label }) => ({ root: root.replace(/[\\/]+$/, ""), label }))
+    .filter(({ root }) => root.length > 0)
+    .filter(({ root }) => {
+      const key = root.replace(/\\/g, "/").toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .sort((a, b) => b.root.length - a.root.length);
+}
+
+function rootMatcher(root: string): RegExp {
+  const escaped = root
+    .replace(/\\/g, "/")
+    .replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+    .replace(/\//g, "[\\\\/]");
+  return new RegExp(`${escaped}((?:[\\\\/][^"'\\s,;)]*)?)`, "gi");
 }
 
 export function redactPathsInText(text: string, config: OfficegenConfig, location = "$", run?: RunFolder): RedactionResult<string> {
   let value = text;
   const redactions: RedactionRecord[] = [];
   for (const { root, label } of pathReplacements(config, run)) {
-    const escaped = root.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&").replace(/\\\\/g, "[\\\\/]");
-    const matcher = new RegExp(`${escaped}([\\\\/][^"'\\s,;)]*)?`, "gi");
-    value = value.replace(matcher, (match) => {
-      const suffix = match.slice(root.length).replace(/\\/g, "/");
-      const replacement = `${label}${suffix}`;
+    value = value.replace(rootMatcher(root), (_match, suffix: string) => {
+      const normalizedSuffix = String(suffix ?? "").replace(/\\/g, "/");
+      const replacement = `${label}${normalizedSuffix}`;
       redactions.push({ kind: "absolute-path", location, replacement });
       return replacement;
     });
+  }
+  for (const uncMatch of [...value.matchAll(/\\\\[^\\/\s]+[\\/][^\\/\s]+(?:[\\/][^"'\s,;)]*)?/g)]) {
+    const replacement = "<uncPath>";
+    value = value.replace(uncMatch[0], replacement);
+    redactions.push({ kind: "absolute-path", location, replacement });
+  }
+  for (const driveMatch of [...value.matchAll(/\b[A-Za-z]:[\\/][^"'\s,;)]*/g)]) {
+    if (!driveMatch[0].startsWith("<")) {
+      const replacement = "<absolutePath>";
+      value = value.replace(driveMatch[0], replacement);
+      redactions.push({ kind: "absolute-path", location, replacement });
+    }
+  }
+  for (const homeMatch of [...value.matchAll(/(?<![\w:>/])~[\\/][^"'\s,;)]*/g)]) {
+    const replacement = "<userHome>";
+    value = value.replace(homeMatch[0], replacement);
+    redactions.push({ kind: "absolute-path", location, replacement });
+  }
+  for (const posixMatch of [...value.matchAll(/(?<![\w:>/])\/(?!\/)[^"'\s,;)]+(?:\/[^"'\s,;)]+)+/g)]) {
+    const raw = posixMatch[0];
+    const prefix = raw.startsWith("/") ? "" : raw[0];
+    const pathValue = prefix ? raw.slice(1) : raw;
+    if (!pathValue.startsWith("<")) {
+      const replacement = "<absolutePath>";
+      redactions.push({ kind: "absolute-path", location, replacement });
+      value = value.replace(pathValue, replacement);
+    }
   }
   return { value, redactions };
 }
@@ -96,7 +146,5 @@ export function redactJson<T extends JsonValue>(value: T, config: OfficegenConfi
 }
 
 export function isAbsolutePathRedactionNeeded(text: string): boolean {
-  return path.isAbsolute(text) || /^[A-Za-z]:[\\/]/.test(text);
+  return path.isAbsolute(text) || /^[A-Za-z]:[\\/]/.test(text) || /^\\\\[^\\/]+[\\/][^\\/]+/.test(text) || /^~[\\/]/.test(text);
 }
-
-void normalize;

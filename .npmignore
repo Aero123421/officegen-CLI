@@ -2,3 +2,14 @@ node_modules/
 .officegen/
 packages/*/tsconfig.tsbuildinfo
 npm-debug.log*
+officegen_cli_spec_v1_2_hardened_ja.md
+scripts/
+tsconfig.base.json
+vitest.config.ts
+packages/*/src/
+packages/*/test/
+packages/*/tests/
+packages/*/tsconfig.json
+packages/*/dist/**/*.map
+packages/*/dist/**/*.test.*
+packages/*/dist/**/test.*

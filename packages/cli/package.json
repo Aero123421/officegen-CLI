@@ -1,12 +1,17 @@
 {
   "name": "officegen",
-  "version": "0.1.0",
+  "version": "1.2.0",
   "type": "module",
   "bin": {
     "officegen": "dist/main.js"
   },
   "main": "dist/main.js",
   "types": "dist/main.d.ts",
+  "files": [
+    "dist/**/*.js",
+    "dist/**/*.d.ts",
+    "package.json"
+  ],
   "scripts": {
     "build": "tsc -b"
   },

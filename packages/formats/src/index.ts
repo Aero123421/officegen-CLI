@@ -8,3 +8,13 @@ export * from "./charts.js";
 export * from "./diagrams.js";
 export * from "./diagnose.js";
 export * from "./repair.js";
+export {
+  getLoadedZipSafetyReport,
+  inspectInputZipSafety,
+  loadZip
+} from "./shared.js";
+export type {
+  LoadZipOptions,
+  NormalizedInput,
+  ZipSafetyLoadOptions
+} from "./shared.js";

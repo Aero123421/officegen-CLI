@@ -4,6 +4,16 @@ import os from "node:os";
 import path from "node:path";
 import { Command } from "commander";
 import {
+  OFFICEGEN_CLI_VERSION,
+  getBuiltinConfig,
+  getSchema,
+  listSchemas,
+  redactJson,
+  validateSchema,
+  type JsonValue,
+  type OfficegenConfig
+} from "@officegen/core";
+import {
   diagnose,
   edit,
   exportDocument,
@@ -46,7 +56,7 @@ import {
   validateTemplate
 } from "@officegen/optional";
 
-const CLI_VERSION = "0.1.0";
+const CLI_VERSION = OFFICEGEN_CLI_VERSION;
 const SPEC_VERSION = "1.2";
 const ENVELOPE_SCHEMA = "officegen.envelope@1.2";
 
@@ -125,6 +135,8 @@ interface RuntimeContext {
 
 interface CliErrorPayload {
   code: string;
+  category?: string;
+  severity?: "info" | "warning" | "error" | "critical";
   message: string;
   feature?: string;
   command?: string;
@@ -442,6 +454,11 @@ export async function runCli(argv: string[], options: RunCliOptions = {}): Promi
     return;
   }
 
+  if (!topCommand && (hasFlag(argv, "--help") || hasFlag(argv, "-h"))) {
+    writeNativeHelp(context, stdout);
+    return;
+  }
+
   if (!topCommand && argv.slice(2).some((arg) => arg.startsWith("-"))) {
     await parseWithCommander(argv, context, stdout, stderr, now);
     return;
@@ -479,6 +496,35 @@ export async function runCli(argv: string[], options: RunCliOptions = {}): Promi
     const envelope = makeErrorEnvelope(context, commandText, payload, now);
     writeResult(context, envelope, context.json ? stdout : stderr);
   }
+}
+
+function writeNativeHelp(context: RuntimeContext, stdout: (text: string) => void): void {
+  const enabled = context.registry
+    .filter((entry) => entry.enabled && entry.visibleInHelp)
+    .filter((entry) => !context.agent || entry.visibleToAgents);
+  const disabled = context.registry.filter((entry) => !entry.enabled && entry.visibleInHelp);
+  const lines = [
+    "officegen - AI-friendly Office/PDF runtime",
+    "",
+    "Usage:",
+    "  officegen <command> [options]",
+    "",
+    "Commands:",
+    ...enabled.map((entry) => `  ${entry.commandGroup.padEnd(12)} ${entry.description}`),
+    "",
+    "Options:",
+    "  --json       emit JSON envelope",
+    "  --agent      filter output for agents",
+    "  -V, --version",
+    "  -h, --help",
+    "",
+    "Run:",
+    "  officegen capabilities --agent --json"
+  ];
+  if (disabled.length) {
+    lines.splice(lines.length - 2, 0, "", "Disabled by current profile:", ...disabled.map((entry) => `  ${entry.commandGroup.padEnd(12)} disabled by profile ${context.config.profile ?? "substrate"}`));
+  }
+  stdout(lines.join("\n"));
 }
 
 async function parseWithCommander(
@@ -544,13 +590,14 @@ function createProgram(
 
 function registerLeaf(
   program: Command,
-  name: string,
+  name: FeatureKey,
   description: string,
   context: RuntimeContext,
   stdout: (text: string) => void,
   now: Date,
   payloadFactory: (context: RuntimeContext) => unknown | Promise<unknown>
 ): void {
+  if (!isCommandVisibleInNativeHelp(context, name)) return;
   program.addCommand(
     baseCommand(name, description).action(async () => {
       const payload = await payloadFactory(context);
@@ -570,6 +617,7 @@ function registerGroup(
   now: Date,
   payloadFactory: (context: RuntimeContext, subcommand?: string) => unknown | Promise<unknown> = groupPayload
 ): void {
+  if (!isCommandVisibleInNativeHelp(context, name)) return;
   const group = baseCommand(name, description).action(async () => {
     const payload = await payloadFactory(context);
     const envelope = makeEnvelope(context, commandFromArgv(context.argv), payload, now);
@@ -587,6 +635,11 @@ function registerGroup(
   }
 
   program.addCommand(group);
+}
+
+function isCommandVisibleInNativeHelp(context: RuntimeContext, feature: FeatureKey): boolean {
+  const entry = context.registry.find((candidate) => candidate.commandGroup === feature);
+  return Boolean(entry?.enabled && entry.visibleInHelp && (!context.agent || entry.visibleToAgents));
 }
 
 function registerConfig(program: Command, context: RuntimeContext, stdout: (text: string) => void, now: Date): void {
@@ -620,7 +673,7 @@ function registerSchema(program: Command, context: RuntimeContext, stdout: (text
   });
   schema.addCommand(baseCommand("list", "list schemas").action(async () => writeResult(context, makeEnvelope(context, commandFromArgv(context.argv), schemaListPayload(context), now), stdout)));
   schema.addCommand(baseCommand("get", "get schema").action(async () => writeResult(context, makeEnvelope(context, commandFromArgv(context.argv), schemaGetPayload(context), now), stdout)));
-  schema.addCommand(baseCommand("validate", "validate schema").action(async () => writeResult(context, makeEnvelope(context, commandFromArgv(context.argv), validatePayload(context), now), stdout)));
+  schema.addCommand(baseCommand("validate", "validate schema").action(async () => writeResult(context, makeEnvelope(context, commandFromArgv(context.argv), await validatePayload(context), now), stdout)));
   schema.addCommand(baseCommand("migrate", "migrate schema").action(async () => writeResult(context, makeEnvelope(context, commandFromArgv(context.argv), schemaMigratePayload(context), now), stdout)));
   program.addCommand(schema);
 }
@@ -805,7 +858,7 @@ function makeErrorEnvelope(context: RuntimeContext, command: string, error: CliE
     cliVersion: CLI_VERSION,
     capabilitiesHash: context.capabilitiesHash,
     pathsRedacted: true,
-    error,
+    error: normalizeCliError(error),
     warnings: [],
     diagnostics: [],
     artifacts: [],
@@ -815,20 +868,32 @@ function makeErrorEnvelope(context: RuntimeContext, command: string, error: CliE
 }
 
 function writeResult(context: RuntimeContext, envelope: Envelope, writer: (text: string) => void): void {
+  const safeEnvelope = redactForJson(envelope, context) as Envelope;
   if (context.json) {
-    writer(JSON.stringify(envelope, null, 2));
+    writer(JSON.stringify(safeEnvelope, null, 2));
     return;
   }
 
-  if (!envelope.ok) {
-    writer(`${envelope.error?.code ?? "ERROR"}: ${envelope.error?.message ?? "Command failed"}`);
+  if (!safeEnvelope.ok) {
+    writer(`${safeEnvelope.error?.code ?? "ERROR"}: ${safeEnvelope.error?.message ?? "Command failed"}`);
     return;
   }
 
-  const summary = envelope.result && typeof envelope.result === "object" && "summary" in envelope.result
-    ? String((envelope.result as { summary?: unknown }).summary)
-    : `${envelope.command} completed. Use --json for the v1.2 envelope.`;
+  const summary = safeEnvelope.result && typeof safeEnvelope.result === "object" && "summary" in safeEnvelope.result
+    ? String((safeEnvelope.result as { summary?: unknown }).summary)
+    : `${safeEnvelope.command} completed. Use --json for the v1.2 envelope.`;
   writer(summary);
+}
+
+function normalizeCliError(error: CliErrorPayload): CliErrorPayload {
+  const security = error.code.startsWith("SECURITY_") || error.code.includes("TRUST") || error.code.includes("PLUGIN");
+  const schema = error.code.startsWith("SCHEMA_") || error.code.includes("VALIDATION");
+  const feature = error.code.startsWith("FEATURE_") || error.code === "UNKNOWN_COMMAND";
+  return {
+    ...error,
+    category: error.category ?? (security ? "security" : schema ? "schema" : feature ? "usage" : "runtime"),
+    severity: error.severity ?? (security ? "critical" : "error")
+  };
 }
 
 function extractArrayField(value: unknown, field: string): unknown[] {
@@ -938,22 +1003,15 @@ function doctorPayload(context: RuntimeContext): unknown {
 }
 
 function schemaListPayload(context: RuntimeContext): unknown {
-  const hiddenFeatures = new Set(context.agent ? context.registry.filter((entry) => !entry.visibleToAgents).map((entry) => entry.feature) : []);
-  const schemas = SCHEMAS.filter((schema) => {
-    if (!context.agent) {
-      return true;
-    }
-    if (schema.includes("template")) {
-      return !hiddenFeatures.has("template");
-    }
-    if (schema.includes("design")) {
-      return !hiddenFeatures.has("design");
-    }
-    return true;
-  });
   return {
     schema: "officegen.schema.list@1.2",
-    schemas
+    schemas: listSchemas({ agent: context.agent, config: coreConfigForContext(context) }).map((entry) => ({
+      id: entry.id,
+      feature: entry.feature,
+      stability: entry.stability,
+      introducedIn: entry.introducedIn,
+      deprecated: entry.deprecated
+    }))
   };
 }
 
@@ -967,25 +1025,55 @@ function schemaGetPayload(context: RuntimeContext): unknown {
       details: { schema: id }
     }, 5);
   }
+  const entry = getSchema(id);
+  if (!entry) {
+    throw new CliFailure({
+      code: "SCHEMA_INVALID",
+      command: "schema get",
+      message: `Unknown schema: ${id}`,
+      details: { schema: id }
+    }, 3);
+  }
   return {
     schema: "officegen.schema.definition@1.2",
     id,
-    definition: {
-      $schema: "https://json-schema.org/draft/2020-12/schema",
-      $id: id,
-      type: "object",
-      additionalProperties: true
-    }
+    definition: entry.schema
   };
 }
 
-function validatePayload(context: RuntimeContext): unknown {
+async function validatePayload(context: RuntimeContext): Promise<unknown> {
+  const isSchemaGroup = getTopCommand(context.argv) === "schema";
+  const input = positionalArgs(context.argv, isSchemaGroup ? 4 : 3)[0];
+  const schemaId = optionValue(context.argv, "--schema") ?? (isSchemaGroup ? undefined : "officegen.ir.document@1.2");
+  if (!input) {
+    throw new CliFailure({
+      code: "SCHEMA_INVALID",
+      command: commandFromArgv(context.argv),
+      message: "schema validate requires an input JSON file."
+    }, 2);
+  }
+  if (!schemaId) {
+    throw new CliFailure({
+      code: "SCHEMA_INVALID",
+      command: commandFromArgv(context.argv),
+      message: "schema validate requires --schema <schema-id>."
+    }, 2);
+  }
+  const payload = await readJson(resolveCliPath(context, input));
+  const validation = validateSchema(schemaId, payload);
+  if (!validation.ok) {
+    throw new CliFailure({
+      code: "SCHEMA_INVALID",
+      command: commandFromArgv(context.argv),
+      message: `Input does not conform to ${schemaId}.`,
+      details: { schema: schemaId, errors: validation.errors }
+    }, 3);
+  }
   return {
     schema: "officegen.validation.result@1.2",
     valid: true,
-    input: positionalArgs(context.argv, 3)[0],
-    schemaId: optionValue(context.argv, "--schema") ?? "auto",
-    warnings: ["Validation backend is wired for the CLI surface; core schema validation is pending integration."]
+    input,
+    schemaId
   };
 }
 
@@ -1062,13 +1150,23 @@ async function editPayload(context: RuntimeContext): Promise<unknown> {
   const operations = normalizeEditOperations(raw);
   return edit(resolveCliPath(context, input), operations, {
     out: await validatedOutOption(context),
-    dryRun: hasFlag(context.argv, "--dry-run")
+    dryRun: hasFlag(context.argv, "--dry-run"),
+    resolveSelectors: hasFlag(context.argv, "--resolve-selectors")
   });
 }
 
 async function renderPayload(context: RuntimeContext): Promise<unknown> {
   const input = requireInput(context, 3, "render");
   const ir = await readJson(resolveCliPath(context, input));
+  const validation = validateSchema("officegen.ir.document@1.2", ir);
+  if (!validation.ok) {
+    throw new CliFailure({
+      code: "SCHEMA_INVALID",
+      command: "render",
+      message: "render input must conform to officegen.ir.document@1.2.",
+      details: { errors: validation.errors }
+    }, 3);
+  }
   return render(ir as Parameters<typeof render>[0], {
     out: await validatedOutOption(context),
     target: optionValue(context.argv, "--target") as RenderTarget | undefined
@@ -1105,8 +1203,9 @@ async function assetPayload(context: RuntimeContext, subcommand?: string): Promi
   const input = requireInput(context, subcommand ? 4 : 3, "asset");
   if (subcommand === "inspect" || !subcommand) return inspectAsset(resolveCliPath(context, input));
   if (subcommand === "extract") {
+    const out = optionValue(context.argv, "--out");
     return extractAssets(resolveCliPath(context, input), {
-      outDir: optionValue(context.argv, "--out"),
+      outDir: out ? await validateOutputPath(context, out, { directory: true }) : undefined,
       images: hasFlag(context.argv, "--images")
     });
   }
@@ -1218,16 +1317,29 @@ async function pluginPayload(context: RuntimeContext, subcommand?: string): Prom
       }, 8);
     }
     const manifest = asRecord(await readJson(resolveCliPath(context, name)));
-    return installPlugin({
-      ...optional,
-      manifest: {
-        id: String(manifest.id ?? manifest.name ?? path.basename(name, path.extname(name))),
-        version: String(manifest.version ?? "0.0.0"),
-        ...manifest
-      },
-      sourcePath: name,
-      trust: true
-    });
+    try {
+      return await installPlugin({
+        ...optional,
+        manifest: {
+          id: String(manifest.id ?? manifest.name ?? path.basename(name, path.extname(name))),
+          version: String(manifest.version ?? "0.0.0"),
+          ...manifest
+        },
+        sourcePath: name,
+        trust
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/hash mismatch|sha256/i.test(message)) {
+        throw new CliFailure({
+          code: "PLUGIN_HASH_MISMATCH",
+          command: "plugin install",
+          message,
+          details: { trust }
+        }, 8);
+      }
+      throw error;
+    }
   }
   return groupPayload(context, subcommand);
 }
@@ -1245,18 +1357,38 @@ function wiredPayload(feature: FeatureKey): (context: RuntimeContext) => unknown
 }
 
 async function scaffoldPayload(context: RuntimeContext): Promise<unknown> {
-  const kind = optionValue(context.argv, "--kind") ?? "pptx";
+  const requestedKind = optionValue(context.argv, "--kind") ?? "pptx";
+  const kind = ["pptx", "docx", "xlsx", "pdf", "html"].includes(requestedKind) ? requestedKind : "pptx";
   const title = optionValue(context.argv, "--title") ?? "Untitled";
   const out = optionValue(context.argv, "--out");
   const document = {
     schema: "officegen.ir.document@1.2",
-    kind,
+    title,
+    targets: [kind],
     metadata: {
       title,
       author: "officegen"
     },
-    sections: []
+    sections: [
+      {
+        id: "section-1",
+        title,
+        blocks: [
+          { type: "heading", text: title },
+          { type: "paragraph", text: "概要をここに入力してください。" }
+        ]
+      }
+    ]
   };
+  const validation = validateSchema("officegen.ir.document@1.2", document);
+  if (!validation.ok) {
+    throw new CliFailure({
+      code: "SCHEMA_INVALID",
+      command: "scaffold",
+      message: "Internal scaffold template failed schema validation.",
+      details: { errors: validation.errors }
+    }, 3);
+  }
 
   if (out) {
     const outPath = await validateOutputPath(context, out);
@@ -1476,6 +1608,23 @@ function optionalContext(context: RuntimeContext): Parameters<typeof listTemplat
   };
 }
 
+function coreConfigForContext(context: RuntimeContext): OfficegenConfig {
+  const profile = context.config.profile && context.config.profile in PROFILE_DEFAULTS ? context.config.profile : "substrate";
+  const config = getBuiltinConfig(profile);
+  config.paths.projectRoot = context.cwd;
+  config.paths.projectConfigDir = path.join(context.cwd, ".officegen");
+  for (const entry of context.registry) {
+    if (entry.feature in config.features) {
+      config.features[entry.feature as keyof OfficegenConfig["features"]] = {
+        enabled: entry.enabled,
+        visibleInHelp: entry.visibleInHelp,
+        visibleToAgents: entry.visibleToAgents
+      };
+    }
+  }
+  return config;
+}
+
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
@@ -1512,29 +1661,11 @@ function schemaHiddenFromAgent(context: RuntimeContext, schema: string): boolean
 }
 
 function redactForJson(value: unknown, context: RuntimeContext): unknown {
-  if (typeof value === "string") return redactString(value, context);
-  if (Array.isArray(value)) return value.map((item) => redactForJson(item, context));
-  if (value && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>).map(([key, nested]) => [key, redactForJson(nested, context)])
-    );
-  }
-  return value;
+  return redactJson(value as JsonValue, coreConfigForContext(context)).value;
 }
 
 function redactString(value: string, context: RuntimeContext): string {
-  const project = path.resolve(context.cwd);
-  const home = os.homedir();
-  let redacted = value;
-  for (const [prefix, replacement] of [[project, "<project>"], [home, "<userHome>"]] as const) {
-    if (redacted.toLowerCase().startsWith(prefix.toLowerCase())) {
-      redacted = `${replacement}${redacted.slice(prefix.length)}`;
-    }
-    redacted = redacted.split(prefix).join(replacement);
-  }
-  redacted = redacted.replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "<redacted:email>");
-  redacted = redacted.replace(/\b(?:api[_-]?key|token|secret|password)=([^&\s]+)/gi, "$1=<redacted:secret-like-token>");
-  return redacted;
+  return String(redactForJson(value, context));
 }
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
