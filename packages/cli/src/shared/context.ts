@@ -55,6 +55,7 @@ export function gateTopLevelCommand(command: string, context: RuntimeContext): C
     };
   }
   if (!entry.enabled) {
+    if (entry.feature === "renderer" && secondCommandToken(context.argv) === "doctor") return undefined;
     return {
       code: "FEATURE_DISABLED",
       feature: entry.feature,
@@ -99,11 +100,12 @@ const NO_POSITIONAL_LEAF_COMMANDS = new Set([
 ]);
 
 export function availableCommands(context: RuntimeContext): string[] {
-  return context.registry
+  return [...new Set(context.registry
     .filter((entry) => entry.enabled)
+    .concat(context.registry.filter((entry) => entry.feature === "renderer"))
     .filter((entry) => entry.visibleInHelp)
     .filter((entry) => !context.agent || entry.visibleToAgents)
-    .map((entry) => entry.commandGroup);
+    .map((entry) => entry.commandGroup))];
 }
 
 export function nextSuggestedCommands(context: RuntimeContext): string[] {

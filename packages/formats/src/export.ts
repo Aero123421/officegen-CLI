@@ -3,7 +3,7 @@ import { render, type DocumentIR } from "./render.js";
 import { type InputLike, inspectInputZipSafety, normalizeInput, writeOutput, zipSafetyCaveats } from "./shared.js";
 import { embedPdfFonts, ensurePdfTextEncodable } from "./pdfFonts.js";
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { OfficegenError, type OfficegenConfig } from "@officegen/core";
@@ -37,6 +37,8 @@ export interface ExportResult {
     id: string;
     executable?: string;
     status: "used" | "unavailable";
+    repairDialogExpected?: boolean;
+    backend?: "office-com" | "libreoffice";
   };
 }
 
@@ -66,7 +68,7 @@ export async function exportDocument(input: InputLike | DocumentIR, options: Exp
 
   if (options.mode === "native" && options.to === "pdf") {
     assertNativeExportAllowed(options.config);
-    return exportOfficeToPdfWithLibreOffice(normalized, options);
+    return exportOfficeToPdfNative(normalized, options);
   }
 
   if (options.to === "pdf") {
@@ -170,7 +172,7 @@ function result(from: string, options: Pick<ExportOptions, "to" | "out" | "mode"
   };
 }
 
-async function exportOfficeToPdfWithLibreOffice(
+async function exportOfficeToPdfNative(
   input: Awaited<ReturnType<typeof normalizeInput>>,
   options: ExportOptions
 ): Promise<ExportResult> {
@@ -181,6 +183,10 @@ async function exportOfficeToPdfWithLibreOffice(
     throw new OfficegenError("EXPORT_UNSUPPORTED", `Native PDF export is not supported for ${input.format}.`);
   }
   const zipSafety = await inspectInputZipSafety(input, { config: options.config });
+  const officeCom = await findOfficeComRenderer(input.format);
+  if (officeCom) {
+    return exportOfficeToPdfWithCom(input, options, officeCom, zipSafetyCaveats(zipSafety));
+  }
 
   const executable = await findLibreOfficeExecutable();
   if (!executable) {
@@ -214,11 +220,124 @@ async function exportOfficeToPdfWithLibreOffice(
         "Converted with LibreOffice in headless mode; fidelity depends on installed fonts and LibreOffice filters.",
         ...zipSafetyCaveats(zipSafety)
       ],
-      renderer: { id: "libreoffice", executable, status: "used" }
+      renderer: { id: "libreoffice", executable, status: "used", backend: "libreoffice", repairDialogExpected: false }
     };
   } finally {
     if (cleanup) await rm(cleanup, { recursive: true, force: true });
   }
+}
+
+async function exportOfficeToPdfWithCom(
+  input: Awaited<ReturnType<typeof normalizeInput>>,
+  options: ExportOptions,
+  renderer: { id: string; progId: string; executable: string },
+  caveats: string[]
+): Promise<ExportResult> {
+  if (!input.path) throw new OfficegenError("EXPORT_UNSUPPORTED", "Office COM export requires an input file path.");
+  const scriptDir = await mkdtemp(path.join(os.tmpdir(), "officegen-com-script-"));
+  const reportDir = await mkdtemp(path.join(os.tmpdir(), "officegen-com-report-"));
+  const outputDir = options.out ? undefined : await mkdtemp(path.join(os.tmpdir(), "officegen-com-pdf-"));
+  const outPath = options.out ?? path.join(outputDir as string, `${path.basename(input.path, path.extname(input.path))}.pdf`);
+  const reportPath = path.join(reportDir, "native-report.json");
+  const scriptPath = path.join(scriptDir, "convert.ps1");
+  try {
+    await writeFile(scriptPath, officeComExportScript(input.format), "utf8");
+    const result = await runProcessCapture("powershell.exe", [
+      "-NoProfile",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      scriptPath,
+      "-InputPath",
+      input.path,
+      "-OutputPath",
+      outPath,
+      "-ReportPath",
+      reportPath
+    ], 120000);
+    if (!result.ok) {
+      throw new OfficegenError("EXPORT_UNSUPPORTED", `Office COM native export failed. ${result.stderr || result.stdout}`);
+    }
+    const bytes = await readFile(outPath);
+    const pdf = await PDFDocument.load(bytes, { ignoreEncryption: true });
+    const saved = await pdf.save({ useObjectStreams: false });
+    await writeOutput(options.out, saved);
+    const report = await readJsonLoose(reportPath);
+    return {
+      schema: "officegen.export.result@1.2",
+      from: input.format,
+      to: options.to,
+      mode: "native",
+      out: options.out,
+      bytes: options.out ? undefined : saved,
+      fidelity: "native",
+      caveats: [
+        `Converted with ${renderer.id} through Windows Office COM.`,
+        "Repair-dialog status is inferred from COM open/export errors and repair-mode flags; a visible user dialog is not shown.",
+        ...caveats
+      ],
+      renderer: {
+        id: renderer.id,
+        executable: renderer.executable,
+        status: "used",
+        backend: "office-com",
+        repairDialogExpected: Boolean((report as Record<string, unknown>).repairDialogExpected)
+      }
+    };
+  } finally {
+    await rm(scriptDir, { recursive: true, force: true });
+    await rm(reportDir, { recursive: true, force: true });
+    if (outputDir) await rm(outputDir, { recursive: true, force: true });
+  }
+}
+
+export interface NativeRendererDoctorResult {
+  schema: "officegen.renderer.doctor@2.2";
+  platform: NodeJS.Platform;
+  policy: {
+    externalProcess?: string;
+    renderers?: string;
+  };
+  renderers: Array<{
+    id: string;
+    backend: "office-com" | "libreoffice";
+    available: boolean;
+    executable?: string;
+    formats: string[];
+    message: string;
+  }>;
+}
+
+export async function nativeRendererDoctor(config?: OfficegenConfig): Promise<NativeRendererDoctorResult> {
+  const libreOffice = await findLibreOfficeExecutable();
+  const office = await Promise.all(["pptx", "docx", "xlsx"].map((format) => findOfficeComRenderer(format)));
+  const officeAvailable = office.filter((item): item is NonNullable<typeof item> => Boolean(item));
+  return {
+    schema: "officegen.renderer.doctor@2.2",
+    platform: process.platform,
+    policy: {
+      externalProcess: config?.security.externalProcess,
+      renderers: config?.security.renderers
+    },
+    renderers: [
+      {
+        id: "libreoffice",
+        backend: "libreoffice",
+        available: Boolean(libreOffice),
+        executable: libreOffice,
+        formats: ["pptx", "docx", "xlsx"],
+        message: libreOffice ? "LibreOffice headless conversion is available." : "LibreOffice/soffice was not found."
+      },
+      ...officeAvailable.map((renderer) => ({
+        id: renderer.id,
+        backend: "office-com" as const,
+        available: true,
+        executable: renderer.executable,
+        formats: [renderer.format],
+        message: `${renderer.id} COM automation is available.`
+      }))
+    ]
+  };
 }
 
 export async function findLibreOfficeExecutable(): Promise<string | undefined> {
@@ -257,6 +376,109 @@ async function runProcess(command: string, args: string[]): Promise<void> {
       else reject(new OfficegenError("EXPORT_UNSUPPORTED", `LibreOffice conversion failed with exit code ${code}. ${stderr.trim()}`));
     });
   });
+}
+
+function runProcessCapture(command: string, args: string[], timeoutMs: number): Promise<{ ok: boolean; stdout: string; stderr: string; code?: number | null }> {
+  return new Promise((resolve) => {
+    const child = spawn(command, args, { windowsHide: true, env: safeExternalEnv() });
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(() => {
+      child.kill();
+      resolve({ ok: false, stdout, stderr: `${stderr}\nTimed out after ${timeoutMs}ms.`.trim() });
+    }, timeoutMs);
+    child.stdout.on("data", (chunk) => { stdout += String(chunk); });
+    child.stderr.on("data", (chunk) => { stderr += String(chunk); });
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      resolve({ ok: false, stdout, stderr: error.message });
+    });
+    child.on("exit", (code) => {
+      clearTimeout(timer);
+      resolve({ ok: code === 0, stdout, stderr, code });
+    });
+  });
+}
+
+async function findOfficeComRenderer(format: string): Promise<{ id: string; format: string; progId: string; executable: string } | undefined> {
+  if (process.platform !== "win32") return undefined;
+  const candidates: Record<string, { id: string; progId: string; executable: string }> = {
+    pptx: { id: "powerpoint-com", progId: "PowerPoint.Application", executable: "POWERPNT.EXE" },
+    docx: { id: "word-com", progId: "Word.Application", executable: "WINWORD.EXE" },
+    xlsx: { id: "excel-com", progId: "Excel.Application", executable: "EXCEL.EXE" }
+  };
+  const candidate = candidates[format];
+  if (!candidate) return undefined;
+  const probe = await runProcessCapture("powershell.exe", [
+    "-NoProfile",
+    "-Command",
+    `$ErrorActionPreference='Stop'; $app=New-Object -ComObject '${candidate.progId}'; $app.Quit(); 'ok'`
+  ], 15000);
+  return probe.ok ? { ...candidate, format } : undefined;
+}
+
+function officeComExportScript(format: string): string {
+  if (format === "pptx") return `
+param([string]$InputPath,[string]$OutputPath,[string]$ReportPath)
+$ErrorActionPreference='Stop'
+$app=New-Object -ComObject PowerPoint.Application
+$repair=$false
+try {
+  $presentation=$app.Presentations.Open($InputPath, $true, $false, $false)
+  $presentation.SaveAs($OutputPath, 32)
+  $presentation.Close()
+} catch {
+  $repair=$true
+  throw
+} finally {
+  $app.Quit()
+  @{ ok=$true; backend='office-com'; app='PowerPoint'; repairDialogExpected=$repair } | ConvertTo-Json | Set-Content -Encoding UTF8 $ReportPath
+}`.trim();
+  if (format === "docx") return `
+param([string]$InputPath,[string]$OutputPath,[string]$ReportPath)
+$ErrorActionPreference='Stop'
+$app=New-Object -ComObject Word.Application
+$app.Visible=$false
+$repair=$false
+try {
+  $doc=$app.Documents.Open($InputPath, $false, $true, $false)
+  $doc.ExportAsFixedFormat($OutputPath, 17)
+  $doc.Close($false)
+} catch {
+  $repair=$true
+  throw
+} finally {
+  $app.Quit()
+  @{ ok=$true; backend='office-com'; app='Word'; repairDialogExpected=$repair } | ConvertTo-Json | Set-Content -Encoding UTF8 $ReportPath
+}`.trim();
+  return `
+param([string]$InputPath,[string]$OutputPath,[string]$ReportPath)
+$ErrorActionPreference='Stop'
+$app=New-Object -ComObject Excel.Application
+$app.Visible=$false
+$app.DisplayAlerts=$false
+$repair=$false
+try {
+  $wb=$app.Workbooks.Open($InputPath, 3, $false)
+  $wb.RefreshAll()
+  $app.CalculateFullRebuild()
+  $wb.ExportAsFixedFormat(0, $OutputPath)
+  $wb.Close($false)
+} catch {
+  $repair=$true
+  throw
+} finally {
+  $app.Quit()
+  @{ ok=$true; backend='office-com'; app='Excel'; repairDialogExpected=$repair } | ConvertTo-Json | Set-Content -Encoding UTF8 $ReportPath
+}`.trim();
+}
+
+async function readJsonLoose(file: string): Promise<unknown> {
+  try {
+    return JSON.parse(await readFile(file, "utf8"));
+  } catch {
+    return {};
+  }
 }
 
 function safeExternalEnv(): NodeJS.ProcessEnv {

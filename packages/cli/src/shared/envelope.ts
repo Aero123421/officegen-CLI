@@ -5,6 +5,7 @@ import { ENVELOPE_SCHEMA, type CliErrorPayload, type Envelope, type RuntimeConte
 export function makeEnvelope(context: RuntimeContext, command: string, data: unknown, now: Date): Envelope {
   const result = redactForJson(data, context);
   const warnings = [...contextWarnings(context), ...extractArrayField(result, "warnings")];
+  const artifacts = extractArrayField(result, "artifacts");
   return {
     schema: ENVELOPE_SCHEMA,
     ok: true,
@@ -16,7 +17,7 @@ export function makeEnvelope(context: RuntimeContext, command: string, data: unk
     result,
     warnings,
     diagnostics: extractArrayField(result, "diagnostics"),
-    artifacts: extractArrayField(result, "artifacts"),
+    artifacts,
     availableCommands: availableCommands(context),
     nextSuggestedCommands: nextSuggestedCommands(context)
   };
@@ -28,6 +29,8 @@ export function makeErrorEnvelope(
   error: CliErrorPayload,
   now: Date
 ): Envelope {
+  const details = error.details ?? {};
+  const artifacts = Array.isArray(details.artifacts) ? details.artifacts : [];
   return {
     schema: ENVELOPE_SCHEMA,
     ok: false,
@@ -39,7 +42,7 @@ export function makeErrorEnvelope(
     error: normalizeCliError(error),
     warnings: contextWarnings(context),
     diagnostics: [],
-    artifacts: [],
+    artifacts,
     availableCommands: availableCommands(context),
     nextSuggestedCommands: errorSuggestedCommands(context, error)
   };
@@ -93,7 +96,14 @@ function extractArrayField(value: unknown, field: string): unknown[] {
   }
   if (field === "artifacts" && value && typeof value === "object") {
     const out = (value as Record<string, unknown>).out;
-    return typeof out === "string" ? [{ path: out }] : [];
+    return typeof out === "string"
+      ? [{
+          path: out,
+          exists: (value as Record<string, unknown>).changed === false ? false : undefined,
+          kind: "output",
+          sourceCommand: (value as Record<string, unknown>).kind
+        }]
+      : [];
   }
   return [];
 }
@@ -105,6 +115,8 @@ function applyAgentBudget(context: RuntimeContext, envelope: Envelope): Envelope
 
   const result = envelope.result;
   const resultSchema = result && typeof result === "object" ? (result as Record<string, unknown>).schema : undefined;
+  const artifacts = envelope.artifacts;
+  const counts = result && typeof result === "object" ? summarizeCounts(result as Record<string, unknown>) : {};
   const compact: Envelope = {
     ...envelope,
     result: {
@@ -112,6 +124,12 @@ function applyAgentBudget(context: RuntimeContext, envelope: Envelope): Envelope
       status: "truncated",
       truncated: true,
       resultSchema,
+      partialSummary: {
+        resultSchema,
+        counts,
+        artifactCount: artifacts.length,
+        originalBytes: bytes
+      },
       budgetBytes: context.jsonBudgetBytes,
       originalBytes: bytes,
       capabilitiesHash: context.capabilitiesHash,
@@ -127,10 +145,24 @@ function applyAgentBudget(context: RuntimeContext, envelope: Envelope): Envelope
       }
     ],
     diagnostics: [],
-    artifacts: []
+    artifacts
   };
 
   return compact;
+}
+
+function summarizeCounts(value: Record<string, unknown>): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const [key, nested] of Object.entries(value)) {
+    if (Array.isArray(nested)) counts[key] = nested.length;
+    if (nested && typeof nested === "object" && !Array.isArray(nested)) {
+      const objectCounts = Object.entries(nested as Record<string, unknown>)
+        .filter(([, item]) => Array.isArray(item))
+        .map(([nestedKey, item]) => [`${key}.${nestedKey}`, (item as unknown[]).length] as const);
+      for (const [nestedKey, count] of objectCounts) counts[nestedKey] = count;
+    }
+  }
+  return counts;
 }
 
 function errorSuggestedCommands(context: RuntimeContext, error: CliErrorPayload): string[] {
@@ -153,6 +185,9 @@ function errorSuggestedCommands(context: RuntimeContext, error: CliErrorPayload)
     suggestions.push("officegen asset extract <input> --images --out .officegen/runs/assets --json");
   } else if (error.code === "EXPORT_UNSUPPORTED" || error.code === "TARGET_EXTENSION_MISMATCH") {
     suggestions.push("officegen export <input> --to pdf --mode fast --out output.pdf --json");
+  } else if (error.code === "SECURITY_ABSOLUTE_OUT_DENIED") {
+    suggestions.push("officegen <command> <input> --out .officegen/outputs/output.ext --json");
+    suggestions.push("officegen config show --json");
   } else if (error.code === "UNSUPPORTED_FORMAT") {
     suggestions.push("officegen inspect <input.pptx|input.docx|input.xlsx|input.pdf> --depth summary --agent --json");
     suggestions.push("officegen asset inspect <image-or-media-file> --json");

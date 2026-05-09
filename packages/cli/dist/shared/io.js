@@ -57,7 +57,7 @@ export async function validateOutputPath(context, outputPath, options = {}) {
                 severity: error.payload.severity,
                 command: commandFromArgv(context.argv),
                 message: userFacingPathMessage(error.payload.code, error.payload.message),
-                details: asRecord(error.payload.details)
+                details: enrichPathFailureDetails(error.payload.code, asRecord(error.payload.details), outputPath)
             }, error.payload.code.startsWith("SECURITY_") ? 4 : 3);
         }
         throw error;
@@ -193,5 +193,17 @@ function userFacingPathMessage(code, fallback) {
     if (code === "SECURITY_HARDLINK_DENIED")
         return "Refusing to overwrite a hardlinked file.";
     return fallback;
+}
+function enrichPathFailureDetails(code, details, requestedPath) {
+    if (code !== "SECURITY_ABSOLUTE_OUT_DENIED")
+        return details;
+    const extension = path.extname(requestedPath) || ".pptx";
+    return {
+        ...details,
+        requestedPath,
+        recommendedFix: "Use a project-relative --out path inside the workspace, or explicitly change the trusted root policy outside autonomous mode.",
+        exampleCommandFragment: `--out .officegen/outputs/output${extension}`,
+        expectedResult: "officegen writes the artifact under the workspace and returns artifacts[].exists=true after successful mutation."
+    };
 }
 //# sourceMappingURL=io.js.map

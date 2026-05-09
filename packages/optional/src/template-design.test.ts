@@ -32,6 +32,8 @@ describe("@officegen/optional PPTX template and design signals", () => {
     expect(signals?.schemaCandidates.find((field) => field.name === "title")?.type).toBe("string");
     expect(signals?.schemaCandidates.find((field) => field.name === "product_update")?.type).toBe("string");
     expect(signals?.schemaCandidates.find((field) => field.name === "launch_date")?.type).toBe("date");
+    expect(signals?.schemaCandidates.find((field) => field.name === "hero_image")?.type).toBe("image");
+    expect(signals?.schemaCandidates.find((field) => field.name === "revenue_chart")?.type).toBe("chartData");
     expect(signals?.templateMapSuggested.mapping.quarter).toMatch(/^pptx:slide-[a-f0-9]{8}:shape:/);
     expect(signals?.trust.trusted.schema).toBe("officegen.design.signals.trusted@1.2");
     expect(signals?.trust.untrusted.textSamples.join(" ")).toContain("Quarterly Review");
@@ -54,9 +56,11 @@ describe("@officegen/optional PPTX template and design signals", () => {
     });
     const inspected = await inspect(deckPath, { format: "pptx" });
     const inspectedQuarterId = inspected.objectMap.find((entry) => entry.text === "Quarter: {{quarter}}")?.stableObjectId;
+    const inspectedChartId = inspected.objectMap.find((entry) => entry.kind === "chart")?.stableObjectId;
     const candidates = await templateCandidates({ ...optional, sourcePath: deckPath });
 
     expect(signals?.templateMapSuggested.mapping.quarter).toBe(inspectedQuarterId);
+    expect(signals?.templateMapSuggested.mapping.revenue_chart).toBe(inspectedChartId);
     expect(candidates[0]?.template.mapping?.quarter).toBe(inspectedQuarterId);
     expect(inspectedQuarterId).toMatch(/^pptx:slide-[a-f0-9]{8}:shape:/);
   });
@@ -91,6 +95,8 @@ describe("@officegen/optional PPTX template and design signals", () => {
     const design = await captureDesign({ ...optional, id: "deck-design", sourcePath: deckPath });
     const capture = design.sourceCapture as DesignSourceCapture;
     expect(capture.densityScore).toBeGreaterThan(0);
+    expect((design.tokens.color as Record<string, unknown>).palette).toEqual(expect.any(Array));
+    expect((design.tokens.layout as Record<string, unknown>).archetypes).toEqual(expect.any(Array));
     expect(capture.artifactPaths?.previewPaths[0]).toContain("preview-slide-001.svg");
     expect(capture.schemaCandidates?.map((field) => field.name)).toContain("quarter");
   });
@@ -133,6 +139,15 @@ describe("@officegen/optional PPTX template and design signals", () => {
         metadata: { audience: "exec" }
       }
     });
+    const fillValidation = await fillTemplate({
+      ...optional,
+      id: template.id,
+      values: {
+        title: "Quarterly Review",
+        metadata: { audience: "exec" }
+      },
+      validateOnly: true
+    });
     await initDesign({ ...optional, id: "plan-design" });
     const designPlan = await applyDesign({ ...optional, id: "plan-design" });
 
@@ -154,6 +169,10 @@ describe("@officegen/optional PPTX template and design signals", () => {
       values: {
         metadata: { audience: "exec" }
       }
+    });
+    expect(fillValidation).toMatchObject({
+      validateOnly: true,
+      bindings: expect.any(Array)
     });
     expect(designPlan).toMatchObject({
       kind: "officegen.design.apply",
@@ -182,6 +201,7 @@ describe("@officegen/optional PPTX template and design signals", () => {
 
     expect(result.planOnly).toBe(false);
     expect(result.mutatesOffice).toBe(true);
+    expect((result.artifacts as Array<{ exists?: boolean }>)[0]?.exists).toBe(true);
     expect(inspected.objectMap.map((entry) => entry.text).join(" ")).toContain("Q4 FY27");
   });
 
@@ -239,10 +259,12 @@ async function makePptxFixture(): Promise<Buffer> {
         text: "Quarter: {{quarter}}"
       }),
       picXml(3, "Hero Image", 5029200, 1371600, 3429000, 2286000),
-      '<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="4" name="Revenue Chart"/></p:nvGraphicFramePr><p:xfrm><a:off x="685800" y="3657600"/><a:ext cx="7772400" cy="2286000"/></p:xfrm><a:graphic><a:graphicData><c:chart/></a:graphicData></a:graphic></p:graphicFrame>',
+      '<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="4" name="Revenue Chart"/></p:nvGraphicFramePr><p:xfrm><a:off x="685800" y="3657600"/><a:ext cx="7772400" cy="2286000"/></p:xfrm><a:graphic><a:graphicData><c:chart r:id="rId1"/></a:graphicData></a:graphic></p:graphicFrame>',
       "</p:cSld></p:sld>"
     ].join("")
   );
+  zip.file("ppt/slides/_rels/slide1.xml.rels", '<Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart1.xml"/></Relationships>');
+  zip.file("ppt/charts/chart1.xml", "<c:chartSpace><c:chart><c:title/></c:chart></c:chartSpace>");
   zip.file(
     "ppt/slides/slide2.xml",
     [

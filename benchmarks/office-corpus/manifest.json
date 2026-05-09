@@ -1,0 +1,107 @@
+{
+  "schema": "officegen.benchmark-corpus@2.2",
+  "storageRoot": ".officegen/benchmark-corpus",
+  "policy": "Public Office/PDF corpus files are fetched locally and are not committed to git.",
+  "documents": [
+    {
+      "id": "nvidia-investor-oct-2024",
+      "kind": "pdf",
+      "sourcePage": "https://investor.nvidia.com/events-and-presentations/presentations/presentation-details/2024/NVIDIA-Investor-Presentation-October-2024/default.aspx",
+      "url": "https://s201.q4cdn.com/141608511/files/doc_presentations/2024/Oct/NVIDIA-Investor-Presentation-Oct-2024.pdf",
+      "fallbackUrl": "https://s201.q4cdn.com/141608511/files/doc_presentations/2024/Oct/NVIDIA-Investor-Presentation-Oct-2024.pdf",
+      "sha256": null,
+      "byteLength": null,
+      "expected": { "pagesAtLeast": 20, "qualityWarningAllowed": true }
+    },
+    {
+      "id": "microsoft-financial-sample",
+      "kind": "xlsx",
+      "sourcePage": "https://learn.microsoft.com/power-bi/create-reports/sample-financial-download",
+      "url": "https://go.microsoft.com/fwlink/?LinkID=521962",
+      "fallbackUrl": "https://go.microsoft.com/fwlink/?LinkID=521962",
+      "sha256": null,
+      "byteLength": null,
+      "expected": { "sheetsAtLeast": 1, "tablesAtLeast": 1 }
+    },
+    {
+      "id": "sec-modernized-forms",
+      "kind": "pdf",
+      "sourcePage": "https://www.sec.gov/files/form10-k.pdf",
+      "url": "https://www.sec.gov/files/form10-k.pdf",
+      "fallbackUrl": "https://www.sec.gov/files/form10-k.pdf",
+      "sha256": null,
+      "byteLength": null,
+      "expected": { "pagesAtLeast": 1 }
+    },
+    {
+      "id": "ecma-openxml-part1",
+      "kind": "pdf",
+      "sourcePage": "https://ecma-international.org/publications-and-standards/standards/ecma-376/",
+      "url": "https://ecma-international.org/wp-content/uploads/ECMA-376-Part-1_5th_edition_december_2016.zip",
+      "fallbackUrl": "https://ecma-international.org/publications-and-standards/standards/ecma-376/",
+      "sha256": null,
+      "byteLength": null,
+      "expected": { "downloadMayBeArchive": true }
+    },
+    {
+      "id": "simpleicons-nvidia-logo",
+      "kind": "svg",
+      "sourcePage": "https://simpleicons.org/?q=nvidia",
+      "url": "https://cdn.simpleicons.org/nvidia/76B900",
+      "fallbackUrl": "https://cdn.simpleicons.org/nvidia/76B900",
+      "sha256": null,
+      "byteLength": null,
+      "expected": { "asset": true }
+    },
+    {
+      "id": "simpleicons-amd-logo",
+      "kind": "svg",
+      "sourcePage": "https://simpleicons.org/?q=amd",
+      "url": "https://cdn.simpleicons.org/amd/ED1C24",
+      "fallbackUrl": "https://cdn.simpleicons.org/amd/ED1C24",
+      "sha256": null,
+      "byteLength": null,
+      "expected": { "asset": true }
+    },
+    {
+      "id": "sample-docx-placeholder",
+      "kind": "docx",
+      "sourcePage": "https://file-examples.com/index.php/sample-documents-download/sample-doc-download/",
+      "url": "https://file-examples.com/wp-content/storage/2017/02/file-sample_100kB.docx",
+      "fallbackUrl": "https://file-examples.com/index.php/sample-documents-download/sample-doc-download/",
+      "sha256": null,
+      "byteLength": null,
+      "expected": { "paragraphsAtLeast": 1, "downloadMayFail": true }
+    },
+    {
+      "id": "sample-xlsx-placeholder",
+      "kind": "xlsx",
+      "sourcePage": "https://file-examples.com/index.php/sample-documents-download/sample-xls-download/",
+      "url": "https://file-examples.com/wp-content/storage/2017/02/file_example_XLSX_100.xlsx",
+      "fallbackUrl": "https://file-examples.com/index.php/sample-documents-download/sample-xls-download/",
+      "sha256": null,
+      "byteLength": null,
+      "expected": { "sheetsAtLeast": 1, "downloadMayFail": true }
+    },
+    {
+      "id": "irs-form-w4",
+      "kind": "pdf",
+      "sourcePage": "https://www.irs.gov/forms-pubs/about-form-w-4",
+      "url": "https://www.irs.gov/pub/irs-pdf/fw4.pdf",
+      "fallbackUrl": "https://www.irs.gov/pub/irs-pdf/fw4.pdf",
+      "sha256": null,
+      "byteLength": null,
+      "expected": { "pagesAtLeast": 1 }
+    },
+    {
+      "id": "w3c-svg-logo",
+      "kind": "svg",
+      "sourcePage": "https://www.w3.org/Icons/",
+      "url": "https://www.w3.org/Icons/SVG/svg-logo.svg",
+      "fallbackUrl": "https://www.w3.org/Icons/SVG/svg-logo.svg",
+      "sha256": null,
+      "byteLength": null,
+      "expected": { "asset": true }
+    }
+  ]
+}

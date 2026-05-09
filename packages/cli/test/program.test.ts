@@ -43,7 +43,7 @@ afterEach(() => {
 
 describe("officegen CLI command surface", () => {
   it("wraps capabilities --agent --json in the v1.2 envelope and exposes authoring commands", async () => {
-    const captured = await run(["capabilities", "--agent", "--json", "--json-budget-bytes", "20000"]);
+    const captured = await run(["capabilities", "--agent", "--json", "--json-budget-bytes", "80000"]);
     const envelope = parseEnvelope(captured);
 
     expect(envelope.schema).toBe("officegen.envelope@1.2");
@@ -54,6 +54,17 @@ describe("officegen CLI command surface", () => {
     expect(envelope.availableCommands).toContain("inspect");
     expect(envelope.availableCommands).toContain("template");
     expect(envelope.nextSuggestedCommands).toContain("officegen capabilities --agent --json");
+  });
+
+  it("allows renderer doctor as a safe discovery command without enabling native conversion", async () => {
+    const captured = await run(["renderer", "doctor", "--json", "--json-budget-bytes", "80000"]);
+    const envelope = parseEnvelope(captured);
+
+    expect(envelope.ok).toBe(true);
+    expect(envelope.result.schema).toBe("officegen.renderer.doctor@2.2");
+    expect(envelope.result.renderers).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "libreoffice" })
+    ]));
   });
 
   it("returns availableCommands and nextSuggestedCommands for unknown commands", async () => {

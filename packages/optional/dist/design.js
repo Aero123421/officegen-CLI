@@ -86,6 +86,7 @@ export async function captureDesign(options) {
     return updateDesign({
         ...options,
         patch: {
+            tokens: mergePlainObjects(current.tokens, designTokensFromSignals(pptxSignals)),
             sourceCapture: capture
         }
     });
@@ -93,8 +94,9 @@ export async function captureDesign(options) {
 export async function applyDesign(options) {
     requireFeature(options, "design", "design apply");
     const design = await inspectDesign(options);
+    const strategy = options.strategy ?? "inspired";
     if (options.targetPath && options.outputPath && path.extname(options.targetPath).toLowerCase() === ".pptx" && path.extname(options.outputPath).toLowerCase() === ".pptx") {
-        const applied = await applyPptxDesign(design, path.resolve(options.cwd ?? process.cwd(), options.targetPath), options.outputPath);
+        const applied = await applyPptxDesign(design, path.resolve(options.cwd ?? process.cwd(), options.targetPath), options.outputPath, strategy, options);
         return {
             kind: "officegen.design.apply",
             planOnly: false,
@@ -104,6 +106,7 @@ export async function applyDesign(options) {
             designHash: design.hash,
             targetPath: options.targetPath,
             out: options.outputPath,
+            strategy,
             ...applied
         };
     }
@@ -111,9 +114,17 @@ export async function applyDesign(options) {
         kind: "officegen.design.apply",
         planOnly: true,
         mutatesOffice: false,
+        supported: false,
+        noopReason: "requires-pptx-target-and-pptx-out",
+        formatCapabilities: {
+            pptx: { themeOnly: true, inspired: "limited", faithful: "best-effort" },
+            docx: { supported: false, noopReason: "design apply currently mutates PPTX only" },
+            xlsx: { supported: false, noopReason: "design apply currently mutates PPTX only" }
+        },
         generatedAt: nowIso(),
         designId: design.id,
         designHash: design.hash,
+        strategy,
         targetPath: options.targetPath ? path.resolve(options.cwd ?? process.cwd(), options.targetPath) : undefined,
         tokens: design.tokens,
         note: "This is a design application plan for @officegen/formats."
@@ -122,7 +133,7 @@ export async function applyDesign(options) {
     await writeJsonFile(outputPath, plan);
     return plan;
 }
-async function applyPptxDesign(design, targetPath, outputPath) {
+async function applyPptxDesign(design, targetPath, outputPath, strategy, context) {
     const bytes = await readFile(targetPath);
     const zip = await loadZip({ bytes, path: targetPath, format: "pptx", trusted: false });
     const accent = designAccentColor(design);
@@ -146,13 +157,101 @@ async function applyPptxDesign(design, targetPath, outputPath) {
             changedParts.push(file.name);
         }
     }
+    if (strategy !== "theme-only" && fontFace) {
+        const presentationXml = (await readZipText(zip, "ppt/presentation.xml")) ?? "";
+        const slideSize = readSlideSize(presentationXml);
+        const layoutChanged = await applyCapturedLayoutAndFit(zip, design, slideSize, fontFace);
+        changedParts.push(...layoutChanged);
+        for (const file of Object.values(zip.files)) {
+            if (file.dir || !/^ppt\/slides\/slide\d+\.xml$/i.test(file.name))
+                continue;
+            const xml = await file.async("string");
+            const next = xml
+                .replace(/(<a:latin\b[^>]*typeface=")[^"]*(")/g, `$1${escapeXmlAttr(fontFace)}$2`)
+                .replace(/(<a:ea\b[^>]*typeface=")[^"]*(")/g, `$1${escapeXmlAttr(fontFace)}$2`);
+            if (next !== xml) {
+                zip.file(file.name, next);
+                changedParts.push(file.name);
+            }
+        }
+    }
     await writeFile(outputPath, await zip.generateAsync({ type: "uint8array", compression: "DEFLATE", compressionOptions: { level: 6 } }));
+    const contactSheetArtifact = await writeJsonFile(path.join(featureRoot(context, "design"), "runs", `${slugify(design.id)}.${Date.now()}.contact-sheet.json`), {
+        schema: "officegen.design.contact-sheet@2.2",
+        targetPath,
+        outputPath,
+        strategy,
+        changedParts,
+        sourcePreviewPaths: design.sourceCapture?.artifactPaths?.previewPaths ?? []
+    });
+    const limitations = [
+        strategy === "theme-only"
+            ? "theme-only intentionally changes theme tokens only and preserves slide geometry/placeholders."
+            : "inspired/faithful are best-effort OOXML style applications; they do not perform native PowerPoint layout reflow.",
+        "Slide masters, layouts, placeholders, relationships, and content are preserved by editing package parts in place."
+    ];
     return {
         changedParts,
+        visualEffect: changedParts.length ? (strategy === "theme-only" ? "theme-token-change" : "style-token-change") : "none",
+        contactSheetArtifact,
+        limitations,
         tokensApplied: { accent, fontFace },
         mastersAndLayoutsPreserved: true,
         note: changedParts.length ? "Updated PPTX theme tokens while preserving slide masters, layouts, placeholders, relationships, and content." : "No theme parts were changed."
     };
+}
+async function applyCapturedLayoutAndFit(zip, design, slideSize, fontFace) {
+    const capture = design.sourceCapture;
+    const patterns = capture?.bboxPatterns ?? [];
+    const title = patterns.find((pattern) => pattern.kind === "title")?.average;
+    const body = patterns.find((pattern) => pattern.kind === "body")?.average;
+    const image = patterns.find((pattern) => pattern.kind === "image")?.average;
+    const changedParts = [];
+    for (const file of Object.values(zip.files)) {
+        if (file.dir || !/^ppt\/slides\/slide\d+\.xml$/i.test(file.name))
+            continue;
+        const xml = await file.async("string");
+        let next = xml;
+        if (title)
+            next = replaceBlocks(next, "p:sp", (block) => /<p:ph\b[^>]*(?:type="(?:title|ctrTitle)")/i.test(block) ? setBlockBounds(block, title, slideSize) : block);
+        if (body)
+            next = replaceBlocks(next, "p:sp", (block) => /<p:ph\b[^>]*(?:type="body"|type="obj"|<p:ph\b(?![^>]*type=))/i.test(block) ? setBlockBounds(block, body, slideSize) : block);
+        if (image)
+            next = replaceBlocks(next, "p:pic", (block) => setBlockBounds(block, image, slideSize));
+        next = shrinkOverflowText(next, fontFace);
+        if (next !== xml) {
+            zip.file(file.name, next);
+            changedParts.push(file.name);
+        }
+    }
+    return changedParts;
+}
+function replaceBlocks(xml, tagName, replacer) {
+    const escaped = tagName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return xml.replace(new RegExp(`<${escaped}\\b[\\s\\S]*?<\\/${escaped}>`, "g"), replacer);
+}
+function setBlockBounds(block, bounds, slideSize) {
+    const emu = {
+        x: Math.round(bounds.x * slideSize.width),
+        y: Math.round(bounds.y * slideSize.height),
+        width: Math.round(bounds.width * slideSize.width),
+        height: Math.round(bounds.height * slideSize.height)
+    };
+    if (/<a:xfrm\b[\s\S]*?<\/a:xfrm>/.test(block)) {
+        return block.replace(/<a:xfrm\b[^>]*>[\s\S]*?<\/a:xfrm>/, `<a:xfrm><a:off x="${emu.x}" y="${emu.y}"/><a:ext cx="${emu.width}" cy="${emu.height}"/></a:xfrm>`);
+    }
+    return block.replace(/<p:spPr\b[^>]*>/, (match) => `${match}<a:xfrm><a:off x="${emu.x}" y="${emu.y}"/><a:ext cx="${emu.width}" cy="${emu.height}"/></a:xfrm>`);
+}
+function shrinkOverflowText(xml, fontFace) {
+    return replaceBlocks(xml, "p:sp", (shape) => {
+        const text = extractXmlTexts(shape, "t").join(" ");
+        if (text.length < 180)
+            return shape;
+        return shape.replace(/<a:rPr\b([^>]*)\bsz="(\d+)"([^>]*)>/g, (_match, before, size, after) => {
+            const nextSize = Math.max(1200, Math.floor(Number(size) * 0.82));
+            return `<a:rPr${before} sz="${nextSize}"${after}><a:latin typeface="${escapeXmlAttr(fontFace)}"/><a:ea typeface="${escapeXmlAttr(fontFace)}"/>`;
+        });
+    });
 }
 function designAccentColor(design) {
     const tokens = design.tokens;
@@ -176,6 +275,45 @@ function replaceThemeColor(xml, role, hex) {
 function normalizeHexColor(value) {
     const match = /^#?([0-9a-f]{6})$/i.exec(value ?? "");
     return match?.[1]?.toUpperCase();
+}
+function designTokensFromSignals(signals) {
+    if (!signals)
+        return {};
+    const accent = signals.colorRoleCandidates.find((candidate) => candidate.role === "accent")?.value;
+    const background = signals.colorRoleCandidates.find((candidate) => candidate.role === "background")?.value;
+    const text = signals.colorRoleCandidates.find((candidate) => candidate.role === "text")?.value;
+    const headingSize = signals.textSizeDistribution.slice().sort((left, right) => right.maxPt - left.maxPt)[0];
+    const bodySize = signals.textSizeDistribution.slice().sort((left, right) => right.count - left.count)[0];
+    return {
+        color: {
+            palette: signals.colors.slice(0, 8).map((color) => color.value),
+            roles: { accent, background, text },
+            accent,
+            background,
+            text
+        },
+        typography: {
+            heading: { sizePt: headingSize?.maxPt ?? 28, fontFamily: "Arial" },
+            body: { sizePt: bodySize?.maxPt ?? 14, fontFamily: "Arial" },
+            fontFamily: "Arial"
+        },
+        spacing: {
+            scale: [4, 8, 12, 16, 24, 32],
+            densityScore: signals.densityScore
+        },
+        layout: {
+            archetypes: signals.bboxPatterns,
+            slideTypes: signals.slideSignals.reduce((acc, slide) => {
+                acc[slide.slideType] = (acc[slide.slideType] ?? 0) + 1;
+                return acc;
+            }, {})
+        },
+        objectStyles: {
+            table: { headerFill: accent, bodyFill: background, text },
+            chart: { palette: signals.colors.slice(0, 6).map((color) => color.value) },
+            image: { placementPatterns: signals.bboxPatterns.filter((pattern) => pattern.kind === "image") }
+        }
+    };
 }
 function escapeXmlAttr(value) {
     return value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -335,6 +473,7 @@ export async function capturePptxDesignSignals(sourcePath, options = {}) {
                     text: object.text?.slice(0, 160),
                     name: object.name,
                     placeholderType: object.placeholderType,
+                    objectKind: object.kind,
                     bounds: object.bounds,
                     confidence: placeholder ? 0.85 : fieldConfidence(object.text ?? object.name ?? "", object.placeholderType),
                     source: slidePath,
@@ -522,8 +661,11 @@ function extractSlideObjects(xml, slide, source, slideSize) {
     let pictureOrdinal = 0;
     for (const block of extractBlocks(xml, "p:pic")) {
         pictureOrdinal += 1;
+        const shapeId = readShapeId(block);
         objects.push({
-            stableObjectId: stableObjectId("picture", source, pictureOrdinal),
+            stableObjectId: shapeId
+                ? stableHashId("pptx", slideScope(source), "picture", `${source}#${shapeId}`)
+                : stableObjectId("picture", source, pictureOrdinal),
             slide,
             kind: "picture",
             ordinal: pictureOrdinal,
@@ -538,8 +680,11 @@ function extractSlideObjects(xml, slide, source, slideSize) {
     for (const block of extractBlocks(xml, "p:graphicFrame")) {
         frameOrdinal += 1;
         const kind = /<c:chart\b/i.test(block) ? "chart" : /<dgm:/i.test(block) ? "diagram" : "diagram";
+        const shapeId = readShapeId(block);
         objects.push({
-            stableObjectId: stableObjectId(kind, source, frameOrdinal),
+            stableObjectId: shapeId && kind === "chart"
+                ? stableHashId("pptx", slideScope(source), "chart", `${source}#${shapeId}`)
+                : stableObjectId(kind, source, frameOrdinal),
             slide,
             kind,
             ordinal: frameOrdinal,
@@ -730,19 +875,23 @@ function buildSchemaCandidates(placeholders, mapCandidates) {
         ...placeholders.map((placeholder) => ({
             name: placeholder.field,
             confidence: placeholder.confidence,
-            reason: placeholder.placeholderType ? `placeholder:${placeholder.placeholderType}` : "shape/text candidate"
+            reason: placeholder.placeholderType ? `placeholder:${placeholder.placeholderType}` : `${placeholder.objectKind ?? "shape"}/text candidate`,
+            kind: placeholder.objectKind,
+            placeholderType: placeholder.placeholderType
         })),
         ...mapCandidates.map((candidate) => ({
             name: candidate.field,
             confidence: candidate.confidence,
-            reason: "text label candidate"
+            reason: "text label candidate",
+            kind: "shape",
+            placeholderType: undefined
         }))
     ]) {
         const existing = byName.get(candidate.name);
         if (!existing || candidate.confidence > existing.confidence) {
             byName.set(candidate.name, {
                 name: candidate.name,
-                type: inferFieldType(candidate.name),
+                type: inferFieldType(candidate.name, candidate.kind, candidate.placeholderType, candidate.confidence),
                 required: candidate.confidence >= 0.7,
                 confidence: round(candidate.confidence, 2),
                 reason: candidate.reason
@@ -767,7 +916,13 @@ function buildTemplateMapSuggestion(schemaCandidates, placeholders, mapCandidate
         candidateCount: Object.keys(mapping).length
     };
 }
-function inferFieldType(name) {
+function inferFieldType(name, kind, placeholderType, confidence = 0) {
+    if (kind === "picture" || placeholderType === "pic")
+        return "image";
+    if (kind === "chart" || /\bchart\b/i.test(name))
+        return "chartData";
+    if (/\b(table|rows|matrix)\b/i.test(name))
+        return "table";
     const tokens = name
         .toLowerCase()
         .replace(/[^a-z0-9]+/g, "_")
@@ -781,7 +936,7 @@ function inferFieldType(name) {
     const dateTokens = new Set(["date", "day", "month", "year", "deadline"]);
     if (tokens.some((token) => numberTokens.has(token)))
         return "number";
-    if (tokens.some((token) => dateTokens.has(token)))
+    if (confidence >= 0.7 && tokens.some((token) => dateTokens.has(token)) && !tokens.some((token) => ["title", "name", "headline"].includes(token)))
         return "date";
     if ((tokenSet.has("created") || tokenSet.has("modified") || tokenSet.has("updated")) && tokenSet.has("at"))
         return "date";

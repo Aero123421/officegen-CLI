@@ -46,6 +46,8 @@ export function gateTopLevelCommand(command, context) {
         };
     }
     if (!entry.enabled) {
+        if (entry.feature === "renderer" && secondCommandToken(context.argv) === "doctor")
+            return undefined;
         return {
             code: "FEATURE_DISABLED",
             feature: entry.feature,
@@ -89,11 +91,12 @@ const NO_POSITIONAL_LEAF_COMMANDS = new Set([
     "scaffold"
 ]);
 export function availableCommands(context) {
-    return context.registry
-        .filter((entry) => entry.enabled)
-        .filter((entry) => entry.visibleInHelp)
-        .filter((entry) => !context.agent || entry.visibleToAgents)
-        .map((entry) => entry.commandGroup);
+    return [...new Set(context.registry
+            .filter((entry) => entry.enabled)
+            .concat(context.registry.filter((entry) => entry.feature === "renderer"))
+            .filter((entry) => entry.visibleInHelp)
+            .filter((entry) => !context.agent || entry.visibleToAgents)
+            .map((entry) => entry.commandGroup))];
 }
 export function nextSuggestedCommands(context) {
     const available = new Set(availableCommands(context));

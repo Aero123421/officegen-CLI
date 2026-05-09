@@ -150,10 +150,8 @@ function extractCharts(xml, slideNo, sourcePath, rels) {
     const charts = [];
     for (const match of xml.matchAll(/<p:graphicFrame\b[\s\S]*?<\/p:graphicFrame>/g)) {
         const block = match[0];
-        const relationshipId = /<c:chart\b[^>]*\br:id="([^"]+)"/.exec(block)?.[1];
-        if (!relationshipId)
-            continue;
         chartIndex += 1;
+        const relationshipId = /<c:chart\b[^>]*\br:id="([^"]+)"/.exec(block)?.[1];
         const cNvPr = /<p:cNvPr\b([^>]*)\/>/.exec(block)?.[1] ?? "";
         const shapeId = xmlAttr(cNvPr, "id");
         const name = xmlAttr(cNvPr, "name");

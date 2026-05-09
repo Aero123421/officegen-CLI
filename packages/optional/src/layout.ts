@@ -72,6 +72,9 @@ export async function applyLayoutConstraints(options: LayoutApplyOptions): Promi
     return {
       kind: "officegen.layout.apply",
       generatedAt: nowIso(),
+      supported: true,
+      planOnly: false,
+      formatCapabilities: { pptx: { boundsMutation: true }, docx: { supported: false }, xlsx: { supported: false } },
       boxes,
       changes,
       note: "Applied layout constraints directly to PPTX object bounds.",
@@ -82,6 +85,12 @@ export async function applyLayoutConstraints(options: LayoutApplyOptions): Promi
   const result: LayoutApplyResult = {
     kind: "officegen.layout.apply",
     generatedAt: nowIso(),
+    ...( {
+      supported: false,
+      planOnly: true,
+      noopReason: options.targetPath ? "requires-pptx-output-path" : "requires-targetPath",
+      formatCapabilities: { pptx: { boundsMutation: "requires targetPath and .pptx --out" }, docx: { supported: false }, xlsx: { supported: false } }
+    } as Record<string, unknown> ),
     boxes,
     changes,
     note: "Simple layout constraints computed. Provide targetPath and an Office --out path to mutate PPTX bounds."

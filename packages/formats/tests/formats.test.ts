@@ -430,6 +430,51 @@ describe("@officegen/formats MVP", () => {
     expect(ids.sort()).toEqual(["1", "2"]);
   });
 
+  it("applies DOCX style, header/footer, and comments as first-class structure edits", async () => {
+    const rendered = await render({ title: "Doc", sections: [{ title: "Body", body: "Original paragraph" }] }, { target: "docx" });
+    const inspected = await inspect({ data: rendered.bytes, format: "docx" });
+    const paragraphId = inspected.objectMap.find((entry) => entry.text === "Original paragraph")?.stableObjectId;
+    const edited = await edit(
+      { data: rendered.bytes, format: "docx" },
+      [
+        { op: "docx.headerFooter.setText", kind: "header", text: "Review header" },
+        { op: "docx.headerFooter.setText", kind: "footer", text: "Review footer" },
+        { op: "docx.applyStyle", selector: { stableObjectId: paragraphId }, styleId: "Heading1" },
+        { op: "docx.addComment", selector: { stableObjectId: paragraphId }, text: "Range comment", author: "QA" }
+      ]
+    );
+    const zip = await JSZip.loadAsync(edited.bytes as Uint8Array);
+    const documentXml = await zip.file("word/document.xml")?.async("string") ?? "";
+    const headerXml = await zip.file("word/header1.xml")?.async("string") ?? "";
+    const footerXml = await zip.file("word/footer1.xml")?.async("string") ?? "";
+    const structured = await inspect({ data: edited.bytes, format: "docx" }, { structure: true, depth: "full" });
+
+    expect(headerXml).toContain("Review header");
+    expect(footerXml).toContain("Review footer");
+    expect(documentXml).toContain('<w:pStyle w:val="Heading1"/>');
+    expect(documentXml).toContain("commentRangeStart");
+    expect(structured.objectMap.some((entry) => entry.kind === "header" && entry.editableOps?.includes("docx.headerFooter.setText"))).toBe(true);
+    expect((structured.untrusted.structureMap as any).comments).toBe(1);
+  });
+
+  it("replaces DOCX paragraphs with paired tracked deletion and insertion", async () => {
+    const rendered = await render({ title: "Doc", sections: [{ title: "Body", body: "Original paragraph" }] }, { target: "docx" });
+    const inspected = await inspect({ data: rendered.bytes, format: "docx" });
+    const paragraphId = inspected.objectMap.find((entry) => entry.text === "Original paragraph")?.stableObjectId;
+    const edited = await edit(
+      { data: rendered.bytes, format: "docx" },
+      [{ op: "docx.redline.replace", selector: { stableObjectId: paragraphId }, text: "Replacement paragraph", author: "QA" }]
+    );
+    const zip = await JSZip.loadAsync(edited.bytes as Uint8Array);
+    const documentXml = await zip.file("word/document.xml")?.async("string") ?? "";
+    const structured = await inspect({ data: edited.bytes, format: "docx" }, { structure: true, depth: "full" });
+
+    expect(documentXml).toContain("<w:del");
+    expect(documentXml).toContain("<w:ins");
+    expect(documentXml).toContain("Replacement paragraph");
+    expect((structured.untrusted.structureMap as any).trackedChanges).toBeGreaterThanOrEqual(2);
+  });
+
   it("keeps DOCX stableObjectIds unique across repeated header/footer parts", async () => {
     const zip = new JSZip();
     zip.file("word/document.xml", "<w:document><w:body><w:p><w:r><w:t>Body</w:t></w:r></w:p></w:body></w:document>");
@@ -440,6 +485,67 @@ describe("@officegen/formats MVP", () => {
 
     expect(new Set(ids).size).toBe(ids.length);
     expect(inspected.objectMap.find((entry) => entry.text === "Header A")?.stableObjectId).not.toBe(inspected.objectMap.find((entry) => entry.text === "Header B")?.stableObjectId);
+  });
+
+  it("reports DOCX structure maps for styles, fields, content controls, comments, and redlines", async () => {
+    const zip = new JSZip();
+    zip.file("word/document.xml", [
+      '<w:document><w:body>',
+      '<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Heading</w:t></w:r></w:p>',
+      '<w:p><w:sdt><w:sdtPr><w:tag w:val="client"/></w:sdtPr><w:sdtContent><w:r><w:t>{{client}}</w:t></w:r></w:sdtContent></w:sdt></w:p>',
+      '<w:p><w:fldChar w:fldCharType="begin"/><w:instrText>DATE</w:instrText></w:p>',
+      '<w:p><w:ins w:id="1"><w:r><w:t>Inserted</w:t></w:r></w:ins></w:p>',
+      '<w:sectPr/></w:body></w:document>'
+    ].join(""));
+    zip.file("word/header1.xml", "<w:hdr><w:p><w:r><w:t>Header</w:t></w:r></w:p></w:hdr>");
+    zip.file("word/footer1.xml", "<w:ftr><w:p><w:r><w:t>Footer</w:t></w:r></w:p></w:ftr>");
+    zip.file("word/comments.xml", '<w:comments><w:comment w:id="0"><w:p><w:r><w:t>Comment</w:t></w:r></w:p></w:comment></w:comments>');
+    zip.file("word/styles.xml", '<w:styles><w:style w:type="paragraph" w:styleId="Heading1"/></w:styles>');
+    const inspected = await inspect({ data: await zip.generateAsync({ type: "uint8array" }), format: "docx" }, { structure: true, depth: "full" });
+    const structure = inspected.untrusted.structureMap as any;
+
+    expect(structure.headingTree[0].text).toBe("Heading");
+    expect(structure.headerFooterVariants.headers).toEqual(["word/header1.xml"]);
+    expect(structure.contentControls).toBe(1);
+    expect(structure.fields[0].text).toContain("fldChar");
+    expect(structure.fillablePlaceholders[0].field).toBe("client");
+    expect(structure.comments).toBe(1);
+    expect(structure.trackedChanges).toBe(1);
+    expect(inspected.objectMap.some((entry) => entry.kind === "style" && entry.label === "Heading1")).toBe(true);
+  });
+
+  it("sets XLSX pivot refresh flags and slicer selections through OOXML guards", async () => {
+    const zip = new JSZip();
+    zip.file("xl/workbook.xml", '<workbook><sheets><sheet name="Data"/></sheets></workbook>');
+    zip.file("xl/worksheets/sheet1.xml", '<worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Region</t></is></c></row></sheetData></worksheet>');
+    zip.file("xl/pivotTables/pivotTable1.xml", '<pivotTableDefinition name="Pivot1"></pivotTableDefinition>');
+    zip.file("xl/pivotCache/pivotCacheDefinition1.xml", '<pivotCacheDefinition></pivotCacheDefinition>');
+    zip.file("xl/slicers/slicer1.xml", '<slicers><slicer><slicerItem n="East"/><slicerItem n="West" h="0"/></slicer></slicers>');
+    const bytes = await zip.generateAsync({ type: "uint8array" });
+    const inspected = await inspect({ data: bytes, format: "xlsx" }, { depth: "full" });
+    const slicerId = inspected.objectMap.find((entry) => entry.kind === "slicer")?.stableObjectId;
+    const edited = await edit(
+      { data: bytes, format: "xlsx" },
+      [
+        { op: "xlsx.pivot.refreshAll" },
+        { op: "xlsx.slicer.setSelection", selector: { stableObjectId: slicerId }, selected: ["East"] }
+      ]
+    );
+    const editedZip = await JSZip.loadAsync(edited.bytes as Uint8Array);
+    const pivotXml = await editedZip.file("xl/pivotTables/pivotTable1.xml")?.async("string") ?? "";
+    const cacheXml = await editedZip.file("xl/pivotCache/pivotCacheDefinition1.xml")?.async("string") ?? "";
+    const slicerXml = await editedZip.file("xl/slicers/slicer1.xml")?.async("string") ?? "";
+    const reinspected = await inspect({ data: edited.bytes, format: "xlsx" }, { depth: "summary", sheet: "Data", range: "A1:A1" });
+
+    expect(inspected.objectMap.find((entry) => entry.kind === "pivotTable")?.editableOps).toContain("xlsx.pivot.refreshAll");
+    expect(inspected.objectMap.find((entry) => entry.kind === "slicer")?.editableOps).toContain("xlsx.slicer.setSelection");
+    expect(pivotXml).toContain('refreshOnLoad="1"');
+    expect(cacheXml).toContain('refreshOnLoad="1"');
+    expect(slicerXml).toContain('n="East" h="0"');
+    expect(slicerXml).toContain('n="West" h="1"');
+    expect((reinspected.untrusted.workbookMap as any).pivotTables).toEqual(["xl/pivotTables/pivotTable1.xml"]);
+    expect((reinspected.untrusted.workbookMap as any).slicers).toEqual(["xl/slicers/slicer1.xml"]);
+    expect(reinspected.untrusted.sheets[0]?.cellCount).toBe(1);
   });
 
   it("reports semantic and approximate visual differences", async () => {

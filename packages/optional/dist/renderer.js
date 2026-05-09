@@ -1,4 +1,5 @@
 import path from "node:path";
+import { nativeRendererDoctor } from "../../formats/dist/index.js";
 import { featureRoot, listJsonFiles, nowIso, readJsonFile, requireFeature, sha256Json, slugify, writeJsonFile } from "./common.js";
 const builtinRenderers = [
     {
@@ -28,6 +29,9 @@ export async function listRenderers(options = {}) {
 }
 export async function inspectRenderer(options) {
     requireFeature(options, "renderer", "renderer inspect");
+    if (slugify(options.id) === "doctor") {
+        return await doctorRenderer(options);
+    }
     const renderer = (await listRenderers(options)).find((candidate) => candidate.id === slugify(options.id));
     if (!renderer) {
         throw new Error(`Renderer not found: ${options.id}`);
@@ -35,6 +39,18 @@ export async function inspectRenderer(options) {
     const trustStore = await readRendererTrustStore(options);
     const trusted = trustStore.pins.some((pin) => pin.id === renderer.id && pin.version === renderer.version && pin.sha256 === renderer.sha256);
     return { ...renderer, trusted };
+}
+export async function doctorRenderer(options = {}) {
+    requireFeature(options, "renderer", "renderer doctor");
+    const doctor = await nativeRendererDoctor(undefined);
+    return {
+        ...doctor,
+        trusted: true,
+        guidance: [
+            "Use OFFICEGEN_PROFILE=enterprise or an equivalent config enabling externalProcess/renderers for native export/verify.",
+            "Windows Office COM is preferred when available; LibreOffice headless is the portable fallback."
+        ]
+    };
 }
 export async function trustRenderer(options) {
     requireFeature(options, "renderer", "renderer trust");

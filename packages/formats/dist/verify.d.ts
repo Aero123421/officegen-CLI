@@ -3,6 +3,10 @@ export interface VerifyOptions {
     native?: boolean;
     visual?: boolean;
     out?: string;
+    formulas?: boolean;
+    namedRanges?: boolean;
+    externalLinks?: boolean;
+    protectedSheets?: boolean;
     config?: OfficegenConfig;
 }
 export interface VerifyResult {
@@ -25,6 +29,25 @@ export interface VerifyResult {
     };
     blockingIssues: string[];
     warnings: string[];
+    warningSummary: Array<{
+        code: string;
+        count: number;
+        severity: "warning" | "error";
+        examples: string[];
+    }>;
+    topRisks: Array<{
+        code: string;
+        severity: "warning" | "error";
+        count: number;
+        message: string;
+        repair?: string;
+    }>;
+    scoreBreakdown: Record<string, unknown>;
+    recommendedRepairs: Array<{
+        code: string;
+        command?: string;
+        reason: string;
+    }>;
     artifacts: Record<string, unknown>;
 }
 export declare function verify(input: InputLike, options?: VerifyOptions): Promise<VerifyResult>;

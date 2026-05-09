@@ -185,8 +185,9 @@ async function applyOfficeOperation(zip, format, operation, objectMap, index) {
     if (format === "docx" && op === "docx.insertParagraphAfter") {
         return editDocxInsertParagraph(zip, operation, objectMap);
     }
-    if (format === "docx" && (op === "docx.setHeader" || op === "docx.setFooter")) {
-        return editDocxHeaderFooter(zip, op === "docx.setHeader" ? "header" : "footer", operation.text);
+    if (format === "docx" && (op === "docx.setHeader" || op === "docx.setFooter" || op === "docx.headerFooter.setText")) {
+        const headerFooter = operation;
+        return editDocxHeaderFooter(zip, headerFooter.kind ?? (op === "docx.setHeader" ? "header" : "footer"), headerFooter.text);
     }
     if (format === "docx" && op === "docx.setStyle") {
         return editDocxStyle(zip, operation);
@@ -194,8 +195,20 @@ async function applyOfficeOperation(zip, format, operation, objectMap, index) {
     if (format === "docx" && op === "docx.addComment") {
         return editDocxAddComment(zip, operation, objectMap);
     }
-    if (format === "docx" && op === "docx.addRedline") {
+    if (format === "docx" && (op === "docx.addRedline" || op === "docx.redline.insert")) {
         return editDocxAddRedline(zip, operation, objectMap);
+    }
+    if (format === "docx" && op === "docx.redline.delete") {
+        return editDocxDeleteRedline(zip, operation, objectMap);
+    }
+    if (format === "docx" && op === "docx.redline.replace") {
+        const replace = operation;
+        const deleted = await editDocxDeleteRedline(zip, replace, objectMap);
+        const inserted = await editDocxAddRedline(zip, replace, objectMap);
+        return deleted || inserted;
+    }
+    if (format === "docx" && op === "docx.applyStyle") {
+        return editDocxApplyStyle(zip, operation, objectMap);
     }
     if (format === "xlsx" && op === "xlsx.insertRows") {
         const rowOp = operation;
@@ -276,6 +289,12 @@ async function applyOfficeOperation(zip, format, operation, objectMap, index) {
         if (next !== xml)
             zip.file(target.xmlPath, next);
         return next !== xml;
+    }
+    if (format === "xlsx" && op === "xlsx.pivot.refreshAll") {
+        return refreshAllPivotDefinitions(zip);
+    }
+    if (format === "xlsx" && op === "xlsx.slicer.setSelection") {
+        return editXlsxSlicerSelection(zip, operation, objectMap);
     }
     return false;
 }
@@ -456,6 +475,40 @@ async function editDocxAddRedline(zip, operation, objectMap) {
     const ordinal = Number(target.selectorHints?.paragraph ?? stableOrdinal(target.stableObjectId));
     const nextId = nextDocxRevisionId(xml);
     const next = replaceNthParagraph(xml, ordinal, (paragraph) => `${paragraph}${insertedParagraphXml(operation.text, operation.author ?? "officegen", new Date(), nextId)}`);
+    if (next.changed)
+        zip.file(target.sourcePath, next.xml);
+    return next.changed;
+}
+async function editDocxDeleteRedline(zip, operation, objectMap) {
+    const target = singleMatch(objectMap, operation.selector);
+    if (!target.sourcePath)
+        throw new Error("SELECTOR_NOT_FOUND: selected DOCX paragraph has no sourcePath.");
+    const xml = (await readZipText(zip, target.sourcePath)) ?? "";
+    const ordinal = Number(target.selectorHints?.paragraph ?? stableOrdinal(target.stableObjectId));
+    const nextId = nextDocxRevisionId(xml);
+    const next = replaceNthParagraph(xml, ordinal, (paragraph) => {
+        const text = paragraph.replace(/<[^>]+>/g, "");
+        return `<w:p><w:del w:id="${nextId}" w:author="${escapeXmlText(operation.author ?? "officegen")}" w:date="${new Date().toISOString()}"><w:r><w:delText>${escapeXmlText(text)}</w:delText></w:r></w:del></w:p>`;
+    });
+    if (next.changed)
+        zip.file(target.sourcePath, next.xml);
+    return next.changed;
+}
+async function editDocxApplyStyle(zip, operation, objectMap) {
+    const target = singleMatch(objectMap, operation.selector);
+    if (!target.sourcePath)
+        throw new Error("SELECTOR_NOT_FOUND: selected DOCX paragraph has no sourcePath.");
+    const xml = (await readZipText(zip, target.sourcePath)) ?? "";
+    const ordinal = Number(target.selectorHints?.paragraph ?? stableOrdinal(target.stableObjectId));
+    const style = escapeXmlText(operation.styleId);
+    const next = replaceNthParagraph(xml, ordinal, (paragraph) => {
+        if (/<w:pPr\b[\s\S]*?<\/w:pPr>/.test(paragraph)) {
+            if (/<w:pStyle\b[^>]*\/>/.test(paragraph))
+                return paragraph.replace(/<w:pStyle\b[^>]*\/>/, `<w:pStyle w:val="${style}"/>`);
+            return paragraph.replace(/<w:pPr\b([^>]*)>/, `<w:pPr$1><w:pStyle w:val="${style}"/>`);
+        }
+        return paragraph.replace(/(<w:p\b[^>]*>)/, `$1<w:pPr><w:pStyle w:val="${style}"/></w:pPr>`);
+    });
     if (next.changed)
         zip.file(target.sourcePath, next.xml);
     return next.changed;
@@ -717,6 +770,45 @@ async function ensureXlsxTable(zip, sheet, startCell, rows, tableName) {
     if (nextWorksheet !== worksheetXml)
         zip.file(worksheetPath, nextWorksheet);
     return true;
+}
+async function refreshAllPivotDefinitions(zip) {
+    let changed = false;
+    for (const path of Object.keys(zip.files).filter((item) => /^xl\/pivotTables\/pivotTable\d+\.xml$/i.test(item))) {
+        const xml = (await readZipText(zip, path)) ?? "";
+        const next = xml.replace(/<pivotTableDefinition\b([^>]*)>/, (match, attrs) => /\brefreshOnLoad=/.test(attrs) ? match.replace(/\brefreshOnLoad="[^"]*"/, 'refreshOnLoad="1"') : `<pivotTableDefinition${attrs} refreshOnLoad="1">`);
+        if (next !== xml) {
+            zip.file(path, next);
+            changed = true;
+        }
+    }
+    for (const path of Object.keys(zip.files).filter((item) => /^xl\/pivotCache\/pivotCacheDefinition\d+\.xml$/i.test(item))) {
+        const xml = (await readZipText(zip, path)) ?? "";
+        const next = xml.replace(/<pivotCacheDefinition\b([^>]*)>/, (match, attrs) => /\brefreshOnLoad=/.test(attrs) ? match.replace(/\brefreshOnLoad="[^"]*"/, 'refreshOnLoad="1"') : `<pivotCacheDefinition${attrs} refreshOnLoad="1">`);
+        if (next !== xml) {
+            zip.file(path, next);
+            changed = true;
+        }
+    }
+    return changed;
+}
+async function editXlsxSlicerSelection(zip, operation, objectMap) {
+    const target = singleMatch(objectMap, operation.selector);
+    if (target.kind !== "slicer" || !target.xmlPath)
+        throw new Error("SELECTOR_NOT_FOUND: selected object is not an XLSX slicer.");
+    const xml = (await readZipText(zip, target.xmlPath)) ?? "";
+    const selected = new Set(operation.selected.map(String));
+    let touched = false;
+    const next = xml.replace(/<[^:>]*:?(?:slicerItem|item)\b([^>]*)>/g, (match, attrs) => {
+        const value = /\b(?:n|x|name)="([^"]+)"/.exec(attrs)?.[1];
+        if (!value)
+            return match;
+        touched = true;
+        const hidden = selected.has(value) ? "0" : "1";
+        return /\bh="/.test(match) ? match.replace(/\bh="[^"]*"/, `h="${hidden}"`) : match.replace(/\/?>$/, ` h="${hidden}"/>`);
+    });
+    if (touched && next !== xml)
+        zip.file(target.xmlPath, next);
+    return touched && next !== xml;
 }
 async function findXlsxTableForStart(zip, startCell, tableName) {
     for (const path of Object.keys(zip.files).filter((item) => /^xl\/tables\/table\d+\.xml$/i.test(item)).sort()) {

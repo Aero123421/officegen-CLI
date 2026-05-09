@@ -74,6 +74,7 @@ export interface TemplatePlaceholderCandidate {
     text?: string;
     name?: string;
     placeholderType?: string;
+    objectKind?: "shape" | "picture" | "chart" | "diagram";
     bounds?: DesignBounds;
     confidence: number;
     source: string;
@@ -92,14 +93,14 @@ export interface NamedShapeCandidate {
 }
 export interface TemplateSchemaCandidate {
     name: string;
-    type: "string" | "number" | "boolean" | "date" | "json";
+    type: "string" | "number" | "boolean" | "date" | "json" | "image" | "chartData" | "table" | "list";
     required: boolean;
     confidence: number;
     reason: string;
 }
 export interface TemplateMapSuggestion {
     schema: "officegen.template.map@1.2";
-    mapping: Record<string, string>;
+    mapping: Record<string, unknown>;
     confidence: number;
     candidateCount: number;
 }
@@ -224,6 +225,7 @@ export interface DesignCaptureOptions extends DesignInspectOptions {
 export interface DesignApplyOptions extends DesignInspectOptions {
     targetPath?: string;
     outputPath?: string;
+    strategy?: "theme-only" | "inspired" | "faithful";
 }
 export interface PptxDesignSignalOptions {
     cwd?: string;

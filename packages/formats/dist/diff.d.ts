@@ -14,6 +14,7 @@ export interface DiffResult {
         addedObjects: number;
         removedObjects: number;
         changedTextObjects: number;
+        changedParts?: number;
         visualRegressionScore?: number;
     };
     semantic: {
@@ -24,6 +25,13 @@ export interface DiffResult {
             kind: string;
             before?: string;
             after?: string;
+        }>;
+        partChanges?: Array<{
+            path: string;
+            kind: string;
+            beforeHash?: string;
+            afterHash?: string;
+            status: "added" | "removed" | "changed";
         }>;
     };
     visual?: {

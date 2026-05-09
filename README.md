@@ -19,7 +19,7 @@ npm install -g github:Aero123421/officegen-CLI
 For tagged releases, GitHub Actions publishes a checked GitHub Release tarball. This project does not publish the `officegen` name to the public npm registry, because that package name is already owned separately on npm.
 
 ```bash
-npm install -g https://github.com/Aero123421/officegen-CLI/releases/download/v2.1.1/officegen-v2.1.1.tgz
+npm install -g https://github.com/Aero123421/officegen-CLI/releases/download/v2.2.0/officegen-v2.2.0.tgz
 ```
 
 Check that it works:
@@ -221,7 +221,7 @@ Use `--json` for machine-readable output. Responses use the v1.2 envelope shape:
   "ok": true,
   "command": "capabilities",
   "runId": "...",
-  "cliVersion": "2.1.1",
+  "cliVersion": "2.2.0",
   "capabilitiesHash": "sha256:...",
   "pathsRedacted": true,
   "result": {},
@@ -261,13 +261,18 @@ The current implementation is a practical v2 authoring substrate:
 - embedded picture objects are included in PPTX object maps with asset references
 - asset replacement validates media type and extension compatibility before writing
 - PDF inspect includes best-effort text previews when plain text operators are available
+- PDF inspect reports `PDF_TEXT_BLOCKS_ZERO` quality warnings and points scanned/image PDFs to page preview artifacts for AI vision review
+- `template fill --validate-only` checks value types, selector bindings, dedicated image/chart/table ops, and artifact feasibility before writing
+- `design apply --strategy theme-only|inspired|faithful` reports exactly which tokens/parts changed and when the result is limited
+- `inspect docx --structure` and `inspect xlsx --sheet <name> --range A1:K40` provide structure maps for agent-safe narrow reads
+- `verify` aggregates repeated warnings with capped score penalties, top risks, score breakdown, and recommended repairs
+- `diff` includes semantic OOXML part changes for chart XML, embedded workbooks, themes, tables, and media
 - command-specific `--help` and JSON help topics are supported
 - JSON path redaction is field-aware and does not rewrite SVG/XML/HTML payload strings
 - previews are approximate, not native Office rendering
 - Office editing is conservative XML-level editing
 - PDF editing is mainly additive operations such as overlays and annotations
-- Office-to-PDF export is approximate unless a trusted renderer is added later
-- native Office charts and high-fidelity rendering are intentionally left to optional renderer/plugin paths
+- high-fidelity Office-to-PDF and repair-dialog verification use Windows Office COM when available, with LibreOffice headless as the portable fallback
 
 The core goal is safety, portability, and agent-friendly structured workflows.
 
@@ -285,6 +290,15 @@ Package dry run:
 ```bash
 npm pack --dry-run
 npm run pack:smoke
+npm run github-install:smoke
+npm run remediation:check
+```
+
+Optional public corpus benchmark:
+
+```bash
+npm run benchmark:fetch
+npm run benchmark:review
 ```
 
 Version bump all managed release files:
@@ -292,7 +306,7 @@ Version bump all managed release files:
 ```bash
 npm run version:bump -- patch
 # or: npm run version:bump -- minor
-# or: npm run version:bump -- 2.1.1
+# or: npm run version:bump -- 2.2.0
 npm run version:check
 ```
 

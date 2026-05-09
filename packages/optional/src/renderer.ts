@@ -1,4 +1,5 @@
 import path from "node:path";
+import { nativeRendererDoctor } from "@officegen/formats";
 
 import {
   OptionalContext,
@@ -75,6 +76,9 @@ export async function listRenderers(options: OptionalContext = {}): Promise<Rend
 
 export async function inspectRenderer(options: RendererInspectOptions): Promise<RendererManifest & { trusted: boolean }> {
   requireFeature(options, "renderer", "renderer inspect");
+  if (slugify(options.id) === "doctor") {
+    return await doctorRenderer(options) as unknown as RendererManifest & { trusted: boolean };
+  }
   const renderer = (await listRenderers(options)).find((candidate) => candidate.id === slugify(options.id));
   if (!renderer) {
     throw new Error(`Renderer not found: ${options.id}`);
@@ -85,6 +89,19 @@ export async function inspectRenderer(options: RendererInspectOptions): Promise<
     (pin) => pin.id === renderer.id && pin.version === renderer.version && pin.sha256 === renderer.sha256
   );
   return { ...renderer, trusted };
+}
+
+export async function doctorRenderer(options: OptionalContext = {}): Promise<Record<string, unknown>> {
+  requireFeature(options, "renderer", "renderer doctor");
+  const doctor = await nativeRendererDoctor(undefined);
+  return {
+    ...doctor,
+    trusted: true,
+    guidance: [
+      "Use OFFICEGEN_PROFILE=enterprise or an equivalent config enabling externalProcess/renderers for native export/verify.",
+      "Windows Office COM is preferred when available; LibreOffice headless is the portable fallback."
+    ]
+  };
 }
 
 export async function trustRenderer(options: RendererTrustOptions): Promise<RendererTrustStore> {

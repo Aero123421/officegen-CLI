@@ -105,6 +105,7 @@ export interface TemplatePlaceholderCandidate {
   text?: string;
   name?: string;
   placeholderType?: string;
+  objectKind?: "shape" | "picture" | "chart" | "diagram";
   bounds?: DesignBounds;
   confidence: number;
   source: string;
@@ -125,7 +126,7 @@ export interface NamedShapeCandidate {
 
 export interface TemplateSchemaCandidate {
   name: string;
-  type: "string" | "number" | "boolean" | "date" | "json";
+  type: "string" | "number" | "boolean" | "date" | "json" | "image" | "chartData" | "table" | "list";
   required: boolean;
   confidence: number;
   reason: string;
@@ -133,7 +134,7 @@ export interface TemplateSchemaCandidate {
 
 export interface TemplateMapSuggestion {
   schema: "officegen.template.map@1.2";
-  mapping: Record<string, string>;
+  mapping: Record<string, unknown>;
   confidence: number;
   candidateCount: number;
 }
@@ -271,6 +272,7 @@ export interface DesignCaptureOptions extends DesignInspectOptions {
 export interface DesignApplyOptions extends DesignInspectOptions {
   targetPath?: string;
   outputPath?: string;
+  strategy?: "theme-only" | "inspired" | "faithful";
 }
 
 export interface PptxDesignSignalOptions {
@@ -394,6 +396,7 @@ export async function captureDesign(options: DesignCaptureOptions): Promise<Desi
   return updateDesign({
     ...options,
     patch: {
+      tokens: mergePlainObjects(current.tokens, designTokensFromSignals(pptxSignals) as Record<string, unknown>),
       sourceCapture: capture
     }
   });
@@ -402,8 +405,9 @@ export async function captureDesign(options: DesignCaptureOptions): Promise<Desi
 export async function applyDesign(options: DesignApplyOptions): Promise<Record<string, unknown>> {
   requireFeature(options, "design", "design apply");
   const design = await inspectDesign(options);
+  const strategy = options.strategy ?? "inspired";
   if (options.targetPath && options.outputPath && path.extname(options.targetPath).toLowerCase() === ".pptx" && path.extname(options.outputPath).toLowerCase() === ".pptx") {
-    const applied = await applyPptxDesign(design, path.resolve(options.cwd ?? process.cwd(), options.targetPath), options.outputPath);
+    const applied = await applyPptxDesign(design, path.resolve(options.cwd ?? process.cwd(), options.targetPath), options.outputPath, strategy, options);
     return {
       kind: "officegen.design.apply",
       planOnly: false,
@@ -413,6 +417,7 @@ export async function applyDesign(options: DesignApplyOptions): Promise<Record<s
       designHash: design.hash,
       targetPath: options.targetPath,
       out: options.outputPath,
+      strategy,
       ...applied
     };
   }
@@ -420,9 +425,17 @@ export async function applyDesign(options: DesignApplyOptions): Promise<Record<s
     kind: "officegen.design.apply",
     planOnly: true,
     mutatesOffice: false,
+    supported: false,
+    noopReason: "requires-pptx-target-and-pptx-out",
+    formatCapabilities: {
+      pptx: { themeOnly: true, inspired: "limited", faithful: "best-effort" },
+      docx: { supported: false, noopReason: "design apply currently mutates PPTX only" },
+      xlsx: { supported: false, noopReason: "design apply currently mutates PPTX only" }
+    },
     generatedAt: nowIso(),
     designId: design.id,
     designHash: design.hash,
+    strategy,
     targetPath: options.targetPath ? path.resolve(options.cwd ?? process.cwd(), options.targetPath) : undefined,
     tokens: design.tokens,
     note: "This is a design application plan for @officegen/formats."
@@ -432,7 +445,13 @@ export async function applyDesign(options: DesignApplyOptions): Promise<Record<s
   return plan;
 }
 
-async function applyPptxDesign(design: DesignProfile, targetPath: string, outputPath: string): Promise<Record<string, unknown>> {
+async function applyPptxDesign(
+  design: DesignProfile,
+  targetPath: string,
+  outputPath: string,
+  strategy: "theme-only" | "inspired" | "faithful",
+  context: OptionalContext
+): Promise<Record<string, unknown>> {
   const bytes = await readFile(targetPath);
   const zip = await loadZip({ bytes, path: targetPath, format: "pptx", trusted: false });
   const accent = designAccentColor(design);
@@ -455,13 +474,104 @@ async function applyPptxDesign(design: DesignProfile, targetPath: string, output
       changedParts.push(file.name);
     }
   }
+  if (strategy !== "theme-only" && fontFace) {
+    const presentationXml = (await readZipText(zip, "ppt/presentation.xml")) ?? "";
+    const slideSize = readSlideSize(presentationXml);
+    const layoutChanged = await applyCapturedLayoutAndFit(zip, design, slideSize, fontFace);
+    changedParts.push(...layoutChanged);
+    for (const file of Object.values(zip.files)) {
+      if (file.dir || !/^ppt\/slides\/slide\d+\.xml$/i.test(file.name)) continue;
+      const xml = await file.async("string");
+      const next = xml
+        .replace(/(<a:latin\b[^>]*typeface=")[^"]*(")/g, `$1${escapeXmlAttr(fontFace)}$2`)
+        .replace(/(<a:ea\b[^>]*typeface=")[^"]*(")/g, `$1${escapeXmlAttr(fontFace)}$2`);
+      if (next !== xml) {
+        zip.file(file.name, next);
+        changedParts.push(file.name);
+      }
+    }
+  }
   await writeFile(outputPath, await zip.generateAsync({ type: "uint8array", compression: "DEFLATE", compressionOptions: { level: 6 } }));
+  const contactSheetArtifact = await writeJsonFile(path.join(featureRoot(context, "design"), "runs", `${slugify(design.id)}.${Date.now()}.contact-sheet.json`), {
+    schema: "officegen.design.contact-sheet@2.2",
+    targetPath,
+    outputPath,
+    strategy,
+    changedParts,
+    sourcePreviewPaths: (design.sourceCapture as DesignSourceCapture | undefined)?.artifactPaths?.previewPaths ?? []
+  });
+  const limitations = [
+    strategy === "theme-only"
+      ? "theme-only intentionally changes theme tokens only and preserves slide geometry/placeholders."
+      : "inspired/faithful are best-effort OOXML style applications; they do not perform native PowerPoint layout reflow.",
+    "Slide masters, layouts, placeholders, relationships, and content are preserved by editing package parts in place."
+  ];
   return {
     changedParts,
+    visualEffect: changedParts.length ? (strategy === "theme-only" ? "theme-token-change" : "style-token-change") : "none",
+    contactSheetArtifact,
+    limitations,
     tokensApplied: { accent, fontFace },
     mastersAndLayoutsPreserved: true,
     note: changedParts.length ? "Updated PPTX theme tokens while preserving slide masters, layouts, placeholders, relationships, and content." : "No theme parts were changed."
   };
+}
+
+async function applyCapturedLayoutAndFit(
+  zip: Awaited<ReturnType<typeof loadZip>>,
+  design: DesignProfile,
+  slideSize: SlideSize,
+  fontFace: string
+): Promise<string[]> {
+  const capture = design.sourceCapture as DesignSourceCapture | undefined;
+  const patterns = capture?.bboxPatterns ?? [];
+  const title = patterns.find((pattern) => pattern.kind === "title")?.average;
+  const body = patterns.find((pattern) => pattern.kind === "body")?.average;
+  const image = patterns.find((pattern) => pattern.kind === "image")?.average;
+  const changedParts: string[] = [];
+  for (const file of Object.values(zip.files)) {
+    if (file.dir || !/^ppt\/slides\/slide\d+\.xml$/i.test(file.name)) continue;
+    const xml = await file.async("string");
+    let next = xml;
+    if (title) next = replaceBlocks(next, "p:sp", (block) => /<p:ph\b[^>]*(?:type="(?:title|ctrTitle)")/i.test(block) ? setBlockBounds(block, title, slideSize) : block);
+    if (body) next = replaceBlocks(next, "p:sp", (block) => /<p:ph\b[^>]*(?:type="body"|type="obj"|<p:ph\b(?![^>]*type=))/i.test(block) ? setBlockBounds(block, body, slideSize) : block);
+    if (image) next = replaceBlocks(next, "p:pic", (block) => setBlockBounds(block, image, slideSize));
+    next = shrinkOverflowText(next, fontFace);
+    if (next !== xml) {
+      zip.file(file.name, next);
+      changedParts.push(file.name);
+    }
+  }
+  return changedParts;
+}
+
+function replaceBlocks(xml: string, tagName: string, replacer: (block: string) => string): string {
+  const escaped = tagName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return xml.replace(new RegExp(`<${escaped}\\b[\\s\\S]*?<\\/${escaped}>`, "g"), replacer);
+}
+
+function setBlockBounds(block: string, bounds: DesignBounds, slideSize: SlideSize): string {
+  const emu = {
+    x: Math.round(bounds.x * slideSize.width),
+    y: Math.round(bounds.y * slideSize.height),
+    width: Math.round(bounds.width * slideSize.width),
+    height: Math.round(bounds.height * slideSize.height)
+  };
+  if (/<a:xfrm\b[\s\S]*?<\/a:xfrm>/.test(block)) {
+    return block.replace(/<a:xfrm\b[^>]*>[\s\S]*?<\/a:xfrm>/, `<a:xfrm><a:off x="${emu.x}" y="${emu.y}"/><a:ext cx="${emu.width}" cy="${emu.height}"/></a:xfrm>`);
+  }
+  return block.replace(/<p:spPr\b[^>]*>/, (match) => `${match}<a:xfrm><a:off x="${emu.x}" y="${emu.y}"/><a:ext cx="${emu.width}" cy="${emu.height}"/></a:xfrm>`);
+}
+
+function shrinkOverflowText(xml: string, fontFace: string): string {
+  return replaceBlocks(xml, "p:sp", (shape) => {
+    const text = extractXmlTexts(shape, "t").join(" ");
+    if (text.length < 180) return shape;
+    return shape.replace(/<a:rPr\b([^>]*)\bsz="(\d+)"([^>]*)>/g, (_match, before: string, size: string, after: string) => {
+      const nextSize = Math.max(1200, Math.floor(Number(size) * 0.82));
+      return `<a:rPr${before} sz="${nextSize}"${after}><a:latin typeface="${escapeXmlAttr(fontFace)}"/><a:ea typeface="${escapeXmlAttr(fontFace)}"/>`;
+    });
+  });
 }
 
 function designAccentColor(design: DesignProfile): string | undefined {
@@ -488,6 +598,45 @@ function replaceThemeColor(xml: string, role: string, hex: string): string {
 function normalizeHexColor(value: string | undefined): string | undefined {
   const match = /^#?([0-9a-f]{6})$/i.exec(value ?? "");
   return match?.[1]?.toUpperCase();
+}
+
+function designTokensFromSignals(signals: PptxDesignSignals | undefined): Record<string, unknown> {
+  if (!signals) return {};
+  const accent = signals.colorRoleCandidates.find((candidate) => candidate.role === "accent")?.value;
+  const background = signals.colorRoleCandidates.find((candidate) => candidate.role === "background")?.value;
+  const text = signals.colorRoleCandidates.find((candidate) => candidate.role === "text")?.value;
+  const headingSize = signals.textSizeDistribution.slice().sort((left, right) => right.maxPt - left.maxPt)[0];
+  const bodySize = signals.textSizeDistribution.slice().sort((left, right) => right.count - left.count)[0];
+  return {
+    color: {
+      palette: signals.colors.slice(0, 8).map((color) => color.value),
+      roles: { accent, background, text },
+      accent,
+      background,
+      text
+    },
+    typography: {
+      heading: { sizePt: headingSize?.maxPt ?? 28, fontFamily: "Arial" },
+      body: { sizePt: bodySize?.maxPt ?? 14, fontFamily: "Arial" },
+      fontFamily: "Arial"
+    },
+    spacing: {
+      scale: [4, 8, 12, 16, 24, 32],
+      densityScore: signals.densityScore
+    },
+    layout: {
+      archetypes: signals.bboxPatterns,
+      slideTypes: signals.slideSignals.reduce<Record<string, number>>((acc, slide) => {
+        acc[slide.slideType] = (acc[slide.slideType] ?? 0) + 1;
+        return acc;
+      }, {})
+    },
+    objectStyles: {
+      table: { headerFill: accent, bodyFill: background, text },
+      chart: { palette: signals.colors.slice(0, 6).map((color) => color.value) },
+      image: { placementPatterns: signals.bboxPatterns.filter((pattern) => pattern.kind === "image") }
+    }
+  };
 }
 
 function escapeXmlAttr(value: string): string {
@@ -656,6 +805,7 @@ export async function capturePptxDesignSignals(
           text: object.text?.slice(0, 160),
           name: object.name,
           placeholderType: object.placeholderType,
+          objectKind: object.kind,
           bounds: object.bounds,
           confidence: placeholder ? 0.85 : fieldConfidence(object.text ?? object.name ?? "", object.placeholderType),
           source: slidePath,
@@ -864,8 +1014,11 @@ function extractSlideObjects(xml: string, slide: number, source: string, slideSi
   let pictureOrdinal = 0;
   for (const block of extractBlocks(xml, "p:pic")) {
     pictureOrdinal += 1;
+    const shapeId = readShapeId(block);
     objects.push({
-      stableObjectId: stableObjectId("picture", source, pictureOrdinal),
+      stableObjectId: shapeId
+        ? stableHashId("pptx", slideScope(source), "picture", `${source}#${shapeId}`)
+        : stableObjectId("picture", source, pictureOrdinal),
       slide,
       kind: "picture",
       ordinal: pictureOrdinal,
@@ -881,8 +1034,11 @@ function extractSlideObjects(xml: string, slide: number, source: string, slideSi
   for (const block of extractBlocks(xml, "p:graphicFrame")) {
     frameOrdinal += 1;
     const kind = /<c:chart\b/i.test(block) ? "chart" : /<dgm:/i.test(block) ? "diagram" : "diagram";
+    const shapeId = readShapeId(block);
     objects.push({
-      stableObjectId: stableObjectId(kind, source, frameOrdinal),
+      stableObjectId: shapeId && kind === "chart"
+        ? stableHashId("pptx", slideScope(source), "chart", `${source}#${shapeId}`)
+        : stableObjectId(kind, source, frameOrdinal),
       slide,
       kind,
       ordinal: frameOrdinal,
@@ -1095,19 +1251,23 @@ function buildSchemaCandidates(
     ...placeholders.map((placeholder) => ({
       name: placeholder.field,
       confidence: placeholder.confidence,
-      reason: placeholder.placeholderType ? `placeholder:${placeholder.placeholderType}` : "shape/text candidate"
+      reason: placeholder.placeholderType ? `placeholder:${placeholder.placeholderType}` : `${placeholder.objectKind ?? "shape"}/text candidate`,
+      kind: placeholder.objectKind,
+      placeholderType: placeholder.placeholderType
     })),
     ...mapCandidates.map((candidate) => ({
       name: candidate.field,
       confidence: candidate.confidence,
-      reason: "text label candidate"
+      reason: "text label candidate",
+      kind: "shape" as const,
+      placeholderType: undefined
     }))
   ]) {
     const existing = byName.get(candidate.name);
     if (!existing || candidate.confidence > existing.confidence) {
       byName.set(candidate.name, {
         name: candidate.name,
-        type: inferFieldType(candidate.name),
+        type: inferFieldType(candidate.name, candidate.kind, candidate.placeholderType, candidate.confidence),
         required: candidate.confidence >= 0.7,
         confidence: round(candidate.confidence, 2),
         reason: candidate.reason
@@ -1137,7 +1297,15 @@ function buildTemplateMapSuggestion(
   };
 }
 
-function inferFieldType(name: string): TemplateSchemaCandidate["type"] {
+function inferFieldType(
+  name: string,
+  kind?: "shape" | "picture" | "chart" | "diagram",
+  placeholderType?: string,
+  confidence = 0
+): TemplateSchemaCandidate["type"] {
+  if (kind === "picture" || placeholderType === "pic") return "image";
+  if (kind === "chart" || /\bchart\b/i.test(name)) return "chartData";
+  if (/\b(table|rows|matrix)\b/i.test(name)) return "table";
   const tokens = name
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "_")
@@ -1151,7 +1319,7 @@ function inferFieldType(name: string): TemplateSchemaCandidate["type"] {
   const dateTokens = new Set(["date", "day", "month", "year", "deadline"]);
 
   if (tokens.some((token) => numberTokens.has(token))) return "number";
-  if (tokens.some((token) => dateTokens.has(token))) return "date";
+  if (confidence >= 0.7 && tokens.some((token) => dateTokens.has(token)) && !tokens.some((token) => ["title", "name", "headline"].includes(token))) return "date";
   if ((tokenSet.has("created") || tokenSet.has("modified") || tokenSet.has("updated")) && tokenSet.has("at")) return "date";
   return "string";
 }

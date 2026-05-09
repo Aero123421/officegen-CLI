@@ -352,6 +352,7 @@ function registerErrors(program: Command, context: RuntimeContext, stdout: (text
 }
 
 function isCommandVisibleInNativeHelp(context: RuntimeContext, feature: FeatureKey): boolean {
+  if (feature === "renderer") return true;
   const entry = context.registry.find((candidate) => candidate.commandGroup === feature);
   return Boolean(entry?.enabled && entry.visibleInHelp && (!context.agent || entry.visibleToAgents));
 }
@@ -385,7 +386,15 @@ function baseCommand(name: string, description: string): Command {
     .option("--images", "extract image assets")
     .option("--visual", "include approximate visual diff/regression output")
     .option("--native", "use native renderer when enabled by policy")
-    .option("--ocr", "attempt OCR for scanned PDFs when enabled by policy")
+    .option("--structure", "include DOCX structure map")
+    .option("--sheet <name>", "limit XLSX inspect to a sheet")
+    .option("--range <range>", "limit XLSX inspect to an A1 range")
+    .option("--strategy <strategy>", "design apply strategy: theme-only, inspired, or faithful")
+    .option("--validate-only", "validate without writing")
+    .option("--formulas", "verify XLSX formulas")
+    .option("--named-ranges", "verify XLSX named ranges")
+    .option("--external-links", "verify external links")
+    .option("--protected-sheets", "verify protected or hidden sheets")
     .option("--asset <path>", "asset zip path")
     .option("--selector <selector>", "asset or object selector")
     .option("--name <name>", "template, design, plugin, or renderer name")

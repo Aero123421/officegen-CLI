@@ -19,11 +19,24 @@ export async function verify(input, options = {}) {
         return undefined;
     });
     const diagnosed = inspected ? await diagnose({ data: normalized.bytes, path: normalized.path, format: normalized.format }, { config: options.config }) : undefined;
+    const overflowIssues = [];
     for (const issue of diagnosed?.issues ?? []) {
         if (issue.severity === "error")
             blockingIssues.push(`${issue.code}: ${issue.message}`);
-        if (issue.severity === "warning")
+        if (issue.severity === "warning") {
             warnings.push(`${issue.code}: ${issue.message}`);
+            if (issue.code === "TEXT_OVERFLOW_RISK") {
+                const record = issue;
+                overflowIssues.push({
+                    code: issue.code,
+                    message: issue.message,
+                    severity: "warning",
+                    slide: record.location?.slide,
+                    page: record.location?.page,
+                    repair: "Run layout repair or shorten/split the object; verify will report the worst five overflow candidates."
+                });
+            }
+        }
     }
     const noRepairDialogExpected = ![...(diagnosed?.issues ?? [])].some((issue) => issue.code.startsWith("OFFICE_REPAIR_RISK"));
     const visual = options.visual && inspected
@@ -36,10 +49,52 @@ export async function verify(input, options = {}) {
         : undefined;
     if (nativeRenderer && !nativeRenderer.ok)
         warnings.push(nativeRenderer.message ?? "Native renderer verification did not complete.");
+    if (!options.native && ["pptx", "docx", "xlsx"].includes(normalized.format)) {
+        warnings.push("NATIVE_RENDERER_NOT_RUN: native repair-dialog/openability verification is optional-gated; use --native under an enabled renderer policy.");
+    }
+    if (normalized.format === "pdf" && inspected?.trusted.summary && inspected.trusted.summary.textBlocks === 0) {
+        warnings.push("PDF_TEXT_BLOCKS_ZERO: no extractable text blocks; page preview artifacts or native PDF tooling recommended.");
+    }
+    if (normalized.format === "xlsx") {
+        const workbookMap = inspected?.untrusted?.workbookMap;
+        if (options.formulas && !workbookMap?.formulas?.some((entry) => entry.count > 0))
+            warnings.push("XLSX_FORMULAS_NONE: no formulas detected.");
+        if (options.namedRanges && !(workbookMap?.namedRanges?.length > 0))
+            warnings.push("XLSX_NAMED_RANGES_NONE: no named ranges detected.");
+        if (options.externalLinks && workbookMap?.externalLinks?.length > 0)
+            blockingIssues.push("XLSX_EXTERNAL_LINKS_PRESENT");
+        if (options.protectedSheets && workbookMap?.protectedSheets?.length > 0)
+            warnings.push("XLSX_PROTECTED_SHEETS_PRESENT: protected sheets may require manual review.");
+    }
     if (!openable)
         blockingIssues.push("INPUT_NOT_OPENABLE");
+    const warningSummary = aggregateWarnings(warnings, blockingIssues);
+    const topRisks = warningSummary.slice(0, 8).map((item) => ({
+        code: item.code,
+        severity: item.severity,
+        count: item.count,
+        message: item.examples[0] ?? item.code,
+        repair: repairForCode(item.code)
+    }));
+    for (const issue of overflowIssues.slice(0, 5)) {
+        if (!topRisks.some((risk) => risk.code === issue.code)) {
+            topRisks.push({ code: issue.code, severity: "warning", count: overflowIssues.length, message: issue.message, repair: issue.repair });
+        }
+    }
     const readiness = blockingIssues.length ? "blocked" : warnings.length ? "warning" : "pass";
-    const score = Number(Math.max(0, 1 - blockingIssues.length * 0.35 - warnings.length * 0.08).toFixed(2));
+    const warningPenalty = warningSummary.reduce((sum, item) => sum + Math.min(0.16, item.count * 0.04), 0);
+    const blockingPenalty = Math.min(0.85, blockingIssues.length * 0.35);
+    const score = Number(Math.max(0, 1 - blockingPenalty - warningPenalty).toFixed(2));
+    const scoreBreakdown = {
+        base: 1,
+        blockingPenalty,
+        warningPenalty,
+        cappedWarningKinds: warningSummary.length,
+        repeatedWarningsCapped: true
+    };
+    const recommendedRepairs = topRisks
+        .filter((risk) => risk.repair)
+        .map((risk) => ({ code: risk.code, reason: risk.repair ?? "", command: commandForRisk(risk.code, normalized.format) }));
     const result = {
         schema: "officegen.verify.result@1.2",
         readiness,
@@ -51,11 +106,55 @@ export async function verify(input, options = {}) {
         visual,
         blockingIssues,
         warnings,
+        warningSummary,
+        topRisks,
+        scoreBreakdown,
+        recommendedRepairs,
         artifacts
     };
     if (options.out)
         await writeFile(options.out, `${JSON.stringify(result, null, 2)}\n`, "utf8");
     return result;
+}
+function aggregateWarnings(warnings, blockingIssues) {
+    const map = new Map();
+    const entries = [
+        ...warnings.map((message) => ({ message, severity: "warning" })),
+        ...blockingIssues.map((message) => ({ message, severity: "error" }))
+    ];
+    for (const entry of entries) {
+        const code = entry.message.split(":")[0]?.trim() || entry.message;
+        const current = map.get(code) ?? { code, count: 0, severity: entry.severity, examples: [] };
+        current.count += 1;
+        current.severity = current.severity === "error" || entry.severity === "error" ? "error" : "warning";
+        if (current.examples.length < 3)
+            current.examples.push(entry.message);
+        map.set(code, current);
+    }
+    return [...map.values()].sort((left, right) => severityRank(right.severity) - severityRank(left.severity) || right.count - left.count || left.code.localeCompare(right.code));
+}
+function severityRank(severity) {
+    return severity === "error" ? 2 : 1;
+}
+function repairForCode(code) {
+    if (code === "TEXT_OVERFLOW_RISK")
+        return "Shorten text, enlarge the text box, reduce font size, or split the slide/page.";
+    if (code === "PDF_TEXT_BLOCKS_ZERO")
+        return "Create page previews and inspect them with the AI vision layer, or use native PDF tooling.";
+    if (code === "NATIVE_RENDERER_NOT_RUN")
+        return "Run verify --native with a trusted renderer profile when repair-dialog evidence is required.";
+    if (code === "XLSX_EXTERNAL_LINKS_PRESENT")
+        return "Review and sanitize external workbook links before autonomous use.";
+    return undefined;
+}
+function commandForRisk(code, format) {
+    if (code === "TEXT_OVERFLOW_RISK")
+        return `officegen diagnose <input.${format}> --json`;
+    if (code === "PDF_TEXT_BLOCKS_ZERO")
+        return "officegen view input.pdf --out .officegen/runs/pdf-view --json";
+    if (code === "NATIVE_RENDERER_NOT_RUN")
+        return `OFFICEGEN_PROFILE=enterprise officegen verify input.${format} --native --visual --json`;
+    return undefined;
 }
 async function verifyVisual(input, config) {
     const preview = await view(input, { format: "svg", maxPages: 10, config });

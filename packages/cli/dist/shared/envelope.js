@@ -4,6 +4,7 @@ import { ENVELOPE_SCHEMA } from "./types.js";
 export function makeEnvelope(context, command, data, now) {
     const result = redactForJson(data, context);
     const warnings = [...contextWarnings(context), ...extractArrayField(result, "warnings")];
+    const artifacts = extractArrayField(result, "artifacts");
     return {
         schema: ENVELOPE_SCHEMA,
         ok: true,
@@ -15,12 +16,14 @@ export function makeEnvelope(context, command, data, now) {
         result,
         warnings,
         diagnostics: extractArrayField(result, "diagnostics"),
-        artifacts: extractArrayField(result, "artifacts"),
+        artifacts,
         availableCommands: availableCommands(context),
         nextSuggestedCommands: nextSuggestedCommands(context)
     };
 }
 export function makeErrorEnvelope(context, command, error, now) {
+    const details = error.details ?? {};
+    const artifacts = Array.isArray(details.artifacts) ? details.artifacts : [];
     return {
         schema: ENVELOPE_SCHEMA,
         ok: false,
@@ -32,7 +35,7 @@ export function makeErrorEnvelope(context, command, error, now) {
         error: normalizeCliError(error),
         warnings: contextWarnings(context),
         diagnostics: [],
-        artifacts: [],
+        artifacts,
         availableCommands: availableCommands(context),
         nextSuggestedCommands: errorSuggestedCommands(context, error)
     };
@@ -78,7 +81,14 @@ function extractArrayField(value, field) {
     }
     if (field === "artifacts" && value && typeof value === "object") {
         const out = value.out;
-        return typeof out === "string" ? [{ path: out }] : [];
+        return typeof out === "string"
+            ? [{
+                    path: out,
+                    exists: value.changed === false ? false : undefined,
+                    kind: "output",
+                    sourceCommand: value.kind
+                }]
+            : [];
     }
     return [];
 }
@@ -90,6 +100,8 @@ function applyAgentBudget(context, envelope) {
         return envelope;
     const result = envelope.result;
     const resultSchema = result && typeof result === "object" ? result.schema : undefined;
+    const artifacts = envelope.artifacts;
+    const counts = result && typeof result === "object" ? summarizeCounts(result) : {};
     const compact = {
         ...envelope,
         result: {
@@ -97,6 +109,12 @@ function applyAgentBudget(context, envelope) {
             status: "truncated",
             truncated: true,
             resultSchema,
+            partialSummary: {
+                resultSchema,
+                counts,
+                artifactCount: artifacts.length,
+                originalBytes: bytes
+            },
             budgetBytes: context.jsonBudgetBytes,
             originalBytes: bytes,
             capabilitiesHash: context.capabilitiesHash,
@@ -112,9 +130,24 @@ function applyAgentBudget(context, envelope) {
             }
         ],
         diagnostics: [],
-        artifacts: []
+        artifacts
     };
     return compact;
+}
+function summarizeCounts(value) {
+    const counts = {};
+    for (const [key, nested] of Object.entries(value)) {
+        if (Array.isArray(nested))
+            counts[key] = nested.length;
+        if (nested && typeof nested === "object" && !Array.isArray(nested)) {
+            const objectCounts = Object.entries(nested)
+                .filter(([, item]) => Array.isArray(item))
+                .map(([nestedKey, item]) => [`${key}.${nestedKey}`, item.length]);
+            for (const [nestedKey, count] of objectCounts)
+                counts[nestedKey] = count;
+        }
+    }
+    return counts;
 }
 function errorSuggestedCommands(context, error) {
     const agent = context.agent ? " --agent" : "";
@@ -141,6 +174,10 @@ function errorSuggestedCommands(context, error) {
     }
     else if (error.code === "EXPORT_UNSUPPORTED" || error.code === "TARGET_EXTENSION_MISMATCH") {
         suggestions.push("officegen export <input> --to pdf --mode fast --out output.pdf --json");
+    }
+    else if (error.code === "SECURITY_ABSOLUTE_OUT_DENIED") {
+        suggestions.push("officegen <command> <input> --out .officegen/outputs/output.ext --json");
+        suggestions.push("officegen config show --json");
     }
     else if (error.code === "UNSUPPORTED_FORMAT") {
         suggestions.push("officegen inspect <input.pptx|input.docx|input.xlsx|input.pdf> --depth summary --agent --json");

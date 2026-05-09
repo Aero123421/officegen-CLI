@@ -21,6 +21,7 @@ import {
   extractAssets,
   inspect,
   inspectAsset,
+  nativeRendererDoctor,
   render,
   renderChart,
   renderDiagram,
@@ -51,6 +52,7 @@ import {
   listTemplates,
   refreshAgentAdapter,
   templateCandidates,
+  TemplateFillError,
   trustRenderer,
   updateDesign,
   validateDesign,
@@ -112,11 +114,15 @@ export function capabilitiesPayload(context: RuntimeContext): unknown {
             ? ["office-or-pdf-artifact", "json-report"]
             : ["json-report"],
         sideEffects: ["template", "design", "layout"].includes(entry.feature) ? "writes JSON plans/captures when no Office target/out is supplied; mutates Office files when given a source/target and Office --out path" : undefined
+        ,
+        supportedFormats: supportedFormatsForFeature(entry.feature),
+        formatCapabilities: formatCapabilitiesForFeature(entry.feature),
+        requiresNativeRenderer: ["export", "verify", "diff"].includes(entry.feature) ? "only when --mode native or --native is requested" : false,
+        knownLimitations: knownLimitationsForFeature(entry.feature)
       })),
     unsupportedNow: [
-      "lossless Office-to-PDF conversion when no trusted native renderer is installed or enabled",
-      "OCR requires an installed OCR renderer such as Tesseract exposed through the local environment",
-      "native Office repair-dialog detection requires native renderer verification policy to be enabled"
+      "native Office-to-PDF and repair-dialog detection require installed Office COM or LibreOffice renderer backends",
+      "scanned PDF understanding is handled through page preview artifacts for AI vision review"
     ],
     progressiveDisclosure: {
       jsonBudgetBytes: context.jsonBudgetBytes ?? context.config.agent.defaultJsonBudgetBytes,
@@ -229,7 +235,7 @@ function workflowHelp(id: string | undefined): unknown[] {
       ],
       fallbacks: [
         "If native renderer policy blocks execution, use verify --visual and export --mode fast, then report lower fidelity.",
-        "If OCR is required for scanned PDFs, run OFFICEGEN_PROFILE=enterprise officegen inspect scan.pdf --ocr --json."
+        "If a scanned PDF has no extractable text, run view to create page artifacts and let the AI vision layer inspect the pages."
       ]
     },
     {
@@ -405,11 +411,62 @@ export function errorLookup(code: string | undefined): unknown {
   };
 }
 
+function supportedFormatsForFeature(feature: FeatureKey): string[] {
+  if (feature === "inspect" || feature === "view" || feature === "diagnose" || feature === "verify") return ["pptx", "docx", "xlsx", "pdf"];
+  if (feature === "render") return ["pptx", "docx", "xlsx", "pdf"];
+  if (feature === "edit") return ["pptx", "docx", "xlsx", "pdf"];
+  if (feature === "template" || feature === "design" || feature === "layout") return ["pptx", "docx", "xlsx"];
+  if (feature === "asset") return ["pptx", "docx", "xlsx", "image"];
+  if (feature === "export") return ["pptx", "docx", "xlsx", "pdf", "svg", "html"];
+  return ["json"];
+}
+
+function formatCapabilitiesForFeature(feature: FeatureKey): Record<string, unknown> | undefined {
+  if (feature === "template") {
+    return {
+      pptx: { text: true, image: true, chartData: true, table: "limited" },
+      docx: { text: true, table: "limited", image: "limited" },
+      xlsx: { cell: true, table: true, chartData: "limited" }
+    };
+  }
+  if (feature === "design") {
+    return {
+      pptx: { themeOnly: true, inspired: "limited", faithful: "best-effort", mastersAndPlaceholdersPreserved: true },
+      docx: { supported: false, noopReason: "design apply currently mutates PPTX only" },
+      xlsx: { supported: false, noopReason: "design apply currently mutates PPTX only" }
+    };
+  }
+  if (feature === "layout") {
+    return {
+      pptx: { plan: true, apply: "limited" },
+      docx: { supported: false, noopReason: "layout apply is PPTX-focused" },
+      xlsx: { supported: false, noopReason: "layout apply is PPTX-focused" }
+    };
+  }
+  if (feature === "verify") return { native: "optional-gated", visual: "approximate unless trusted native renderer is enabled" };
+  return undefined;
+}
+
+function knownLimitationsForFeature(feature: FeatureKey): string[] {
+  if (feature === "template") return ["Office mutation requires a source Office file, resolvable mapping, and Office --out path.", "Unsupported bindings fail atomically instead of returning a plan as success."];
+  if (feature === "design") return ["theme-only is limited by design; inspired/faithful apply best-effort style tokens and disclose limitations."];
+  if (feature === "inspect") return ["PDF text extraction is best-effort; scanned or compressed PDFs should be reviewed through page preview artifacts."];
+  if (feature === "export" || feature === "verify") return ["Native renderer paths are optional-gated by security.externalProcess/renderers policy."];
+  return [];
+}
+
+function designStrategyOption(context: RuntimeContext): "theme-only" | "inspired" | "faithful" {
+  const value = optionValue(context.argv, "--strategy");
+  return value === "theme-only" || value === "faithful" || value === "inspired" ? value : "inspired";
+}
+
 export async function inspectPayload(context: RuntimeContext): Promise<unknown> {
   const input = requireInput(context, 3, "inspect");
   return inspect(await validateInputPath(context, input), withFormatConfig(context, {
     depth: (optionValue(context.argv, "--depth") as "summary" | "shallow" | "full" | undefined) ?? "summary",
-    ocr: hasFlag(context.argv, "--ocr")
+    structure: hasFlag(context.argv, "--structure"),
+    sheet: optionValue(context.argv, "--sheet"),
+    range: optionValue(context.argv, "--range")
   }));
 }
 
@@ -578,7 +635,11 @@ export async function verifyPayload(context: RuntimeContext): Promise<unknown> {
   return verify(await validateInputPath(context, input), withFormatConfig(context, {
     native: hasFlag(context.argv, "--native"),
     visual: hasFlag(context.argv, "--visual"),
-    out: await validatedOutOption(context)
+    out: await validatedOutOption(context),
+    formulas: hasFlag(context.argv, "--formulas"),
+    namedRanges: hasFlag(context.argv, "--named-ranges"),
+    externalLinks: hasFlag(context.argv, "--external-links"),
+    protectedSheets: hasFlag(context.argv, "--protected-sheets")
   }));
 }
 
@@ -867,7 +928,27 @@ export async function templatePayload(context: RuntimeContext, subcommand?: stri
   }
   if (subcommand === "fill") {
     const values = await readInputJsonIfPresent(context, optionValue(context.argv, "--data") ?? positionalArgs(context.argv, 5)[0]);
-    return fillTemplate({ ...optional, id, values: asRecord(values), outputPath: await validatedOutOption(context) });
+    try {
+      return await fillTemplate({
+        ...optional,
+        id,
+        values: asRecord(values),
+        outputPath: await validatedOutOption(context),
+        validateOnly: hasFlag(context.argv, "--validate-only")
+      });
+    } catch (error) {
+      if (error instanceof TemplateFillError) {
+        throw new CliFailure({
+          code: "TEMPLATE_FILL_FAILED",
+          category: "runtime",
+          severity: "error",
+          command: "template fill",
+          message: error.message,
+          details: error.details
+        }, 3);
+      }
+      throw error;
+    }
   }
   if (subcommand === "validate") return validateTemplate({ ...optional, id });
   return groupPayload(context, subcommand);
@@ -894,7 +975,8 @@ export async function designPayload(context: RuntimeContext, subcommand?: string
       ...optional,
       id,
       targetPath: targetPath ? await validateInputPath(context, targetPath) : undefined,
-      outputPath: await validatedOutOption(context)
+      outputPath: await validatedOutOption(context),
+      strategy: designStrategyOption(context)
     });
   }
   if (subcommand === "validate") return validateDesign({ ...optional, id });
@@ -931,6 +1013,7 @@ export async function mcpPayload(context: RuntimeContext): Promise<unknown> {
 }
 
 export async function rendererPayload(context: RuntimeContext, subcommand?: string): Promise<unknown> {
+  if (subcommand === "doctor") return nativeRendererDoctor(context.config);
   const optional = optionalContext(context);
   const name = positionalArgs(context.argv, 4)[0] ?? "renderer";
   if (subcommand === "list" || !subcommand) return listRenderers(optional);

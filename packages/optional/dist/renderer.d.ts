@@ -29,6 +29,7 @@ export declare function listRenderers(options?: OptionalContext): Promise<Render
 export declare function inspectRenderer(options: RendererInspectOptions): Promise<RendererManifest & {
     trusted: boolean;
 }>;
+export declare function doctorRenderer(options?: OptionalContext): Promise<Record<string, unknown>>;
 export declare function trustRenderer(options: RendererTrustOptions): Promise<RendererTrustStore>;
 export declare function registerRenderer(options: OptionalContext & {
     renderer: RendererManifest;

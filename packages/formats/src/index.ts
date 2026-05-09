@@ -14,6 +14,7 @@ export {
   getLoadedZipSafetyReport,
   inspectInputZipSafety,
   loadZip,
+  readZipText,
   stableHashId
 } from "./shared.js";
 export type {

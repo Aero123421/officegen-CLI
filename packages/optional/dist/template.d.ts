@@ -1,6 +1,6 @@
 import { OptionalContext, ValidationResult } from "./common.js";
 import { type DesignContextCandidate, type DesignMapCandidate, type DesignPreviewCandidate, type NamedShapeCandidate, type PptxDesignSignals, type TemplatePlaceholderCandidate, type TemplateSchemaCandidate } from "./design.js";
-export type TemplateFieldType = "string" | "number" | "boolean" | "date" | "json";
+export type TemplateFieldType = "string" | "number" | "boolean" | "date" | "json" | "image" | "chartData" | "table" | "list";
 export type TemplateMappingValue = unknown;
 export interface TemplateField {
     name: string;
@@ -8,6 +8,12 @@ export interface TemplateField {
     required?: boolean;
     description?: string;
     defaultValue?: unknown;
+    selector?: Record<string, unknown>;
+    fieldType?: TemplateFieldType;
+    editable?: boolean;
+    editableOps?: string[];
+    confidence?: number;
+    reason?: string;
 }
 export interface TemplateDefinition {
     id: string;
@@ -72,6 +78,11 @@ export interface TemplateApplyMapOptions extends TemplateIdOptions {
 export interface TemplateFillOptions extends TemplateIdOptions {
     values: Record<string, unknown>;
     outputPath?: string;
+    validateOnly?: boolean;
+}
+export declare class TemplateFillError extends Error {
+    details: Record<string, unknown>;
+    constructor(message: string, details?: Record<string, unknown>);
 }
 export declare function createTemplate(options: TemplateCreateOptions): Promise<TemplateDefinition>;
 export declare function listTemplates(options?: OptionalContext): Promise<TemplateDefinition[]>;

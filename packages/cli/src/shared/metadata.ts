@@ -44,7 +44,7 @@ export const COMMAND_METADATA: CapabilityEntry[] = [
   optional("layout", "Apply layout constraints", ["layout apply"]),
   optional("agent", "Install or refresh agent adapters", ["agent install", "agent refresh"]),
   optional("mcp", "MCP server", ["mcp serve"], true),
-  optional("renderer", "Manage trusted external renderers", ["renderer list", "renderer inspect", "renderer trust"], true),
+  optional("renderer", "Manage trusted external renderers", ["renderer list", "renderer inspect", "renderer trust", "renderer doctor"], true),
   optional("plugin", "Manage trusted plugins", ["plugin list", "plugin inspect", "plugin install", "plugin trust"], true)
 ];
 

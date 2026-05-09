@@ -80,7 +80,7 @@ export async function inspectSheets(zip) {
             sourcePath: path,
             xmlPath: path,
             selectorHints: { pivotTablePath: path },
-            editableOps: ["xlsx.pivot.refreshDefinition"],
+            editableOps: ["xlsx.pivot.refreshDefinition", "xlsx.pivot.refreshAll"],
             trust: { level: "untrusted", reason: "document-content" },
             untrusted: true
         });
@@ -93,7 +93,7 @@ export async function inspectSheets(zip) {
             sourcePath: path,
             xmlPath: path,
             selectorHints: { slicerPath: path },
-            editableOps: [],
+            editableOps: ["xlsx.slicer.setSelection"],
             trust: { level: "untrusted", reason: "document-content" },
             untrusted: true
         });

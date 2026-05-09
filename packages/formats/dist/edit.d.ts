@@ -111,6 +111,28 @@ export type EditOperation = {
     selector: EditSelector;
     author?: string;
 } | {
+    op: "docx.redline.insert";
+    text: string;
+    selector: EditSelector;
+    author?: string;
+} | {
+    op: "docx.redline.delete";
+    selector: EditSelector;
+    author?: string;
+} | {
+    op: "docx.redline.replace";
+    text: string;
+    selector: EditSelector;
+    author?: string;
+} | {
+    op: "docx.applyStyle";
+    styleId: string;
+    selector: EditSelector;
+} | {
+    op: "docx.headerFooter.setText";
+    kind: "header" | "footer";
+    text: string;
+} | {
     op: "xlsx.insertRows";
     sheet?: number;
     rowIndex: number;
@@ -159,6 +181,12 @@ export type EditOperation = {
 } | {
     op: "xlsx.pivot.refreshDefinition";
     selector: EditSelector;
+} | {
+    op: "xlsx.pivot.refreshAll";
+} | {
+    op: "xlsx.slicer.setSelection";
+    selector: EditSelector;
+    selected: string[];
 };
 interface CropRect {
     left?: number;

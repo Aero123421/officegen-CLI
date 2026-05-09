@@ -3,10 +3,6 @@ import { inspectParagraphs } from "./ooxml/docx.js";
 import { inspectSlides } from "./ooxml/pptx.js";
 import { inspectSheets } from "./ooxml/xlsx.js";
 import { PDFDocument } from "pdf-lib";
-import { spawn } from "node:child_process";
-import { mkdtemp, readdir, rm } from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
 export async function inspect(input, options = {}) {
     const normalized = await normalizeInput(input, options.format ?? "unknown");
     if (normalized.format === "pptx")
@@ -88,6 +84,48 @@ async function inspectPptx(input, options) {
         agentInstruction: AGENT_UNTRUSTED_INSTRUCTION
     };
 }
+function docxStructureObjectMap(structureMap) {
+    if (!structureMap)
+        return [];
+    const entries = [];
+    for (const [index, header] of (structureMap.headerFooterVariants?.headers ?? []).entries()) {
+        entries.push({
+            stableObjectId: makeStableObjectId("docx", "structure", "header", index + 1),
+            kind: "header",
+            label: header,
+            xmlPath: header,
+            selectorHints: { headerPath: header },
+            editableOps: ["docx.setHeader", "docx.headerFooter.setText"],
+            trust: { level: "untrusted", reason: "document-content" },
+            untrusted: true
+        });
+    }
+    for (const [index, footer] of (structureMap.headerFooterVariants?.footers ?? []).entries()) {
+        entries.push({
+            stableObjectId: makeStableObjectId("docx", "structure", "footer", index + 1),
+            kind: "footer",
+            label: footer,
+            xmlPath: footer,
+            selectorHints: { footerPath: footer },
+            editableOps: ["docx.setFooter", "docx.headerFooter.setText"],
+            trust: { level: "untrusted", reason: "document-content" },
+            untrusted: true
+        });
+    }
+    for (const [index, style] of (structureMap.styles ?? []).entries()) {
+        entries.push({
+            stableObjectId: makeStableObjectId("docx", "structure", "style", index + 1),
+            kind: "style",
+            label: style,
+            xmlPath: "word/styles.xml",
+            selectorHints: { styleId: style },
+            editableOps: ["docx.setStyle", "docx.applyStyle"],
+            trust: { level: "untrusted", reason: "style-definition" },
+            untrusted: true
+        });
+    }
+    return entries;
+}
 async function inspectDocx(input, options) {
     const zip = await loadZip(input, { zipSafety: { config: options.config } });
     const paths = sortedZipFiles(zip);
@@ -99,6 +137,7 @@ async function inspectDocx(input, options) {
     const stylePaths = paths.filter((path) => /^word\/styles\.xml$/i.test(path));
     const macros = paths.filter((path) => /vbaProject\.bin$/i.test(path));
     const summaryDepth = options.depth === "summary";
+    const structureMap = options.structure ? await inspectDocxStructure(zip, paths) : undefined;
     return {
         schema: "officegen.inspect.result@1.2",
         trusted: trustedMeta("officegen.inspect.result@1.2", input, {
@@ -120,6 +159,7 @@ async function inspectDocx(input, options) {
                 comments: commentPaths,
                 styles: stylePaths
             },
+            ...(structureMap ? { structureMap } : {}),
             assets: mediaPaths.map((path, index) => ({
                 stableObjectId: makeStableObjectId("docx", "body", "asset", index + 1),
                 path,
@@ -128,7 +168,7 @@ async function inspectDocx(input, options) {
             })),
             ...(options.depth === "full" || options.include?.includes("rawPaths") ? { rawPaths: paths } : {})
         },
-        objectMap: summaryDepth ? compactObjectMap(objectMap, 25) : objectMap,
+        objectMap: summaryDepth ? compactObjectMap([...objectMap, ...docxStructureObjectMap(structureMap)], 35) : [...objectMap, ...docxStructureObjectMap(structureMap)],
         agentInstruction: AGENT_UNTRUSTED_INSTRUCTION
     };
 }
@@ -136,6 +176,28 @@ async function inspectXlsx(input, options) {
     const zip = await loadZip(input, { zipSafety: { config: options.config } });
     const paths = sortedZipFiles(zip);
     const { sheets, objectMap, sharedStrings } = await inspectSheets(zip);
+    const workbookXml = (await readZipText(zip, "xl/workbook.xml")) ?? "";
+    const sheetNames = readWorkbookSheetNames(workbookXml);
+    const namedSheets = sheets.map((sheet, index) => ({
+        ...sheet,
+        name: sheetNames[index] ?? `Sheet${index + 1}`
+    }));
+    const namedObjectMap = objectMap.map((entry) => {
+        const sheetIndex = typeof entry.selectorHints?.sheet === "number"
+            ? entry.selectorHints.sheet
+            : sheetIndexFromWorksheetPath(entry.sourcePath ?? entry.xmlPath);
+        if (!sheetIndex)
+            return entry;
+        return {
+            ...entry,
+            selectorHints: {
+                ...entry.selectorHints,
+                sheetName: sheetNames[sheetIndex - 1] ?? `Sheet${sheetIndex}`
+            }
+        };
+    });
+    const scopedSheets = scopeSheets(namedSheets, options.sheet, options.range);
+    const scopedObjectMap = scopeObjectMap(namedObjectMap, options.sheet, options.range);
     const macros = paths.filter((path) => /vbaProject\.bin$/i.test(path));
     const summaryDepth = options.depth === "summary";
     const worksheetXml = await Promise.all(paths
@@ -147,9 +209,10 @@ async function inspectXlsx(input, options) {
     const pivotPaths = paths.filter((path) => /^xl\/pivotTables\//i.test(path));
     const slicerPaths = paths.filter((path) => /^xl\/slicers\//i.test(path) || /^xl\/slicerCaches\//i.test(path));
     const definedNames = await readDefinedNames(zip);
-    const cellCount = sheets.reduce((count, sheet) => count + sheet.cells.length, 0);
+    const workbookMap = await inspectWorkbookMap(zip, paths, worksheetXml, definedNames);
+    const cellCount = scopedSheets.reduce((count, sheet) => count + sheet.cells.length, 0);
     const sheetSummaries = summaryDepth
-        ? sheets.map((sheet) => ({
+        ? scopedSheets.map((sheet) => ({
             stableObjectId: sheet.stableObjectId,
             index: sheet.index,
             sourcePath: sheet.sourcePath,
@@ -163,7 +226,7 @@ async function inspectXlsx(input, options) {
                 untrusted: true
             }))
         }))
-        : sheets;
+        : namedSheets;
     return {
         schema: "officegen.inspect.result@1.2",
         trusted: trustedMeta("officegen.inspect.result@1.2", input, {
@@ -188,21 +251,22 @@ async function inspectXlsx(input, options) {
                 slicers: slicerPaths,
                 definedNames
             },
+            workbookMap,
+            scope: {
+                sheet: options.sheet,
+                range: options.range,
+                scoped: Boolean(options.sheet || options.range)
+            },
             ...(options.depth === "full" || options.include?.includes("rawPaths") ? { rawPaths: paths } : {})
         },
-        objectMap: summaryDepth ? compactObjectMap(objectMap, 50) : objectMap,
+        objectMap: summaryDepth ? compactObjectMap(scopedObjectMap, 50) : scopedObjectMap,
         agentInstruction: AGENT_UNTRUSTED_INSTRUCTION
     };
 }
 async function inspectPdf(input, options) {
     const pdf = await PDFDocument.load(input.bytes, { ignoreEncryption: true });
     const extractedText = extractPdfTextPreview(input.bytes);
-    const ocr = options.ocr && extractedText.pages.some((pageText) => !pageText)
-        ? options.config?.security.externalProcess === "allow" && options.config.security.renderers === "enabled"
-            ? await tryOcrPdf(input.path, pdf.getPageCount())
-            : { ok: false, engine: "tesseract", message: "OCR requires security.externalProcess=allow and security.renderers=enabled.", pages: [] }
-        : undefined;
-    const textPages = extractedText.pages.map((pageText, index) => pageText || ocr?.pages?.[index] || "");
+    const textPages = extractedText.pages;
     const summaryDepth = options.depth === "summary";
     const pages = pdf.getPages().map((page, index) => {
         const size = page.getSize();
@@ -219,14 +283,23 @@ async function inspectPdf(input, options) {
     return {
         schema: "officegen.inspect.result@1.2",
         trusted: trustedMeta("officegen.inspect.result@1.2", input, { pages: pages.length, textBlocks: textPages.filter(Boolean).length, images: extractedText.imageRefs }, [
-            "PDF text extraction is best-effort and does not replace OCR or native renderer output.",
-            ...(ocr ? [`OCR ${ocr.ok ? "completed" : "not available"}: ${ocr.message}`] : []),
+            "PDF text extraction is best-effort; scanned/image PDFs should be reviewed through page preview artifacts.",
+            ...(textPages.some(Boolean) ? [] : ["PDF_QUALITY_TEXT_BLOCKS_ZERO: no extractable text blocks were found; page preview artifacts or native PDF tooling are recommended."]),
             ...(extractedText.caveats.length ? extractedText.caveats : [])
         ]),
         untrusted: {
             pages,
             ...(summaryDepth ? {} : { text: textPages }),
-            ...(ocr ? { ocr } : {})
+            qualityWarnings: textPages.some(Boolean)
+                ? []
+                : [{
+                        code: "PDF_TEXT_BLOCKS_ZERO",
+                        severity: "warning",
+                        message: "No extractable PDF text was found.",
+                        aiVisionRecommended: true,
+                        previewCommand: "officegen view input.pdf --out .officegen/runs/pdf-view --json",
+                        doctorCommand: "officegen renderer doctor --json"
+                    }]
         },
         objectMap: pages
             .map((page, index) => textPages[index]
@@ -244,116 +317,6 @@ async function inspectPdf(input, options) {
         agentInstruction: AGENT_UNTRUSTED_INSTRUCTION
     };
 }
-async function tryOcrPdf(inputPath, pageCount) {
-    if (!inputPath)
-        return { ok: false, engine: "tesseract", message: "OCR requires a PDF input path.", pages: [] };
-    const executable = await firstRunnable(["tesseract"]);
-    if (!executable)
-        return { ok: false, engine: "tesseract", message: "tesseract executable was not found.", pages: [] };
-    const result = await runCapture(executable, [inputPath, "stdout", "-l", process.env.OFFICEGEN_OCR_LANG ?? "eng+jpn"], 30000);
-    if (result.ok && result.stdout.trim()) {
-        return { ok: true, engine: "tesseract", message: "OCR text extracted by Tesseract.", pages: result.stdout.split(/\f/g).map((page) => page.trim()) };
-    }
-    const rasterized = await tryRasterizedOcr(inputPath, pageCount, executable);
-    if (rasterized.ok)
-        return rasterized;
-    return {
-        ok: false,
-        engine: "tesseract",
-        message: [result.stderr || `direct OCR exit ${result.code}`, rasterized.message].filter(Boolean).join(" / "),
-        pages: []
-    };
-}
-async function tryRasterizedOcr(inputPath, pageCount, tesseract) {
-    const pdftoppm = await firstRunnable(["pdftoppm"]);
-    if (!pdftoppm)
-        return { ok: false, engine: "tesseract+pdftoppm", message: "pdftoppm executable was not found for PDF raster OCR fallback.", pages: [] };
-    const maxPages = Math.max(1, Number.parseInt(process.env.OFFICEGEN_OCR_MAX_PAGES ?? "20", 10) || 20);
-    const lastPage = Math.min(Math.max(pageCount, 1), maxPages);
-    const dir = await mkdtemp(path.join(os.tmpdir(), "officegen-ocr-"));
-    try {
-        const prefix = path.join(dir, "page");
-        const raster = await runCapture(pdftoppm, ["-png", "-r", "200", "-f", "1", "-l", String(lastPage), inputPath, prefix], 60000);
-        if (!raster.ok)
-            return { ok: false, engine: "tesseract+pdftoppm", message: raster.stderr || `pdftoppm exit ${raster.code}`, pages: [] };
-        const files = (await readdir(dir))
-            .filter((file) => file.toLowerCase().endsWith(".png"))
-            .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
-        const pages = [];
-        for (const file of files) {
-            const imagePath = path.join(dir, file);
-            const ocr = await runCapture(tesseract, [imagePath, "stdout", "-l", process.env.OFFICEGEN_OCR_LANG ?? "eng+jpn"], 30000);
-            pages.push(ocr.ok ? ocr.stdout.trim() : "");
-        }
-        const extracted = pages.some(Boolean);
-        return {
-            ok: extracted,
-            engine: "tesseract+pdftoppm",
-            message: extracted
-                ? `OCR text extracted from ${pages.length} rasterized PDF page(s).${pageCount > lastPage ? ` Limited to ${lastPage}/${pageCount} pages by OFFICEGEN_OCR_MAX_PAGES.` : ""}`
-                : "Raster OCR completed but produced no text.",
-            pages
-        };
-    }
-    finally {
-        await rm(dir, { recursive: true, force: true });
-    }
-}
-async function firstRunnable(commands) {
-    for (const command of commands) {
-        const result = await runCapture(command, ["--version"], 5000);
-        if (result.ok)
-            return command;
-    }
-    return undefined;
-}
-function runCapture(command, args, timeoutMs) {
-    return new Promise((resolve) => {
-        const child = spawn(command, args, { windowsHide: true, env: safeExternalEnv() });
-        let stdout = "";
-        let stderr = "";
-        const timer = setTimeout(() => {
-            child.kill();
-            resolve({ ok: false, stdout, stderr: `${stderr}\nTimed out after ${timeoutMs}ms.`.trim() });
-        }, timeoutMs);
-        child.stdout.on("data", (chunk) => { stdout += String(chunk); });
-        child.stderr.on("data", (chunk) => { stderr += String(chunk); });
-        child.on("error", (error) => {
-            clearTimeout(timer);
-            resolve({ ok: false, stdout, stderr: error.message });
-        });
-        child.on("exit", (code) => {
-            clearTimeout(timer);
-            resolve({ ok: code === 0, code, stdout, stderr });
-        });
-    });
-}
-function safeExternalEnv() {
-    const allowed = [
-        "PATHEXT",
-        "ComSpec",
-        "SystemRoot",
-        "WINDIR",
-        "TEMP",
-        "TMP",
-        "TMPDIR",
-        "HOME",
-        "USERPROFILE",
-        "LANG",
-        "LC_ALL",
-        "LC_CTYPE"
-    ];
-    const env = {};
-    const pathValue = process.platform === "win32" ? (process.env.Path ?? process.env.PATH) : (process.env.PATH ?? process.env.Path);
-    if (pathValue !== undefined)
-        env[process.platform === "win32" ? "Path" : "PATH"] = pathValue;
-    for (const key of allowed) {
-        const value = process.env[key];
-        if (value !== undefined)
-            env[key] = value;
-    }
-    return env;
-}
 function extractPdfTextPreview(bytes) {
     const raw = Buffer.from(bytes).toString("latin1");
     const pageChunks = raw.split(/\/Type\s*\/Page\b/g).slice(1);
@@ -365,7 +328,7 @@ function extractPdfTextPreview(bytes) {
         caveats.push("Some PDF streams are compressed or image-based; text preview may be incomplete.");
     }
     if (!pages.some(Boolean)) {
-        caveats.push("No plain text operators were found; use OCR or native PDF tooling for scanned/compressed PDFs.");
+        caveats.push("No plain text operators were found; use page preview artifacts or native PDF tooling for scanned/compressed PDFs.");
     }
     return { pages, imageRefs, caveats };
 }
@@ -386,6 +349,157 @@ function decodePdfLiteral(value) {
         .replace(/\\([nrtbf()\\])/g, (_match, code) => ({ n: "\n", r: "\r", t: "\t", b: "\b", f: "\f", "(": "(", ")": ")", "\\": "\\" })[code] ?? code)
         .replace(/\\([0-7]{1,3})/g, (_match, octal) => String.fromCharCode(Number.parseInt(octal, 8)))
         .replace(/\)$/g, "");
+}
+function scopeSheets(sheets, sheetName, range) {
+    const bounds = parseA1Range(range);
+    return sheets
+        .filter((sheet) => !sheetName || String(sheet.name ?? sheet.sourcePath ?? "").toLowerCase().includes(sheetName.toLowerCase()))
+        .map((sheet) => ({
+        ...sheet,
+        cells: Array.isArray(sheet.cells)
+            ? sheet.cells.filter((cell) => !bounds || cellInRange(String(cell.ref ?? ""), bounds))
+            : []
+    }));
+}
+function scopeObjectMap(objectMap, sheetName, range) {
+    const bounds = parseA1Range(range);
+    return objectMap.filter((entry) => {
+        if (sheetName) {
+            const sheetCandidates = [
+                entry.selectorHints?.sheetName,
+                entry.selectorHints?.sheet,
+                entry.sourcePath
+            ].map((value) => String(value ?? "").toLowerCase());
+            if (!sheetCandidates.some((value) => value.includes(sheetName.toLowerCase())))
+                return false;
+        }
+        if (!bounds)
+            return true;
+        const ref = String(entry.selectorHints?.ref ?? entry.label ?? "");
+        return cellInRange(ref, bounds);
+    });
+}
+function readWorkbookSheetNames(workbookXml) {
+    return [...workbookXml.matchAll(/<sheet\b([^>]*)/g)].map((match, index) => decodeXmlAttr(/\bname="([^"]+)"/.exec(match[1] ?? "")?.[1] ?? `Sheet${index + 1}`));
+}
+function sheetIndexFromWorksheetPath(path) {
+    const match = /^xl\/worksheets\/sheet(\d+)\.xml$/i.exec(path ?? "");
+    return match ? Number(match[1]) : undefined;
+}
+function parseA1Range(range) {
+    if (!range)
+        return undefined;
+    const match = /^([A-Z]+)(\d+):([A-Z]+)(\d+)$/i.exec(range.trim());
+    if (!match)
+        return undefined;
+    const left = { col: columnIndex(match[1] ?? "A"), row: Number(match[2]) };
+    const right = { col: columnIndex(match[3] ?? "A"), row: Number(match[4]) };
+    return {
+        minCol: Math.min(left.col, right.col),
+        maxCol: Math.max(left.col, right.col),
+        minRow: Math.min(left.row, right.row),
+        maxRow: Math.max(left.row, right.row)
+    };
+}
+function cellInRange(ref, bounds) {
+    if (!bounds)
+        return true;
+    const match = /^([A-Z]+)(\d+)$/i.exec(ref);
+    if (!match)
+        return false;
+    const col = columnIndex(match[1] ?? "A");
+    const row = Number(match[2]);
+    return col >= bounds.minCol && col <= bounds.maxCol && row >= bounds.minRow && row <= bounds.maxRow;
+}
+async function inspectWorkbookMap(zip, paths, worksheetXml, definedNames) {
+    const workbookXml = (await readZipText(zip, "xl/workbook.xml")) ?? "";
+    const sheetStates = [...workbookXml.matchAll(/<sheet\b([^>]*)/g)].map((match, index) => {
+        const attrs = match[1] ?? "";
+        return {
+            index: index + 1,
+            name: decodeXmlAttr(/\bname="([^"]+)"/.exec(attrs)?.[1] ?? `Sheet${index + 1}`),
+            hidden: /\bstate="hidden"/i.test(attrs),
+            veryHidden: /\bstate="veryHidden"/i.test(attrs),
+            role: inferSheetRole(index + 1, worksheetXml[index] ?? "")
+        };
+    });
+    return {
+        sheets: sheetStates,
+        formulas: worksheetXml.map((xml, index) => ({
+            sheetIndex: index + 1,
+            count: (xml.match(/<f\b/g) ?? []).length,
+            samples: [...xml.matchAll(/<c\b[^>]*\br="([^"]+)"[\s\S]*?<f\b[^>]*>([\s\S]*?)<\/f>/g)]
+                .slice(0, 12)
+                .map((match) => ({ ref: match[1], formula: decodeXmlEntities(match[2] ?? ""), untrusted: true }))
+        })),
+        inputCells: worksheetXml.map((xml, index) => ({
+            sheetIndex: index + 1,
+            samples: [...xml.matchAll(/<c\b[^>]*\br="([^"]+)"(?![\s\S]*?<f\b)[\s\S]*?<\/c>/g)]
+                .slice(0, 20)
+                .map((match) => ({ ref: match[1], untrusted: true }))
+        })),
+        validations: paths.filter((file) => /^xl\/worksheets\/sheet\d+\.xml$/i.test(file)).map((file, index) => ({
+            sheetIndex: index + 1,
+            count: (worksheetXml[index]?.match(/<dataValidation\b/g) ?? []).length
+        })),
+        protectedSheets: worksheetXml.map((xml, index) => ({ sheetIndex: index + 1, protected: /<sheetProtection\b/i.test(xml) })).filter((entry) => entry.protected),
+        namedRanges: definedNames,
+        externalLinks: paths.filter((file) => /^xl\/externalLinks\//i.test(file)),
+        tables: paths.filter((file) => /^xl\/tables\//i.test(file)),
+        charts: paths.filter((file) => /^xl\/charts\//i.test(file)),
+        pivotTables: paths.filter((file) => /^xl\/pivotTables\//i.test(file)),
+        slicers: paths.filter((file) => /^xl\/slicers\//i.test(file) || /^xl\/slicerCaches\//i.test(file))
+    };
+}
+async function inspectDocxStructure(zip, paths) {
+    const documentXml = (await readZipText(zip, "word/document.xml")) ?? "";
+    const stylesXml = (await readZipText(zip, "word/styles.xml")) ?? "";
+    const commentsXml = (await readZipText(zip, "word/comments.xml")) ?? "";
+    const headerPaths = paths.filter((file) => /^word\/header\d+\.xml$/i.test(file));
+    const footerPaths = paths.filter((file) => /^word\/footer\d+\.xml$/i.test(file));
+    const paragraphs = [...documentXml.matchAll(/<w:p\b[\s\S]*?<\/w:p>/g)];
+    return {
+        headingTree: paragraphs
+            .map((match, index) => {
+            const block = match[0];
+            const style = /<w:pStyle\b[^>]*\bw:val="([^"]+)"/.exec(block)?.[1];
+            const heading = style && /^Heading/i.test(style);
+            return heading ? { index: index + 1, style, text: extractDocxText(block).slice(0, 200), untrusted: true } : undefined;
+        })
+            .filter(Boolean),
+        sections: (documentXml.match(/<w:sectPr\b/g) ?? []).length,
+        headerFooterVariants: { headers: headerPaths, footers: footerPaths },
+        tables: (documentXml.match(/<w:tbl\b/g) ?? []).length,
+        fields: [...documentXml.matchAll(/<w:fldChar\b[^>]*|<w:instrText\b[^>]*>([\s\S]*?)<\/w:instrText>/g)].slice(0, 40).map((match) => ({ text: decodeXmlEntities(match[1] ?? match[0]), untrusted: true })),
+        contentControls: (documentXml.match(/<w:sdt\b/g) ?? []).length,
+        comments: (commentsXml.match(/<w:comment\b/g) ?? []).length,
+        trackedChanges: (documentXml.match(/<w:(ins|del)\b/g) ?? []).length,
+        fillablePlaceholders: [...documentXml.matchAll(/\{\{\s*([^}]+)\s*\}\}/g)].slice(0, 40).map((match) => ({ field: match[1], untrusted: true })),
+        styles: [...stylesXml.matchAll(/<w:style\b[^>]*\bw:styleId="([^"]+)"/g)].slice(0, 80).map((match) => match[1])
+    };
+}
+function inferSheetRole(index, xml) {
+    if ((xml.match(/<f\b/g) ?? []).length > 20)
+        return "model";
+    if ((xml.match(/<dataValidation\b/g) ?? []).length > 0)
+        return "input";
+    if (index === 1)
+        return "primary";
+    return "support";
+}
+function extractDocxText(xml) {
+    return [...xml.matchAll(/<w:t\b[^>]*>([\s\S]*?)<\/w:t>/g)].map((match) => decodeXmlEntities(match[1] ?? "")).join("").replace(/\s+/g, " ").trim();
+}
+function decodeXmlAttr(value) {
+    return decodeXmlEntities(value);
+}
+function decodeXmlEntities(value) {
+    return value
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .replace(/&quot;/g, "\"")
+        .replace(/&apos;/g, "'")
+        .replace(/&amp;/g, "&");
 }
 function compactObjectMap(objectMap, limit) {
     return objectMap.slice(0, limit).map((entry) => ({

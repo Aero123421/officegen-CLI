@@ -10,5 +10,5 @@ export * from "./diagnose.js";
 export * from "./repair.js";
 export * from "./diff.js";
 export * from "./verify.js";
-export { getLoadedZipSafetyReport, inspectInputZipSafety, loadZip, stableHashId } from "./shared.js";
+export { getLoadedZipSafetyReport, inspectInputZipSafety, loadZip, readZipText, stableHashId } from "./shared.js";
 //# sourceMappingURL=index.js.map

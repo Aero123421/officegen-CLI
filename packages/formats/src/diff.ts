@@ -1,7 +1,7 @@
 import { inspect, type InspectResult } from "./inspect.js";
 import { view } from "./view.js";
 import { exportDocument } from "./export.js";
-import { type InputLike, type ObjectMapEntry, type OfficegenConfig, normalizeInput } from "./shared.js";
+import { type InputLike, type ObjectMapEntry, type OfficegenConfig, loadZip, normalizeInput, sortedZipFiles } from "./shared.js";
 import { PDFDocument } from "pdf-lib";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
@@ -23,6 +23,7 @@ export interface DiffResult {
     addedObjects: number;
     removedObjects: number;
     changedTextObjects: number;
+    changedParts?: number;
     visualRegressionScore?: number;
   };
   semantic: {
@@ -34,6 +35,7 @@ export interface DiffResult {
       before?: string;
       after?: string;
     }>;
+    partChanges?: Array<{ path: string; kind: string; beforeHash?: string; afterHash?: string; status: "added" | "removed" | "changed" }>;
   };
   visual?: {
     fidelity: "approximate" | "native";
@@ -48,11 +50,12 @@ export async function diffDocuments(before: InputLike, after: InputLike, options
   const beforeInspect = await inspect(before, { depth: "shallow", config: options.config });
   const afterInspect = await inspect(after, { depth: "shallow", config: options.config });
   const semantic = semanticDiff(beforeInspect, afterInspect);
+  semantic.partChanges = await semanticPartDiff(before, after, beforeInspect.trusted.format, afterInspect.trusted.format);
   const visual = options.visual ? await visualDiff(before, after, beforeInspect, afterInspect, options) : undefined;
   const visualRegressionScore = visual?.pageScores.length
     ? Number((visual.pageScores.reduce((sum, page) => sum + page.score, 0) / visual.pageScores.length).toFixed(4))
     : undefined;
-  const changed = semantic.added.length > 0 || semantic.removed.length > 0 || semantic.changedText.length > 0 || (visualRegressionScore ?? 0) > 0;
+  const changed = semantic.added.length > 0 || semantic.removed.length > 0 || semantic.changedText.length > 0 || (semantic.partChanges?.length ?? 0) > 0 || (visualRegressionScore ?? 0) > 0;
   return {
     schema: "officegen.diff.result@1.2",
     formatBefore: beforeInspect.trusted.format,
@@ -62,6 +65,7 @@ export async function diffDocuments(before: InputLike, after: InputLike, options
       addedObjects: semantic.added.length,
       removedObjects: semantic.removed.length,
       changedTextObjects: semantic.changedText.length,
+      changedParts: semantic.partChanges?.length ?? 0,
       visualRegressionScore
     },
     semantic,
@@ -95,6 +99,71 @@ function semanticDiff(before: InspectResult, after: InspectResult): DiffResult["
     })
     .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry));
   return { added, removed, changedText };
+}
+
+async function semanticPartDiff(before: InputLike, after: InputLike, formatBefore: string, formatAfter: string): Promise<NonNullable<DiffResult["semantic"]["partChanges"]>> {
+  if (formatBefore !== formatAfter || !["pptx", "docx", "xlsx"].includes(formatBefore)) return [];
+  const beforeNormalized = await normalizeInput(before);
+  const afterNormalized = await normalizeInput(after);
+  const beforeZip = await loadZip(beforeNormalized);
+  const afterZip = await loadZip(afterNormalized);
+  const beforeParts = await packagePartHashes(beforeZip);
+  const afterParts = await packagePartHashes(afterZip);
+  const keys = new Set([...beforeParts.keys(), ...afterParts.keys()]);
+  const changes: NonNullable<DiffResult["semantic"]["partChanges"]> = [];
+  for (const key of [...keys].sort()) {
+    const beforeHash = beforeParts.get(key);
+    const afterHash = afterParts.get(key);
+    if (beforeHash === afterHash) continue;
+    changes.push({
+      path: key,
+      kind: classifyPackagePart(key),
+      beforeHash,
+      afterHash,
+      status: beforeHash ? afterHash ? "changed" : "removed" : "added"
+    });
+  }
+  return changes;
+}
+
+async function packagePartHashes(zip: Awaited<ReturnType<typeof loadZip>>): Promise<Map<string, string>> {
+  const map = new Map<string, string>();
+  const interesting = sortedZipFiles(zip).filter((file) =>
+    /\/charts\/chart\d+\.xml$/i.test(file) ||
+    /\/embeddings\//i.test(file) ||
+    /\/theme\/theme\d+\.xml$/i.test(file) ||
+    /\/tables\/table\d+\.xml$/i.test(file) ||
+    /\/media\//i.test(file) ||
+    /\/comments.*\.xml$/i.test(file) ||
+    /\/styles\.xml$/i.test(file)
+  );
+  for (const file of interesting) {
+    const entry = zip.file(file);
+    if (!entry) continue;
+    const bytes = await entry.async("uint8array");
+    map.set(file, bytesHash(bytes));
+  }
+  return map;
+}
+
+function classifyPackagePart(file: string): string {
+  if (/\/charts\//i.test(file)) return "chartXml";
+  if (/\/embeddings\//i.test(file)) return "embeddedWorkbook";
+  if (/\/theme\//i.test(file)) return "theme";
+  if (/\/tables\//i.test(file)) return "table";
+  if (/\/media\//i.test(file)) return "imageOrMedia";
+  if (/\/comments/i.test(file)) return "comments";
+  if (/\/styles\.xml$/i.test(file)) return "styles";
+  return "packagePart";
+}
+
+function bytesHash(bytes: Uint8Array): string {
+  let hash = 2166136261;
+  for (const byte of bytes) {
+    hash ^= byte;
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
 }
 
 async function visualDiff(

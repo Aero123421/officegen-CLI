@@ -35,6 +35,7 @@ const REQUIRED_ERROR_CODES = [
     "RENDER_FONT_UNSUPPORTED",
     "TARGET_EXTENSION_MISMATCH",
     "UNSUPPORTED_FORMAT",
+    "TEMPLATE_FILL_FAILED",
     "EXPORT_UNSUPPORTED"
 ];
 const defaultCategory = (code) => {
@@ -59,6 +60,8 @@ const defaultCategory = (code) => {
         return "layout";
     if (code === "IMAGE_MISSING" || code === "ASSET_UNSUPPORTED_FORMAT")
         return "asset";
+    if (code === "TEMPLATE_FILL_FAILED")
+        return "template";
     if (code === "CHART_SPEC_INVALID")
         return "chart";
     if (code === "DIAGRAM_SPEC_INVALID")
@@ -108,12 +111,14 @@ const messages = {
     RENDER_FONT_UNSUPPORTED: "The PDF renderer cannot encode the requested text with the active font.",
     TARGET_EXTENSION_MISMATCH: "The requested render target does not match the output file extension.",
     UNSUPPORTED_FORMAT: "The input format is not supported by this command.",
+    TEMPLATE_FILL_FAILED: "Template fill could not create or validate the requested artifact.",
     EXPORT_UNSUPPORTED: "The requested export conversion is unsupported."
 };
 const suggestedOps = {
     TEXT_OVERFLOW: ["pptx.fitText", "pptx.setShapeText with shorter text", "layout.apply"],
     SELECTOR_AMBIGUOUS: ["edit --dry-run --resolve-selectors", "inspect --summary"],
     SELECTOR_NOT_FOUND: ["inspect --summary", "view --object-map"],
+    TEMPLATE_FILL_FAILED: ["template fill --validate-only", "inspect --depth shallow", "template apply-map"],
     CHART_SPEC_INVALID: ["schema validate --schema officegen.chart.vegalite-wrapper@1.2"],
     DIAGRAM_SPEC_INVALID: ["schema validate --schema officegen.diagram.spec@1.2"]
 };

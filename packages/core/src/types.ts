@@ -1,5 +1,5 @@
 export const OFFICEGEN_SCHEMA_VERSION = "1.2";
-export const OFFICEGEN_CLI_VERSION = "2.1.1";
+export const OFFICEGEN_CLI_VERSION = "2.2.0";
 export const SCHEMA_REGISTRY_VERSION = "1.2.0";
 
 export type JsonPrimitive = string | number | boolean | null;
@@ -161,6 +161,7 @@ export type OfficegenErrorCode =
   | "RENDER_FONT_UNSUPPORTED"
   | "TARGET_EXTENSION_MISMATCH"
   | "UNSUPPORTED_FORMAT"
+  | "TEMPLATE_FILL_FAILED"
   | "EXPORT_UNSUPPORTED";
 
 export interface ErrorCatalogEntry {

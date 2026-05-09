@@ -1,4 +1,4 @@
 export const OFFICEGEN_SCHEMA_VERSION = "1.2";
-export const OFFICEGEN_CLI_VERSION = "2.1.1";
+export const OFFICEGEN_CLI_VERSION = "2.2.0";
 export const SCHEMA_REGISTRY_VERSION = "1.2.0";
 //# sourceMappingURL=types.js.map
