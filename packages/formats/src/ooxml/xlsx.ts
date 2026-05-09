@@ -37,7 +37,7 @@ export async function inspectSheets(zip: JSZip): Promise<{ sheets: XlsxSheet[]; 
       const type = xmlAttr(cell.attrs, "t");
       const raw = exactText(cell.body, "v")[0] ?? "";
       const inlineText = localText(cell.body, "t").join("");
-      const value = type === "s" ? sharedStrings[Number(raw)] ?? raw : type === "inlineStr" ? inlineText : raw;
+      const value = type === "s" ? sharedStrings[Number(raw)] ?? raw : type === "inlineStr" ? inlineText : type === "b" ? booleanText(raw) : raw;
       const sheetScope = `s${String(sheetIndex + 1).padStart(3, "0")}`;
       const stableObjectId = stableHashId("xlsx", sheetScope, "cell", `${sheetPath}#${cell.ref}`);
       const bounds = boundsFromRef(cell.ref);
@@ -116,7 +116,7 @@ export async function readSharedStrings(zip: JSZip): Promise<string[]> {
   return [...sharedStringsXml.matchAll(/<si\b[\s\S]*?<\/si>/g)].map((match) => localText(match[0], "t").join(""));
 }
 
-export function setCell(xml: string, ref: string, value: string): { changed: boolean; xml: string } {
+export function setCell(xml: string, ref: string, value: unknown): { changed: boolean; xml: string } {
   const cells = extractWorksheetCells(xml);
   const existing = cells.find((cell) => cell.ref.toUpperCase() === ref.toUpperCase());
   if (existing) {
@@ -147,7 +147,7 @@ export function insertRows(xml: string, rowIndex: number, rows: unknown[][]): { 
   const rowXml = rows
     .map((row, offset) => {
       const rowNo = rowIndex + offset;
-      return `<row r="${rowNo}">${row.map((value, index) => inlineCellXml(`${columnName(index + 1)}${rowNo}`, String(value ?? ""))).join("")}</row>`;
+      return `<row r="${rowNo}">${row.map((value, index) => inlineCellXml(`${columnName(index + 1)}${rowNo}`, value)).join("")}</row>`;
     })
     .join("");
   const next = shifted.replace(/<\/sheetData>/, `${rowXml}</sheetData>`);
@@ -190,8 +190,11 @@ function extractCellTags(xml: string, rowNumber: number): WorksheetCell[] {
   });
 }
 
-function inlineCellXml(ref: string, value: string): string {
-  return `<c r="${ref}" t="inlineStr"><is><t>${escapeXmlText(value)}</t></is></c>`;
+function inlineCellXml(ref: string, value: unknown): string {
+  if (value === null || value === undefined) return `<c r="${ref}"/>`;
+  if (typeof value === "number" && Number.isFinite(value)) return `<c r="${ref}"><v>${value}</v></c>`;
+  if (typeof value === "boolean") return `<c r="${ref}" t="b"><v>${value ? 1 : 0}</v></c>`;
+  return `<c r="${ref}" t="inlineStr"><is><t>${escapeXmlText(String(value))}</t></is></c>`;
 }
 
 function boundsFromRef(ref: string): { x: number; y: number; width: number; height: number } | undefined {
@@ -225,6 +228,10 @@ function columnName(index: number): string {
 
 function escapeXmlText(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function booleanText(value: string): string {
+  return value === "1" || value.toLowerCase() === "true" ? "TRUE" : "FALSE";
 }
 
 function escapeRegExp(value: string): string {

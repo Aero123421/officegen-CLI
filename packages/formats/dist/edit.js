@@ -222,7 +222,7 @@ async function applyOfficeOperation(zip, format, operation, objectMap, index) {
         const startRow = Number(start[2]);
         for (const [r, row] of tableOp.rows.entries()) {
             for (const [c, value] of row.entries()) {
-                changed = (await editXlsxSetCell(zip, tableOp.sheet, `${columnName(startCol + c)}${startRow + r}`, String(value ?? ""))) || changed;
+                changed = (await editXlsxSetCell(zip, tableOp.sheet, `${columnName(startCol + c)}${startRow + r}`, value)) || changed;
             }
         }
         changed = (await ensureXlsxTable(zip, tableOp.sheet, tableOp.startCell, tableOp.rows, tableOp.tableName)) || changed;
@@ -485,7 +485,7 @@ async function updateEmbeddedChartWorkbook(zip, chartPath, seriesName, points) {
     for (const [index, point] of points.entries()) {
         const row = index + 2;
         nextSheet = setCell(nextSheet, `A${row}`, point.category).xml;
-        nextSheet = setCell(nextSheet, `B${row}`, String(Number.isFinite(point.value) ? point.value : 0)).xml;
+        nextSheet = setCell(nextSheet, `B${row}`, Number.isFinite(point.value) ? point.value : 0).xml;
     }
     workbookZip.file("xl/worksheets/sheet1.xml", nextSheet);
     zip.file(workbookPath, await workbookZip.generateAsync({ type: "uint8array", compression: "DEFLATE", compressionOptions: { level: 6 } }));

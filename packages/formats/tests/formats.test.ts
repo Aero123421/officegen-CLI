@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import JSZip from "jszip";
+import { PDFDocument } from "pdf-lib";
 import { getBuiltinConfig } from "@officegen/core";
-import { diffDocuments, diagnose, edit, exportDocument, inspect, inspectInputZipSafety, render, renderChart, renderDiagram, replaceAsset, resolveEditSelectors, view } from "../src/index.js";
+import { diffDocuments, diagnose, edit, exportDocument, extractAssets, inspect, inspectInputZipSafety, render, renderChart, renderDiagram, replaceAsset, resolveEditSelectors, view } from "../src/index.js";
 
 describe("@officegen/formats MVP", () => {
   it("renders and inspects a basic PPTX with untrusted text separation", async () => {
@@ -44,7 +45,13 @@ describe("@officegen/formats MVP", () => {
     const inspected = await inspect({ data: rendered.bytes, format: "pptx" });
 
     expect(inspected.objectMap.map((entry) => entry.text).join("\n")).toContain("Highlights");
-    expect(inspected.objectMap.some((entry) => entry.kind === "tableCell" && entry.text === "Revenue")).toBe(true);
+    const tableCell = inspected.objectMap.find((entry) => entry.kind === "tableCell" && entry.text === "Revenue");
+    const tableCellId = tableCell?.stableObjectId ?? "";
+    expect(tableCell?.bbox?.length).toBe(4);
+    expect(tableCell?.bounds?.width).toBeGreaterThan(0);
+    const viewed = await view(inspected);
+    expect(viewed.objectMap.find((entry) => entry.stableObjectId === tableCellId)?.bbox?.length).toBe(4);
+    expect(viewed.pages[0]?.content).toContain(tableCellId);
     expect(rendered.caveats[0]).toContain("tables");
   });
 
@@ -66,6 +73,9 @@ describe("@officegen/formats MVP", () => {
 
     expect(inspected.trusted.summary.charts).toBeGreaterThan(0);
     expect(inspected.objectMap.some((entry) => entry.kind === "chart" && entry.editableOps?.includes("pptx.updateChartData"))).toBe(true);
+    const viewed = await view({ data: rendered.bytes, format: "pptx" });
+    expect(viewed.objectMap.some((entry) => entry.kind === "chart" && entry.editableOps?.includes("pptx.updateChartData"))).toBe(true);
+    expect(viewed.pages[0]?.content).toContain('data-kind="chart"');
     expect(rendered.caveats[0]).toContain("Office charts");
   });
 
@@ -99,7 +109,7 @@ describe("@officegen/formats MVP", () => {
     expect(chartXml).toContain("<c:v>33</c:v>");
     expect(sheetXml).toContain("<t>Bookings</t>");
     expect(sheetXml).toContain("<t>H3</t>");
-    expect(sheetXml).toContain("<t>33</t>");
+    expect(sheetXml).toContain('<c r="B4"><v>33</v></c>');
   });
 
   it("replaces PPTX images by shape selector and writes crop metadata", async () => {
@@ -160,6 +170,14 @@ describe("@officegen/formats MVP", () => {
     });
   });
 
+  it("renders tabular ASCII PDF text by normalizing tabs to spaces", async () => {
+    const rendered = await render({ title: "Table PDF", sections: [{ title: "Rows", body: "Company\tSignal\tRisk" }] }, { target: "pdf" });
+    const inspected = await inspect({ data: rendered.bytes, format: "pdf" }, { depth: "full" });
+
+    expect(rendered.bytes?.byteLength).toBeGreaterThan(500);
+    expect(inspected.trusted.summary.pages).toBe(1);
+  });
+
   it("renders charts and diagrams as standalone SVG without external processes", async () => {
     const chart = await renderChart({
       title: "Revenue",
@@ -218,6 +236,39 @@ describe("@officegen/formats MVP", () => {
       ["C1", ""]
     ]);
     expect(inspected.objectMap.map((entry) => entry.label)).toEqual(["A1", "B1", "C1"]);
+  });
+
+  it("sets XLSX cells with numeric, boolean, and null scalar values", async () => {
+    const rendered = await render({ title: "Scalars", sheets: [{ rows: [["A", "B", "C"]] }] }, { target: "xlsx" });
+    const edited = await edit(
+      { data: rendered.bytes, format: "xlsx" },
+      [
+        { op: "xlsx.setCell", sheet: 1, cell: "A2", value: 123.45 },
+        { op: "xlsx.setCell", sheet: 1, cell: "B2", value: true },
+        { op: "xlsx.setCell", sheet: 1, cell: "C2", value: null }
+      ]
+    );
+    const editedZip = await JSZip.loadAsync(edited.bytes as Uint8Array);
+    const sheetXml = await editedZip.file("xl/worksheets/sheet1.xml")?.async("string");
+    const inspected = await inspect({ data: edited.bytes, format: "xlsx" });
+    const valuesByRef = new Map(inspected.objectMap.map((entry) => [entry.label, entry.text]));
+
+    expect(sheetXml).toContain('<c r="A2"><v>123.45</v></c>');
+    expect(sheetXml).toContain('<c r="B2" t="b"><v>1</v></c>');
+    expect(sheetXml).toContain('<c r="C2"/>');
+    expect(valuesByRef.get("A2")).toBe("123.45");
+    expect(valuesByRef.get("B2")).toBe("TRUE");
+    expect(valuesByRef.get("C2")).toBe("");
+  });
+
+  it("keeps XLSX chart objects in the approximate view object map", async () => {
+    const zip = new JSZip();
+    zip.file("xl/worksheets/sheet1.xml", '<worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Revenue</t></is></c></row></sheetData></worksheet>');
+    zip.file("xl/charts/chart1.xml", "<c:chartSpace><c:chart/></c:chartSpace>");
+    const inspected = await inspect({ data: await zip.generateAsync({ type: "uint8array" }), format: "xlsx" });
+    const viewed = await view(inspected);
+
+    expect(viewed.objectMap.some((entry) => entry.kind === "chart" && entry.selectorHints?.chartPath === "xl/charts/chart1.xml")).toBe(true);
   });
 
   it("renders native Excel table objects and inspects workbook objects compactly", async () => {
@@ -339,6 +390,35 @@ describe("@officegen/formats MVP", () => {
       .rejects.toThrow(/ASSET_UNSUPPORTED_FORMAT/);
   });
 
+  it("classifies asset extraction for non-OOXML inputs as unsupported format before zip parsing", async () => {
+    const rendered = await render({ title: "PDF", sections: [{ title: "Page", body: "Body" }] }, { target: "pdf" });
+
+    await expect(extractAssets({ data: rendered.bytes, format: "pdf" }))
+      .rejects.toMatchObject({
+        payload: expect.objectContaining({ code: "UNSUPPORTED_FORMAT" })
+      });
+  });
+
+  it("repairs media relationship targets when replacing a mismatched PNG path containing SVG bytes", async () => {
+    const zip = new JSZip();
+    zip.file("[Content_Types].xml", '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="png" ContentType="image/png"/></Types>');
+    zip.file("ppt/slides/slide1.xml", "<p:sld/>");
+    zip.file("ppt/slides/_rels/slide1.xml.rels", '<Relationships><Relationship Id="rId1" Target="../media/image1.png"/></Relationships>');
+    zip.file("ppt/media/image1.png", Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"></svg>'));
+    const bytes = await zip.generateAsync({ type: "uint8array" });
+    const replaced = await replaceAsset(
+      { data: bytes, format: "pptx" },
+      { assetPath: "ppt/media/image1.png", replacement: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"></svg>'), replacementPath: "logo.svg" }
+    );
+    const outZip = await JSZip.loadAsync(replaced.bytes as Uint8Array);
+    const rels = await outZip.file("ppt/slides/_rels/slide1.xml.rels")?.async("string");
+
+    expect(replaced.media.targetAssetPath).toBe("ppt/media/image1.svg");
+    expect(outZip.file("ppt/media/image1.png")).toBeNull();
+    expect(outZip.file("ppt/media/image1.svg")).not.toBeNull();
+    expect(rels).toContain("../media/image1.svg");
+  });
+
   it("does not trust GIF media type from extension alone during asset replacement", async () => {
     const zip = new JSZip();
     zip.file("ppt/media/image1.gif", Buffer.from("GIF89a"));
@@ -368,6 +448,15 @@ describe("@officegen/formats MVP", () => {
     expect(summary.objectMap[0]?.text).toBeUndefined();
     expect(summary.untrusted.pages[0]?.textPreview.length).toBeLessThanOrEqual(300);
     expect(full.objectMap[0]?.text).toContain("Long PDF text");
+  });
+
+  it("limits PDF view to a bounded first page sample by default", async () => {
+    const pdfDoc = await PDFDocument.create();
+    for (let index = 0; index < 12; index += 1) pdfDoc.addPage([200, 200]);
+    const bytes = await pdfDoc.save();
+    const viewed = await view({ data: bytes, format: "pdf" });
+
+    expect(viewed.pages).toHaveLength(10);
   });
 
   it("renders empty sections with at least one PPTX slide, XLSX sheet, and DOCX document body", async () => {

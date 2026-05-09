@@ -50,7 +50,7 @@ export async function exportDocument(input, options) {
             const text = String(pageInfo.text ?? "");
             let y = 700;
             for (const line of text.split(/\r?\n/).slice(0, 36)) {
-                page.drawText(assertPdfStandardFontText(line.slice(0, 95), font, "export.pdf.body"), { x: 54, y, size: 10, font, color: rgb(0.2, 0.2, 0.2) });
+                page.drawText(assertPdfStandardFontText(pdfSafeLine(line).slice(0, 95), font, "export.pdf.body"), { x: 54, y, size: 10, font, color: rgb(0.2, 0.2, 0.2) });
                 y -= 16;
             }
         }
@@ -65,6 +65,9 @@ export async function exportDocument(input, options) {
         from: normalized.format,
         to: options.to
     });
+}
+function pdfSafeLine(value) {
+    return value.replace(/\t/g, "    ").replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, " ");
 }
 export const exportFile = exportDocument;
 export async function mergePdfs(inputs, options = {}) {

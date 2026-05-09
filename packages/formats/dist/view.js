@@ -29,33 +29,40 @@ function toPages(inspected, options) {
     const maxPages = options.maxPages ?? 50;
     if (inspected.trusted.format === "pptx") {
         const slides = (inspected.untrusted.slides ?? []).slice(0, maxPages);
-        return slides.map((slide, index) => buildSlidePage(slide, index + 1, format));
+        return slides.map((slide, index) => buildSlidePage(slide, index + 1, format, inspected.objectMap));
     }
     if (inspected.trusted.format === "docx") {
         return [buildDocxPage((inspected.untrusted.paragraphs ?? []).slice(0, 200), format)];
     }
     if (inspected.trusted.format === "xlsx") {
         const sheets = (inspected.untrusted.sheets ?? []).slice(0, maxPages);
-        return sheets.map((sheet, index) => buildSheetPage(sheet, index + 1, format));
+        return sheets.map((sheet, index) => buildSheetPage(sheet, index + 1, format, inspected.objectMap));
     }
     if (inspected.trusted.format === "pdf") {
-        const pages = (inspected.untrusted.pages ?? []).slice(0, maxPages);
+        const pdfMaxPages = options.maxPages ?? 10;
+        const pages = (inspected.untrusted.pages ?? []).slice(0, pdfMaxPages);
         return pages.map((page, index) => buildPdfPage(page, index + 1, format));
     }
     return [];
 }
-function buildSlidePage(slide, page, format) {
-    const objects = (slide.textObjects ?? []).map((entry, index) => ({
-        ...entry,
-        bounds: { x: 48, y: 48 + index * 48, width: 864, height: 40 }
-    }));
+function buildSlidePage(slide, page, format, objectMap) {
+    const slideObjects = objectMap.filter((entry) => Number(entry.selectorHints?.slide) === page);
+    const sourceObjects = slideObjects.length ? slideObjects : (slide.textObjects ?? []);
+    const objects = sourceObjects.map((entry, index) => {
+        const bounds = entry.bounds ?? fallbackSlideBounds(entry, index);
+        return {
+            ...entry,
+            bounds,
+            bbox: entry.bbox ?? [bounds.x, bounds.y, bounds.width, bounds.height]
+        };
+    });
     const stableObjectId = String(slide.stableObjectId ?? makeStableObjectId("pptx", "deck", "slide", page));
     if (format === "html") {
         return {
             page,
             stableObjectId,
             format,
-            content: `<section data-stable-object-id="${escapeHtml(stableObjectId)}" style="width:960px;height:540px;padding:48px;background:#fff;color:#111;font-family:Arial,sans-serif">${objects.map((object) => `<p data-stable-object-id="${escapeHtml(object.stableObjectId)}">${escapeHtml(object.text ?? "")}</p>`).join("")}</section>`,
+            content: `<section data-stable-object-id="${escapeHtml(stableObjectId)}" style="position:relative;width:960px;height:540px;background:#fff;color:#111;font-family:Arial,sans-serif;border:1px solid #d0d7de">${objects.map(renderSlideHtmlObject).join("")}</section>`,
             objectMap: objects
         };
     }
@@ -63,9 +70,34 @@ function buildSlidePage(slide, page, format) {
         page,
         stableObjectId,
         format,
-        content: `<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540" data-stable-object-id="${escapeXml(stableObjectId)}"><rect width="960" height="540" fill="#fff"/><rect x="0" y="0" width="960" height="540" fill="none" stroke="#d0d7de"/>${objects.map((object) => `<text x="${object.bounds?.x ?? 48}" y="${(object.bounds?.y ?? 48) + 24}" font-family="Arial, sans-serif" font-size="24" fill="#111" data-stable-object-id="${escapeXml(object.stableObjectId)}">${escapeXml(object.text ?? "")}</text>`).join("")}</svg>`,
+        content: `<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540" data-stable-object-id="${escapeXml(stableObjectId)}"><rect width="960" height="540" fill="#fff"/><rect x="0" y="0" width="960" height="540" fill="none" stroke="#d0d7de"/>${objects.map(renderSlideSvgObject).join("")}</svg>`,
         objectMap: objects
     };
+}
+function fallbackSlideBounds(entry, index) {
+    if (entry.kind === "chart")
+        return { x: 96, y: 96 + index * 12, width: 360, height: 220 };
+    if (entry.kind === "picture")
+        return { x: 96, y: 96 + index * 12, width: 240, height: 160 };
+    if (entry.kind === "tableCell")
+        return { x: 72 + (index % 4) * 160, y: 120 + Math.floor(index / 4) * 40, width: 160, height: 40 };
+    return { x: 48, y: 48 + index * 48, width: 864, height: 40 };
+}
+function renderSlideHtmlObject(object) {
+    const bounds = object.bounds ?? fallbackSlideBounds(object, 0);
+    const text = object.text ?? object.label ?? object.textPreview ?? "";
+    const border = object.kind === "shape" ? "none" : "1px solid #8c959f";
+    const background = object.kind === "chart" ? "#f6f8fa" : object.kind === "tableCell" ? "#fff" : "transparent";
+    return `<div data-stable-object-id="${escapeHtml(object.stableObjectId)}" data-kind="${escapeHtml(object.kind)}" style="position:absolute;left:${bounds.x}px;top:${bounds.y}px;width:${bounds.width}px;height:${bounds.height}px;box-sizing:border-box;border:${border};background:${background};padding:4px 6px;overflow:hidden">${escapeHtml(text)}</div>`;
+}
+function renderSlideSvgObject(object) {
+    const bounds = object.bounds ?? fallbackSlideBounds(object, 0);
+    const text = object.text ?? object.label ?? object.textPreview ?? "";
+    const fontSize = object.kind === "shape" ? 24 : 12;
+    const box = object.kind === "shape"
+        ? ""
+        : `<rect x="${bounds.x}" y="${bounds.y}" width="${bounds.width}" height="${bounds.height}" fill="${object.kind === "chart" ? "#f6f8fa" : "#fff"}" stroke="#8c959f"/>`;
+    return `<g data-stable-object-id="${escapeXml(object.stableObjectId)}" data-kind="${escapeXml(object.kind)}">${box}<text x="${bounds.x + 6}" y="${bounds.y + Math.min(bounds.height - 6, fontSize + 8)}" font-family="Arial, sans-serif" font-size="${fontSize}" fill="#111">${escapeXml(text)}</text></g>`;
 }
 function buildDocxPage(paragraphs, format) {
     const objects = paragraphs
@@ -94,7 +126,7 @@ function buildDocxPage(paragraphs, format) {
         objectMap: objects
     };
 }
-function buildSheetPage(sheet, page, format) {
+function buildSheetPage(sheet, page, format, objectMap = []) {
     const cells = (sheet.cells ?? []).slice(0, 120);
     const objects = cells.map((cell, index) => ({
         stableObjectId: String(cell.stableObjectId),
@@ -104,22 +136,35 @@ function buildSheetPage(sheet, page, format) {
         bounds: { x: 32 + (index % 6) * 120, y: 48 + Math.floor(index / 6) * 32, width: 120, height: 32 },
         untrusted: true
     }));
+    const workbookObjects = page === 1
+        ? objectMap
+            .filter((entry) => entry.kind !== "cell")
+            .map((entry, index) => {
+            const bounds = entry.bounds ?? { x: 32, y: 72 + Math.ceil(objects.length / 6) * 32 + index * 40, width: 360, height: 32 };
+            return {
+                ...entry,
+                bounds,
+                bbox: entry.bbox ?? [bounds.x, bounds.y, bounds.width, bounds.height]
+            };
+        })
+        : [];
+    const pageObjects = objects.concat(workbookObjects);
     const stableObjectId = String(sheet.stableObjectId ?? makeStableObjectId("xlsx", "workbook", "sheet", page));
     if (format === "html") {
         return {
             page,
             stableObjectId,
             format,
-            content: `<table data-stable-object-id="${escapeHtml(stableObjectId)}" style="border-collapse:collapse;font-family:Arial,sans-serif">${objects.map((object) => `<tr><th style="border:1px solid #d0d7de;padding:4px 8px">${escapeHtml(object.label ?? "")}</th><td data-stable-object-id="${escapeHtml(object.stableObjectId)}" style="border:1px solid #d0d7de;padding:4px 8px">${escapeHtml(object.text ?? "")}</td></tr>`).join("")}</table>`,
-            objectMap: objects
+            content: `<table data-stable-object-id="${escapeHtml(stableObjectId)}" style="border-collapse:collapse;font-family:Arial,sans-serif">${pageObjects.map((object) => `<tr><th style="border:1px solid #d0d7de;padding:4px 8px">${escapeHtml(object.label ?? object.kind)}</th><td data-stable-object-id="${escapeHtml(object.stableObjectId)}" style="border:1px solid #d0d7de;padding:4px 8px">${escapeHtml(object.text ?? object.textPreview ?? "")}</td></tr>`).join("")}</table>`,
+            objectMap: pageObjects
         };
     }
     return {
         page,
         stableObjectId,
         format,
-        content: `<svg xmlns="http://www.w3.org/2000/svg" width="800" height="600" viewBox="0 0 800 600"><rect width="800" height="600" fill="#fff"/>${objects.map((object) => `<g data-stable-object-id="${escapeXml(object.stableObjectId)}"><rect x="${object.bounds?.x}" y="${object.bounds?.y}" width="120" height="32" fill="#fff" stroke="#d0d7de"/><text x="${(object.bounds?.x ?? 0) + 6}" y="${(object.bounds?.y ?? 0) + 21}" font-family="Arial, sans-serif" font-size="12">${escapeXml(`${object.label}: ${object.text}`)}</text></g>`).join("")}</svg>`,
-        objectMap: objects
+        content: `<svg xmlns="http://www.w3.org/2000/svg" width="800" height="600" viewBox="0 0 800 600"><rect width="800" height="600" fill="#fff"/>${pageObjects.map((object) => `<g data-stable-object-id="${escapeXml(object.stableObjectId)}"><rect x="${object.bounds?.x}" y="${object.bounds?.y}" width="${object.bounds?.width ?? 120}" height="${object.bounds?.height ?? 32}" fill="#fff" stroke="#d0d7de"/><text x="${(object.bounds?.x ?? 0) + 6}" y="${(object.bounds?.y ?? 0) + 21}" font-family="Arial, sans-serif" font-size="12">${escapeXml(`${object.label ?? object.kind}: ${object.text ?? object.textPreview ?? ""}`)}</text></g>`).join("")}</svg>`,
+        objectMap: pageObjects
     };
 }
 function buildPdfPage(pageInfo, page, format) {

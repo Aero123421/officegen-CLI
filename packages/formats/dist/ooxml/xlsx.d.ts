@@ -25,7 +25,7 @@ export declare function inspectSheets(zip: JSZip): Promise<{
     sharedStrings: string[];
 }>;
 export declare function readSharedStrings(zip: JSZip): Promise<string[]>;
-export declare function setCell(xml: string, ref: string, value: string): {
+export declare function setCell(xml: string, ref: string, value: unknown): {
     changed: boolean;
     xml: string;
 };

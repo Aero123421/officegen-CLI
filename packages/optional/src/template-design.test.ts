@@ -5,8 +5,8 @@ import JSZip from "jszip";
 import { describe, expect, it } from "vitest";
 import { inspect } from "@officegen/formats";
 import { createOptionalCapabilities } from "./common.js";
-import { captureDesign, capturePptxDesignSignals, initDesign, type DesignSourceCapture } from "./design.js";
-import { createTemplate, templateCandidates } from "./template.js";
+import { applyDesign, captureDesign, capturePptxDesignSignals, initDesign, type DesignSourceCapture } from "./design.js";
+import { applyTemplateMap, createTemplate, fillTemplate, templateCandidates } from "./template.js";
 
 describe("@officegen/optional PPTX template and design signals", () => {
   it("extracts PPTX design signals, writes evidence artifacts, and suggests template maps", async () => {
@@ -29,6 +29,9 @@ describe("@officegen/optional PPTX template and design signals", () => {
     expect(signals?.diagramPresence).toMatchObject({ count: 1, slides: [2] });
     expect(signals?.slideSignals[0]?.slideType).toBe("chart");
     expect(signals?.schemaCandidates.map((field) => field.name)).toContain("quarter");
+    expect(signals?.schemaCandidates.find((field) => field.name === "title")?.type).toBe("string");
+    expect(signals?.schemaCandidates.find((field) => field.name === "product_update")?.type).toBe("string");
+    expect(signals?.schemaCandidates.find((field) => field.name === "launch_date")?.type).toBe("date");
     expect(signals?.templateMapSuggested.mapping.quarter).toMatch(/^pptx:slide-[a-f0-9]{8}:shape:/);
     expect(signals?.trust.trusted.schema).toBe("officegen.design.signals.trusted@1.2");
     expect(signals?.trust.untrusted.textSamples.join(" ")).toContain("Quarterly Review");
@@ -91,6 +94,72 @@ describe("@officegen/optional PPTX template and design signals", () => {
     expect(capture.artifactPaths?.previewPaths[0]).toContain("preview-slide-001.svg");
     expect(capture.schemaCandidates?.map((field) => field.name)).toContain("quarter");
   });
+
+  it("returns explicit plan-only JSON and preserves object template mappings", async () => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), "officegen-optional-plans-"));
+    const optional = {
+      cwd,
+      capabilities: createOptionalCapabilities(["template", "design"])
+    };
+    const template = await createTemplate({
+      ...optional,
+      template: {
+        id: "plan-template",
+        name: "Plan Template",
+        fields: [
+          { name: "title", type: "string", required: true },
+          { name: "metadata", type: "json" }
+        ]
+      }
+    });
+
+    const mapPlan = await applyTemplateMap({
+      ...optional,
+      id: template.id,
+      mapping: {
+        title: {
+          selector: {
+            stableObjectId: "pptx:slide-00000000:shape:0001"
+          },
+          transform: { trim: true }
+        }
+      }
+    });
+    const fillPlan = await fillTemplate({
+      ...optional,
+      id: template.id,
+      values: {
+        title: "Quarterly Review",
+        metadata: { audience: "exec" }
+      }
+    });
+    await initDesign({ ...optional, id: "plan-design" });
+    const designPlan = await applyDesign({ ...optional, id: "plan-design" });
+
+    expect(mapPlan).toMatchObject({
+      kind: "officegen.template.apply-map",
+      planOnly: true,
+      mapping: {
+        title: {
+          selector: {
+            stableObjectId: "pptx:slide-00000000:shape:0001"
+          },
+          transform: { trim: true }
+        }
+      }
+    });
+    expect(fillPlan).toMatchObject({
+      kind: "officegen.template.fill",
+      planOnly: true,
+      values: {
+        metadata: { audience: "exec" }
+      }
+    });
+    expect(designPlan).toMatchObject({
+      kind: "officegen.design.apply",
+      planOnly: true
+    });
+  });
 });
 
 async function makePptxFixture(): Promise<Buffer> {
@@ -146,6 +215,30 @@ async function makePptxFixture(): Promise<Buffer> {
         color: "111827",
         size: 3200,
         text: "Operating Model"
+      }),
+      shapeXml({
+        id: 3,
+        name: "Product Update Field",
+        placeholder: "body",
+        x: 685800,
+        y: 1371600,
+        cx: 3657600,
+        cy: 548640,
+        color: "111827",
+        size: 1800,
+        text: "Product Update"
+      }),
+      shapeXml({
+        id: 4,
+        name: "Launch Date Field",
+        placeholder: "body",
+        x: 685800,
+        y: 2057400,
+        cx: 3657600,
+        cy: 548640,
+        color: "111827",
+        size: 1800,
+        text: "Launch Date: {{launch_date}}"
       }),
       '<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="2" name="Process Diagram"/></p:nvGraphicFramePr><p:xfrm><a:off x="914400" y="1828800"/><a:ext cx="7315200" cy="3200400"/></p:xfrm><a:graphic><a:graphicData><dgm:relIds/></a:graphicData></a:graphic></p:graphicFrame>',
       "</p:cSld></p:sld>"

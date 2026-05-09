@@ -1,6 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { getLoadedZipSafetyReport, loadZip, normalizeInput, readZipBytes, sha256, sortedZipFiles, writeOutput, zipSafetyCaveats, zipPathBasename, zipToBytes } from "./shared.js";
+import { OfficegenError } from "../../core/dist/index.js";
 export async function inspectAsset(input) {
     const normalized = await normalizeInput(input, "unknown");
     const mediaType = detectMediaType(normalized.bytes, normalized.path);
@@ -17,10 +18,14 @@ export async function inspectAsset(input) {
 }
 export async function extractAssets(input, options = {}) {
     const normalized = await normalizeInput(input, "unknown");
-    const zip = await loadZip(normalized, { zipSafety: { config: options.config } });
     const mediaPrefix = normalized.format === "pptx" ? "ppt/media/" : normalized.format === "docx" ? "word/media/" : normalized.format === "xlsx" ? "xl/media/" : "";
-    if (!mediaPrefix)
-        throw new Error(`Unsupported asset extraction format: ${normalized.format}`);
+    if (!mediaPrefix) {
+        throw new OfficegenError("UNSUPPORTED_FORMAT", `Asset extraction is not supported for ${normalized.format}.`, {
+            format: normalized.format,
+            supported: ["pptx", "docx", "xlsx"]
+        });
+    }
+    const zip = await loadZip(normalized, { zipSafety: { config: options.config } });
     const mediaPaths = sortedZipFiles(zip).filter((path) => path.startsWith(mediaPrefix));
     const assets = [];
     for (const path of mediaPaths) {
@@ -58,17 +63,35 @@ export async function replaceAsset(input, options) {
     const currentMediaType = detectMediaType(currentBytes, options.assetPath);
     const replacementMediaType = detectMediaType(options.replacement, options.replacementPath ?? options.assetPath);
     const expectedMediaType = mediaTypeFromExtension(options.assetPath);
+    const existingExtensionMismatch = Boolean(expectedMediaType && currentMediaType !== "application/octet-stream" && currentMediaType !== expectedMediaType);
+    const replacementExt = extensionFromMediaType(replacementMediaType);
+    const targetAssetPath = replacementExt && expectedMediaType !== replacementMediaType && (existingExtensionMismatch || options.allowMediaTypeChange)
+        ? withExtension(options.assetPath, replacementExt)
+        : options.assetPath;
     const caveats = [];
-    if (expectedMediaType && currentMediaType !== "application/octet-stream" && currentMediaType !== expectedMediaType) {
+    if (existingExtensionMismatch) {
         caveats.push(`Existing asset extension does not match content: ${options.assetPath} is ${currentMediaType}, expected ${expectedMediaType}.`);
     }
-    if (expectedMediaType && replacementMediaType !== expectedMediaType && !options.allowMediaTypeChange) {
-        throw new Error(`ASSET_UNSUPPORTED_FORMAT: replacement media type ${replacementMediaType} does not match ${options.assetPath} (${expectedMediaType}).`);
+    if (!replacementExt) {
+        throw new OfficegenError("ASSET_UNSUPPORTED_FORMAT", `ASSET_UNSUPPORTED_FORMAT: unsupported replacement media type ${replacementMediaType}.`, {
+            replacementMediaType,
+            supported: ["image/png", "image/jpeg", "image/svg+xml", "image/gif"]
+        });
     }
-    if (currentMediaType !== "application/octet-stream" && replacementMediaType !== currentMediaType && !options.allowMediaTypeChange) {
+    if (currentMediaType !== "application/octet-stream" &&
+        replacementMediaType !== currentMediaType &&
+        expectedMediaType !== replacementMediaType &&
+        targetAssetPath === options.assetPath &&
+        !options.allowMediaTypeChange) {
         throw new Error(`ASSET_UNSUPPORTED_FORMAT: replacement media type ${replacementMediaType} does not match existing asset type ${currentMediaType}.`);
     }
-    zip.file(options.assetPath, options.replacement);
+    if (targetAssetPath !== options.assetPath) {
+        await rewriteRelationshipTargets(zip, options.assetPath, targetAssetPath);
+        zip.remove(options.assetPath);
+        caveats.push(`Updated media relationship target from ${options.assetPath} to ${targetAssetPath} to match ${replacementMediaType}.`);
+    }
+    await ensureMediaContentType(zip, targetAssetPath, replacementMediaType);
+    zip.file(targetAssetPath, options.replacement);
     const bytes = await zipToBytes(zip);
     await writeOutput(options.out, bytes);
     return {
@@ -78,6 +101,7 @@ export async function replaceAsset(input, options) {
         bytes: options.out ? undefined : bytes,
         media: {
             assetPath: options.assetPath,
+            targetAssetPath,
             existingMediaType: currentMediaType,
             replacementMediaType,
             expectedMediaType,
@@ -85,7 +109,7 @@ export async function replaceAsset(input, options) {
         },
         caveats: [
             ...caveats,
-            "Replaced asset bytes after media type validation; relationships and shape crop are preserved.",
+            "Replaced asset bytes after media type validation; relationship targets and content types are repaired when the replacement extension changes.",
             ...zipSafetyCaveats(getLoadedZipSafetyReport(zip))
         ]
     };
@@ -142,5 +166,71 @@ function mediaTypeFromExtension(path) {
     if (ext === "wmf")
         return "image/x-wmf";
     return undefined;
+}
+function extensionFromMediaType(mediaType) {
+    if (mediaType === "image/png")
+        return "png";
+    if (mediaType === "image/jpeg")
+        return "jpg";
+    if (mediaType === "image/svg+xml")
+        return "svg";
+    if (mediaType === "image/gif")
+        return "gif";
+    return undefined;
+}
+function withExtension(path, extension) {
+    return path.replace(/\.[^/.]+$/, `.${extension}`);
+}
+async function rewriteRelationshipTargets(zip, fromPath, toPath) {
+    await Promise.all(Object.entries(zip.files).map(async ([relsPath, file]) => {
+        if (file.dir || !relsPath.endsWith(".rels"))
+            return;
+        const xml = await file.async("string");
+        const base = relationshipBase(relsPath);
+        const next = xml.replace(/\bTarget="([^"]+)"/g, (match, target) => {
+            const resolved = normalizeZipTarget(base, target);
+            if (resolved !== fromPath)
+                return match;
+            return `Target="${target.replace(/[^/\\]+$/, toPath.split("/").pop() ?? "")}"`;
+        });
+        if (next !== xml)
+            zip.file(relsPath, next);
+    }));
+}
+async function ensureMediaContentType(zip, assetPath, mediaType) {
+    const extension = assetPath.split(".").pop()?.toLowerCase();
+    if (!extension)
+        return;
+    const xml = (await zip.file("[Content_Types].xml")?.async("string")) ?? '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"></Types>';
+    if (new RegExp(`<Default\\b[^>]*\\bExtension="${escapeRegExp(extension)}"[^>]*\\bContentType="${escapeRegExp(mediaType)}"`).test(xml))
+        return;
+    if (new RegExp(`<Default\\b[^>]*\\bExtension="${escapeRegExp(extension)}"`).test(xml)) {
+        zip.file("[Content_Types].xml", xml.replace(new RegExp(`<Default\\b([^>]*)\\bExtension="${escapeRegExp(extension)}"([^>]*)/>`), `<Default Extension="${extension}" ContentType="${mediaType}"/>`));
+        return;
+    }
+    zip.file("[Content_Types].xml", xml.replace(/<\/Types>\s*$/, `<Default Extension="${extension}" ContentType="${mediaType}"/></Types>`));
+}
+function relationshipBase(relsPath) {
+    if (relsPath === "_rels/.rels")
+        return "";
+    return relsPath.replace(/\/_rels\/[^/]+\.rels$/, "");
+}
+function normalizeZipTarget(base, target) {
+    const normalizedTarget = target.replace(/\\/g, "/");
+    const packageAbsolute = normalizedTarget.startsWith("/");
+    const parts = `${packageAbsolute || !base ? "" : `${base}/`}${packageAbsolute ? normalizedTarget.slice(1) : normalizedTarget}`.split("/");
+    const normalized = [];
+    for (const part of parts) {
+        if (!part || part === ".")
+            continue;
+        if (part === "..")
+            normalized.pop();
+        else
+            normalized.push(part);
+    }
+    return normalized.join("/");
+}
+function escapeRegExp(value) {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 //# sourceMappingURL=assets.js.map

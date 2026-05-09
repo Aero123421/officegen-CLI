@@ -254,7 +254,7 @@ async function renderPdf(ir, options) {
         page.drawText(title, { x: 54, y: height - 72, size: 22, font: bold, color: rgb(0.07, 0.07, 0.07) });
         let y = height - 112;
         for (const line of toLines(section.body)) {
-            page.drawText(assertPdfStandardFontText(line.slice(0, 95), font, "render.pdf.body"), { x: 54, y, size: 11, font, color: rgb(0.16, 0.16, 0.16) });
+            page.drawText(assertPdfStandardFontText(pdfSafeLine(line).slice(0, 95), font, "render.pdf.body"), { x: 54, y, size: 11, font, color: rgb(0.16, 0.16, 0.16) });
             y -= 18;
             if (y < 54)
                 break;
@@ -269,6 +269,9 @@ async function renderPdf(ir, options) {
         bytes: options.out ? undefined : bytes,
         caveats: ["PDF direct render is fixed-layout and is not a native Office conversion path."]
     };
+}
+function pdfSafeLine(value) {
+    return value.replace(/\t/g, "    ").replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, " ");
 }
 function resolveRenderTarget(ir, options) {
     const explicit = options.target ?? ir.kind;

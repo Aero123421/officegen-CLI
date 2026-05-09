@@ -81,7 +81,7 @@ export async function readInputText(context: RuntimeContext, inputPath: string):
 
 export async function readInputJson(context: RuntimeContext, inputPath: string): Promise<unknown> {
   try {
-    return JSON.parse(await readInputText(context, inputPath));
+    return JSON.parse(stripUtf8Bom(await readInputText(context, inputPath)));
   } catch (error) {
     if (error instanceof SyntaxError) {
       throw new CliFailure({
@@ -95,6 +95,10 @@ export async function readInputJson(context: RuntimeContext, inputPath: string):
     }
     throw error;
   }
+}
+
+function stripUtf8Bom(value: string): string {
+  return value.charCodeAt(0) === 0xfeff ? value.slice(1) : value;
 }
 
 export async function readInputJsonIfPresent(context: RuntimeContext, inputPath: string | undefined): Promise<unknown> {

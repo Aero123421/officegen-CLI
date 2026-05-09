@@ -177,7 +177,9 @@ export async function inspectSlides(zip: JSZip): Promise<{ slides: PptxSlide[]; 
           textPreview: cell.textPreview,
           sourcePath: slidePath,
           xmlPath: slidePath,
-          selectorHints: { slide: slideNo, tableCell: cell.cellIndex, textPreview: cell.textPreview },
+          bounds: cell.bounds,
+          bbox: cell.bounds ? [cell.bounds.x, cell.bounds.y, cell.bounds.width, cell.bounds.height] : undefined,
+          selectorHints: { slide: slideNo, tableCell: cell.cellIndex, row: cell.rowIndex, column: cell.columnIndex, textPreview: cell.textPreview },
           trust: { level: "untrusted", reason: "document-content" },
           untrusted: true
         };
@@ -256,8 +258,62 @@ function extractPictures(xml: string, slideNo: number, sourcePath: string, rels:
   });
 }
 
-function extractTableCells(xml: string, slideNo: number, sourcePath: string): Array<{ stableObjectId: string; cellIndex: number; text: string; textPreview?: string }> {
+function extractTableCells(xml: string, slideNo: number, sourcePath: string): Array<{ stableObjectId: string; cellIndex: number; rowIndex?: number; columnIndex?: number; text: string; textPreview?: string; bounds?: ObjectBounds }> {
   let cellIndex = 0;
+  const tableCells: Array<{ stableObjectId: string; cellIndex: number; rowIndex?: number; columnIndex?: number; text: string; textPreview?: string; bounds?: ObjectBounds }> = [];
+  for (const frameMatch of xml.matchAll(/<p:graphicFrame\b[\s\S]*?<\/p:graphicFrame>/g)) {
+    const frame = frameMatch[0];
+    const table = /<a:tbl\b[\s\S]*?<\/a:tbl>/.exec(frame)?.[0];
+    if (!table) continue;
+    const tableBounds = extractBounds(frame);
+    const rows = [...table.matchAll(/<a:tr\b([^>]*)>([\s\S]*?)<\/a:tr>/g)];
+    const rowHeights = rows.map((row) => positiveNumber(xmlAttr(row[1] ?? "", "h")));
+    const columnWeights = [...table.matchAll(/<a:gridCol\b([^>]*)\/>/g)]
+      .map((column) => positiveNumber(xmlAttr(column[1] ?? "", "w")))
+      .filter((value): value is number => value !== undefined);
+    const maxColumns = Math.max(1, ...rows.map((row) => [...(row[2] ?? "").matchAll(/<a:tc\b[^>]*>[\s\S]*?<\/a:tc>/g)].length));
+    const columnCount = Math.max(columnWeights.length, maxColumns);
+    const totalColumnWeight = sumWeights(columnWeights, columnCount);
+    const totalRowWeight = sumWeights(rowHeights, rows.length || 1);
+    let rowOffsetWeight = 0;
+    rows.forEach((row, rowIndex) => {
+      const rowBody = row[2] ?? "";
+      const rowWeight = rowHeights[rowIndex] ?? 1;
+      let columnOffsetWeight = 0;
+      let columnIndex = 0;
+      for (const cellMatch of rowBody.matchAll(/<a:tc\b([^>]*)>([\s\S]*?)<\/a:tc>/g)) {
+        const attrs = cellMatch[1] ?? "";
+        const body = cellMatch[2] ?? "";
+        const span = Math.max(1, Number(xmlAttr(attrs, "gridSpan") ?? 1));
+        const text = exactText(body, "a:t").join("");
+        const cellWeight = spanWeights(columnWeights, columnIndex, span);
+        cellIndex += 1;
+        if (text) {
+          const bounds = tableBounds
+            ? {
+                x: tableBounds.x + (tableBounds.width * columnOffsetWeight) / totalColumnWeight,
+                y: tableBounds.y + (tableBounds.height * rowOffsetWeight) / totalRowWeight,
+                width: (tableBounds.width * cellWeight) / totalColumnWeight,
+                height: (tableBounds.height * rowWeight) / totalRowWeight
+              }
+            : undefined;
+          tableCells.push({
+            stableObjectId: stableHashId("pptx", slideScope(sourcePath), "tableCell", `${sourcePath}#${cellIndex}`),
+            cellIndex,
+            rowIndex: rowIndex + 1,
+            columnIndex: columnIndex + 1,
+            text,
+            textPreview: preview(text),
+            bounds
+          });
+        }
+        columnOffsetWeight += cellWeight;
+        columnIndex += span;
+      }
+      rowOffsetWeight += rowWeight;
+    });
+  }
+  if (tableCells.length) return tableCells;
   return [...xml.matchAll(/<a:tc\b[\s\S]*?<\/a:tc>/g)]
     .map((match) => {
       cellIndex += 1;
@@ -372,6 +428,23 @@ function extractBounds(block: string): ObjectBounds | undefined {
   const cy = Number(xmlAttr(ext, "cy"));
   if (![x, y, cx, cy].every(Number.isFinite)) return undefined;
   return { x: emuToPx(x), y: emuToPx(y), width: emuToPx(cx), height: emuToPx(cy) };
+}
+
+function positiveNumber(value: string | undefined): number | undefined {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function sumWeights(weights: Array<number | undefined>, count: number): number {
+  let total = 0;
+  for (let index = 0; index < count; index += 1) total += weights[index] ?? 1;
+  return total || 1;
+}
+
+function spanWeights(weights: Array<number | undefined>, start: number, span: number): number {
+  let total = 0;
+  for (let index = start; index < start + span; index += 1) total += weights[index] ?? 1;
+  return total || 1;
 }
 
 async function addPresentationSlide(zip: JSZip, slideNo: number, after: number): Promise<void> {

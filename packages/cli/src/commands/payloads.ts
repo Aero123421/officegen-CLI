@@ -66,7 +66,6 @@ import {
   readInputText,
   requireInput,
   schemaHiddenFromAgent,
-  stringRecord,
   validateInputPath,
   validatedOutOption,
   validateOutputPath
@@ -104,6 +103,12 @@ export function capabilitiesPayload(context: RuntimeContext): unknown {
         dryRun: ["edit", "repair"].includes(entry.feature),
         outputPolicy: ["render", "export", "edit", "repair", "asset", "template", "design", "layout"].includes(entry.feature) ? "fail-by-default; use --overwrite explicitly where supported" : undefined,
         planOnly: ["template", "design", "layout"].includes(entry.feature),
+        mutatesOffice: ["render", "export", "edit", "repair", "asset"].includes(entry.feature),
+        outputKinds: ["template", "design", "layout"].includes(entry.feature)
+          ? ["json-plan"]
+          : ["render", "export", "edit", "repair", "asset"].includes(entry.feature)
+            ? ["office-or-pdf-artifact", "json-report"]
+            : ["json-report"],
         sideEffects: ["template", "design", "layout"].includes(entry.feature) ? "writes JSON plans/captures under .officegen unless --out selects another project-local path; does not directly edit Office files" : undefined
       })),
     unsupportedNow: [
@@ -192,6 +197,36 @@ function workflowHelp(id: string | undefined): unknown[] {
         "officegen edit input.pptx --ops ops.json --dry-run --resolve-selectors --agent --json",
         "officegen edit input.pptx --ops ops.json --out edited.pptx --json",
         "officegen inspect edited.pptx --depth summary --agent --json"
+      ]
+    },
+    {
+      id: "inspect-edit-export",
+      summary: "Inspect a document, preview object IDs, dry-run edits, write an edited file, diff it, then export with explicit fidelity.",
+      steps: [
+        "officegen capabilities --agent --json",
+        "officegen inspect input.pptx --depth summary --agent --json",
+        "officegen view input.pptx --out .officegen/runs/input-view --json",
+        "officegen edit input.pptx --ops ops.json --dry-run --resolve-selectors --agent --json",
+        "officegen edit input.pptx --ops ops.json --out edited.pptx --json",
+        "officegen diff input.pptx edited.pptx --visual --agent --json",
+        "officegen export edited.pptx --to pdf --mode fast --out edited.pdf --json"
+      ],
+      fallbacks: [
+        "If selector resolution fails, rerun inspect/view and regenerate ops from objectMap.",
+        "If native export is blocked, run officegen export with --mode fast or enable renderer policy explicitly."
+      ]
+    },
+    {
+      id: "template-plan-fill",
+      summary: "Capture template candidates and produce a fill plan. In v2.0.2 this workflow is plan-first unless a command explicitly reports mutatesOffice=true.",
+      steps: [
+        "officegen template candidates source.pptx --agent --json",
+        "officegen template create source.pptx --name deck-template --json",
+        "officegen template fill --name deck-template --data values.json --out fill-plan.json --json",
+        "officegen help template --agent --json"
+      ],
+      caveats: [
+        "template fill/apply-map return plan artifacts unless the result explicitly includes an Office output."
       ]
     }
   ];
@@ -767,7 +802,7 @@ export async function templatePayload(context: RuntimeContext, subcommand?: stri
   }
   if (subcommand === "apply-map") {
     const mapping = await readInputJsonIfPresent(context, optionValue(context.argv, "--map") ?? positionalArgs(context.argv, 5)[0]);
-    return applyTemplateMap({ ...optional, id, mapping: stringRecord(mapping), outputPath: await validatedOutOption(context) });
+    return applyTemplateMap({ ...optional, id, mapping: asRecord(mapping), outputPath: await validatedOutOption(context) });
   }
   if (subcommand === "fill") {
     const values = await readInputJsonIfPresent(context, optionValue(context.argv, "--data") ?? positionalArgs(context.argv, 5)[0]);

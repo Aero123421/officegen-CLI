@@ -51,7 +51,7 @@ export type EditOperation =
   | { op: "docx.addRedline"; text: string; selector: EditSelector; author?: string }
   | { op: "xlsx.insertRows"; sheet?: number; rowIndex: number; rows: unknown[][]; selector?: EditSelector }
   | { op: "xlsx.appendRows"; sheet?: number; rows: unknown[][]; selector?: EditSelector }
-  | { op: "xlsx.setCell"; sheet?: number; cell: string; value: string; selector?: EditSelector }
+  | { op: "xlsx.setCell"; sheet?: number; cell: string; value: unknown; selector?: EditSelector }
   | { op: "xlsx.updateTable"; sheet?: number; startCell: string; rows: unknown[][]; selector?: EditSelector }
   | { op: "xlsx.writeTable"; sheet?: number; startCell: string; rows: unknown[][]; tableName?: string; selector?: EditSelector };
 
@@ -341,7 +341,7 @@ async function applyOfficeOperation(
     return next.changed;
   }
   if (format === "xlsx" && op === "xlsx.setCell") {
-    const cellOp = operation as { sheet?: number; cell: string; value: string };
+    const cellOp = operation as { sheet?: number; cell: string; value: unknown };
     return editXlsxSetCell(zip, cellOp.sheet, cellOp.cell, cellOp.value);
   }
   if (format === "xlsx" && (op === "xlsx.updateTable" || op === "xlsx.writeTable")) {
@@ -353,7 +353,7 @@ async function applyOfficeOperation(
     const startRow = Number(start[2]);
     for (const [r, row] of tableOp.rows.entries()) {
       for (const [c, value] of row.entries()) {
-        changed = (await editXlsxSetCell(zip, tableOp.sheet, `${columnName(startCol + c)}${startRow + r}`, String(value ?? ""))) || changed;
+        changed = (await editXlsxSetCell(zip, tableOp.sheet, `${columnName(startCol + c)}${startRow + r}`, value)) || changed;
       }
     }
     changed = (await ensureXlsxTable(zip, tableOp.sheet, tableOp.startCell, tableOp.rows, tableOp.tableName)) || changed;
@@ -527,7 +527,7 @@ async function editDocxAddRedline(zip: Awaited<ReturnType<typeof loadZip>>, oper
   return next.changed;
 }
 
-async function editXlsxSetCell(zip: Awaited<ReturnType<typeof loadZip>>, sheet: number | undefined, ref: string, value: string): Promise<boolean> {
+async function editXlsxSetCell(zip: Awaited<ReturnType<typeof loadZip>>, sheet: number | undefined, ref: string, value: unknown): Promise<boolean> {
   if (!ref) throw new Error("SELECTOR_NOT_FOUND: xlsx cell ref is required.");
   const path = sheetPath(sheet);
   const xml = (await readZipText(zip, path)) ?? "";
@@ -624,7 +624,7 @@ async function updateEmbeddedChartWorkbook(
   for (const [index, point] of points.entries()) {
     const row = index + 2;
     nextSheet = setCell(nextSheet, `A${row}`, point.category).xml;
-    nextSheet = setCell(nextSheet, `B${row}`, String(Number.isFinite(point.value) ? point.value : 0)).xml;
+    nextSheet = setCell(nextSheet, `B${row}`, Number.isFinite(point.value) ? point.value : 0).xml;
   }
   workbookZip.file("xl/worksheets/sheet1.xml", nextSheet);
   zip.file(workbookPath, await workbookZip.generateAsync({ type: "uint8array", compression: "DEFLATE", compressionOptions: { level: 6 } }));

@@ -110,7 +110,7 @@ export type EditOperation = {
     op: "xlsx.setCell";
     sheet?: number;
     cell: string;
-    value: string;
+    value: unknown;
     selector?: EditSelector;
 } | {
     op: "xlsx.updateTable";

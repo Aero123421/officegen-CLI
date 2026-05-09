@@ -1,6 +1,7 @@
 import { OptionalContext, ValidationResult } from "./common.js";
 import { type DesignContextCandidate, type DesignMapCandidate, type DesignPreviewCandidate, type NamedShapeCandidate, type PptxDesignSignals, type TemplatePlaceholderCandidate, type TemplateSchemaCandidate } from "./design.js";
 export type TemplateFieldType = "string" | "number" | "boolean" | "date" | "json";
+export type TemplateMappingValue = unknown;
 export interface TemplateField {
     name: string;
     type?: TemplateFieldType;
@@ -20,7 +21,7 @@ export interface TemplateDefinition {
         format?: string;
         sha256?: string;
     };
-    mapping?: Record<string, string>;
+    mapping?: Record<string, TemplateMappingValue>;
     sourceCapture?: {
         metadata?: PptxDesignSignals["metadata"];
         artifactPaths?: PptxDesignSignals["artifactPaths"];
@@ -65,7 +66,7 @@ export interface TemplateIdOptions extends OptionalContext {
     id: string;
 }
 export interface TemplateApplyMapOptions extends TemplateIdOptions {
-    mapping: Record<string, string>;
+    mapping: Record<string, TemplateMappingValue>;
     outputPath?: string;
 }
 export interface TemplateFillOptions extends TemplateIdOptions {

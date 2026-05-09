@@ -137,6 +137,7 @@ export async function applyTemplateMap(options) {
     const template = await inspectTemplate(options);
     const plan = {
         kind: "officegen.template.apply-map",
+        planOnly: true,
         generatedAt: nowIso(),
         templateId: template.id,
         templateHash: template.hash,
@@ -155,6 +156,7 @@ export async function fillTemplate(options) {
     }
     const filled = {
         kind: "officegen.template.fill",
+        planOnly: true,
         generatedAt: nowIso(),
         templateId: template.id,
         templateHash: template.hash,

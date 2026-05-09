@@ -71,7 +71,7 @@ export async function readInputText(context, inputPath) {
 }
 export async function readInputJson(context, inputPath) {
     try {
-        return JSON.parse(await readInputText(context, inputPath));
+        return JSON.parse(stripUtf8Bom(await readInputText(context, inputPath)));
     }
     catch (error) {
         if (error instanceof SyntaxError) {
@@ -86,6 +86,9 @@ export async function readInputJson(context, inputPath) {
         }
         throw error;
     }
+}
+function stripUtf8Bom(value) {
+    return value.charCodeAt(0) === 0xfeff ? value.slice(1) : value;
 }
 export async function readInputJsonIfPresent(context, inputPath) {
     if (!inputPath)

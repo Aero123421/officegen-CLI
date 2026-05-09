@@ -12,7 +12,7 @@ export async function inspectSheets(zip) {
             const type = xmlAttr(cell.attrs, "t");
             const raw = exactText(cell.body, "v")[0] ?? "";
             const inlineText = localText(cell.body, "t").join("");
-            const value = type === "s" ? sharedStrings[Number(raw)] ?? raw : type === "inlineStr" ? inlineText : raw;
+            const value = type === "s" ? sharedStrings[Number(raw)] ?? raw : type === "inlineStr" ? inlineText : type === "b" ? booleanText(raw) : raw;
             const sheetScope = `s${String(sheetIndex + 1).padStart(3, "0")}`;
             const stableObjectId = stableHashId("xlsx", sheetScope, "cell", `${sheetPath}#${cell.ref}`);
             const bounds = boundsFromRef(cell.ref);
@@ -120,7 +120,7 @@ export function insertRows(xml, rowIndex, rows) {
     const rowXml = rows
         .map((row, offset) => {
         const rowNo = rowIndex + offset;
-        return `<row r="${rowNo}">${row.map((value, index) => inlineCellXml(`${columnName(index + 1)}${rowNo}`, String(value ?? ""))).join("")}</row>`;
+        return `<row r="${rowNo}">${row.map((value, index) => inlineCellXml(`${columnName(index + 1)}${rowNo}`, value)).join("")}</row>`;
     })
         .join("");
     const next = shifted.replace(/<\/sheetData>/, `${rowXml}</sheetData>`);
@@ -160,7 +160,13 @@ function extractCellTags(xml, rowNumber) {
     });
 }
 function inlineCellXml(ref, value) {
-    return `<c r="${ref}" t="inlineStr"><is><t>${escapeXmlText(value)}</t></is></c>`;
+    if (value === null || value === undefined)
+        return `<c r="${ref}"/>`;
+    if (typeof value === "number" && Number.isFinite(value))
+        return `<c r="${ref}"><v>${value}</v></c>`;
+    if (typeof value === "boolean")
+        return `<c r="${ref}" t="b"><v>${value ? 1 : 0}</v></c>`;
+    return `<c r="${ref}" t="inlineStr"><is><t>${escapeXmlText(String(value))}</t></is></c>`;
 }
 function boundsFromRef(ref) {
     const match = /^([A-Z]+)(\d+)$/i.exec(ref);
@@ -191,6 +197,9 @@ function columnName(index) {
 }
 function escapeXmlText(value) {
     return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+function booleanText(value) {
+    return value === "1" || value.toLowerCase() === "true" ? "TRUE" : "FALSE";
 }
 function escapeRegExp(value) {
     return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

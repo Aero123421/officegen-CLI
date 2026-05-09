@@ -489,4 +489,73 @@ describe("officegen CLI command surface", () => {
       })
     ]));
   });
+
+  it("preserves object values in template apply-map plans", async () => {
+    const cwd = await tempWorkspace();
+    await mkdir(path.join(cwd, ".officegen", "optional", "template"), { recursive: true });
+    await writeFile(path.join(cwd, ".officegen", "optional", "template", "deck.json"), `${JSON.stringify({
+      id: "deck",
+      name: "Deck",
+      fields: [{ name: "title", type: "string" }]
+    })}\n`, "utf8");
+    await writeFile(path.join(cwd, "map.json"), `${JSON.stringify({
+      title: {
+        selector: {
+          stableObjectId: "pptx:slide-00000000:shape:0001"
+        },
+        transform: {
+          trim: true
+        }
+      }
+    })}\n`, "utf8");
+
+    const captured = await run(["template", "apply-map", "--name", "deck", "--map", "map.json", "--out", "apply-plan.json", "--json"], cwd);
+    const envelope = parseEnvelope(captured);
+    const written = JSON.parse(await readFile(path.join(cwd, "apply-plan.json"), "utf8"));
+
+    expect(envelope.ok).toBe(true);
+    expect(envelope.result.planOnly).toBe(true);
+    expect(envelope.result.mapping.title).toEqual({
+      selector: {
+        stableObjectId: "pptx:slide-00000000:shape:0001"
+      },
+      transform: {
+        trim: true
+      }
+    });
+    expect(envelope.result.mapping.title).not.toBe("[object Object]");
+    expect(written.mapping.title).toEqual(envelope.result.mapping.title);
+  });
+
+  it("returns concrete inspect-edit-export workflow help", async () => {
+    const captured = await run(["help", "workflow", "inspect-edit-export", "--agent", "--json"]);
+    const envelope = parseEnvelope(captured);
+
+    expect(envelope.ok).toBe(true);
+    expect(envelope.result.workflowDetails).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: "inspect-edit-export",
+        steps: expect.arrayContaining([
+          expect.stringContaining("officegen diff"),
+          expect.stringContaining("officegen export")
+        ])
+      })
+    ]));
+  });
+
+  it("accepts UTF-8 BOM JSON files from PowerShell-style writers", async () => {
+    const cwd = await tempWorkspace();
+    const document = {
+      schema: "officegen.ir.document@1.2",
+      title: "BOM",
+      targets: ["pdf"],
+      sections: [{ title: "BOM", blocks: [{ type: "paragraph", text: "Body" }] }]
+    };
+    await writeFile(path.join(cwd, "bom.ir.json"), `\uFEFF${JSON.stringify(document)}\n`, "utf8");
+
+    const captured = await run(["schema", "validate", "bom.ir.json", "--schema", "officegen.ir.document@1.2", "--json"], cwd);
+    const envelope = parseEnvelope(captured);
+
+    expect(envelope.ok).toBe(true);
+  });
 });

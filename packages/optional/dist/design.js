@@ -95,6 +95,7 @@ export async function applyDesign(options) {
     const design = await inspectDesign(options);
     const plan = {
         kind: "officegen.design.apply",
+        planOnly: true,
         generatedAt: nowIso(),
         designId: design.id,
         designHash: design.hash,
@@ -694,12 +695,23 @@ function buildTemplateMapSuggestion(schemaCandidates, placeholders, mapCandidate
     };
 }
 function inferFieldType(name) {
-    if (/(date|day|month|year|deadline|created|modified)$/i.test(name))
-        return "date";
-    if (/(amount|price|revenue|sales|count|number|score|rate|ratio|percent|total|qty|quantity)/i.test(name))
-        return "number";
-    if (/^(is|has|can|should|enabled|active)_/i.test(name))
+    const tokens = name
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "_")
+        .replace(/^_+|_+$/g, "")
+        .split("_")
+        .filter(Boolean);
+    const tokenSet = new Set(tokens);
+    if (/^(is|has|can|should|enabled|active)(_|$)/i.test(name))
         return "boolean";
+    const numberTokens = new Set(["amount", "price", "revenue", "sales", "count", "number", "score", "rate", "ratio", "percent", "total", "qty", "quantity"]);
+    const dateTokens = new Set(["date", "day", "month", "year", "deadline"]);
+    if (tokens.some((token) => numberTokens.has(token)))
+        return "number";
+    if (tokens.some((token) => dateTokens.has(token)))
+        return "date";
+    if ((tokenSet.has("created") || tokenSet.has("modified") || tokenSet.has("updated")) && tokenSet.has("at"))
+        return "date";
     return "string";
 }
 function textToFieldName(text) {

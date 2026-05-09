@@ -26,6 +26,7 @@ import {
 } from "./design.js";
 
 export type TemplateFieldType = "string" | "number" | "boolean" | "date" | "json";
+export type TemplateMappingValue = unknown;
 
 export interface TemplateField {
   name: string;
@@ -47,7 +48,7 @@ export interface TemplateDefinition {
     format?: string;
     sha256?: string;
   };
-  mapping?: Record<string, string>;
+  mapping?: Record<string, TemplateMappingValue>;
   sourceCapture?: {
     metadata?: PptxDesignSignals["metadata"];
     artifactPaths?: PptxDesignSignals["artifactPaths"];
@@ -97,7 +98,7 @@ export interface TemplateIdOptions extends OptionalContext {
 }
 
 export interface TemplateApplyMapOptions extends TemplateIdOptions {
-  mapping: Record<string, string>;
+  mapping: Record<string, TemplateMappingValue>;
   outputPath?: string;
 }
 
@@ -260,6 +261,7 @@ export async function applyTemplateMap(options: TemplateApplyMapOptions): Promis
   const template = await inspectTemplate(options);
   const plan = {
     kind: "officegen.template.apply-map",
+    planOnly: true,
     generatedAt: nowIso(),
     templateId: template.id,
     templateHash: template.hash,
@@ -284,6 +286,7 @@ export async function fillTemplate(options: TemplateFillOptions): Promise<Record
 
   const filled = {
     kind: "officegen.template.fill",
+    planOnly: true,
     generatedAt: nowIso(),
     templateId: template.id,
     templateHash: template.hash,
