@@ -1,4 +1,4 @@
-import { computeCapabilitiesHash, loadConfig } from "@officegen/core";
+import { computeCapabilitiesHash, loadConfig } from "../../../core/dist/index.js";
 import { hasFlag, optionValue, secondCommandToken } from "./argv.js";
 import { COMMAND_METADATA } from "./metadata.js";
 export async function createRuntimeContext(argv, cwd, env) {

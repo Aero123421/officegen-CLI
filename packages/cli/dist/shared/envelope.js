@@ -1,4 +1,4 @@
-import { OFFICEGEN_CLI_VERSION, redactJson } from "@officegen/core";
+import { OFFICEGEN_CLI_VERSION, redactJson } from "../../../core/dist/index.js";
 import { availableCommands, nextSuggestedCommands } from "./context.js";
 import { ENVELOPE_SCHEMA } from "./types.js";
 export function makeEnvelope(context, command, data, now) {

@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import { OFFICEGEN_CLI_VERSION } from "@officegen/core";
+import { OFFICEGEN_CLI_VERSION } from "../../../core/dist/index.js";
 import { commandFromArgv, positionalArgs } from "../shared/argv.js";
 import { makeEnvelope, writeResult } from "../shared/envelope.js";
 import { COMMAND_METADATA, metadataFor } from "../shared/metadata.js";

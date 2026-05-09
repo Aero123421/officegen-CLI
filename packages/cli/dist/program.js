@@ -1,4 +1,4 @@
-import { OFFICEGEN_CLI_VERSION, OfficegenError } from "@officegen/core";
+import { OFFICEGEN_CLI_VERSION, OfficegenError } from "../../core/dist/index.js";
 import { createProgram, writeNativeHelp } from "./commands/register.js";
 import { commandFromArgv, getTopCommand, hasFlag } from "./shared/argv.js";
 import { createRuntimeContext, gateTopLevelCommand } from "./shared/context.js";

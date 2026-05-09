@@ -1,8 +1,8 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { getCapabilities, getSchema, listErrors, listSchemas, OFFICEGEN_CLI_VERSION, validateSchema } from "@officegen/core";
-import { diagnose, edit, exportDocument, extractAssets, inspect, inspectAsset, render, renderChart, renderDiagram, repair, replaceAsset, view } from "@officegen/formats";
-import { applyDesign, applyLayoutConstraints, applyTemplateMap, captureDesign, createTemplate, fillTemplate, initDesign, inspectDesign, inspectPlugin, inspectRenderer, inspectTemplate, installAgentAdapter, installPlugin, listDesigns, listMcpTools, listPlugins, listRenderers, listTemplates, refreshAgentAdapter, templateCandidates, trustRenderer, updateDesign, validateDesign, validateTemplate } from "@officegen/optional";
+import { getCapabilities, getSchema, listErrors, listSchemas, OFFICEGEN_CLI_VERSION, validateSchema } from "../../../core/dist/index.js";
+import { diagnose, edit, exportDocument, extractAssets, inspect, inspectAsset, render, renderChart, renderDiagram, repair, replaceAsset, view } from "../../../formats/dist/index.js";
+import { applyDesign, applyLayoutConstraints, applyTemplateMap, captureDesign, createTemplate, fillTemplate, initDesign, inspectDesign, inspectPlugin, inspectRenderer, inspectTemplate, installAgentAdapter, installPlugin, listDesigns, listMcpTools, listPlugins, listRenderers, listTemplates, refreshAgentAdapter, templateCandidates, trustRenderer, updateDesign, validateDesign, validateTemplate } from "../../../optional/dist/index.js";
 import { commandFromArgv, getTopCommand, hasFlag, optionValue, positionalArgs } from "../shared/argv.js";
 import { asRecord, copyJsonIfPresent, normalizeEditOperations, numberOption, optionalContext, readJson, readJsonIfPresent, requireInput, resolveCliPath, schemaHiddenFromAgent, stringRecord, validatedOutOption, validateOutputPath } from "../shared/io.js";
 import { COMMAND_METADATA } from "../shared/metadata.js";

@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { OfficegenError, validatePath } from "@officegen/core";
-import { createOptionalCapabilities } from "@officegen/optional";
+import { OfficegenError, validatePath } from "../../../core/dist/index.js";
+import { createOptionalCapabilities } from "../../../optional/dist/index.js";
 import { commandFromArgv, hasFlag, optionValue, positionalArgs } from "./argv.js";
 import { CliFailure } from "./types.js";
 export function requireInput(context, start, command) {

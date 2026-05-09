@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import path from "node:path";
-import { loadZip } from "@officegen/formats";
+import { loadZip } from "../../formats/dist/index.js";
 import { featureRoot, hashFile, listJsonFiles, mergePlainObjects, nowIso, readJsonFile, requireFeature, sha256Buffer, sha256Json, slugify, untrustedContentWarning, validation, writeJsonFile, writeTextFile } from "./common.js";
 export async function initDesign(options) {
     requireFeature(options, "design", "design init");
