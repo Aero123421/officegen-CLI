@@ -31,7 +31,7 @@ export function resolveOfficegenPath(config: OfficegenConfig, inputPath: string)
 export async function canonicalizePath(config: OfficegenConfig, inputPath: string): Promise<ValidatedPath> {
   const absolutePath = resolveOfficegenPath(config, inputPath);
   const existed = await exists(absolutePath);
-  const realPath = existed ? await realpath(absolutePath) : await realpath(path.dirname(absolutePath)).then((parent) => path.join(parent, path.basename(absolutePath)));
+  const realPath = existed ? await realpath(absolutePath) : await realpathForMissingPath(absolutePath);
   return {
     inputPath,
     absolutePath,
@@ -39,6 +39,18 @@ export async function canonicalizePath(config: OfficegenConfig, inputPath: strin
     existed,
     warnings: []
   };
+}
+
+async function realpathForMissingPath(absolutePath: string): Promise<string> {
+  const missingParts: string[] = [];
+  let current = absolutePath;
+  while (!(await exists(current))) {
+    const parent = path.dirname(current);
+    if (parent === current) return path.resolve(absolutePath);
+    missingParts.unshift(path.basename(current));
+    current = parent;
+  }
+  return path.join(await realpath(current), ...missingParts);
 }
 
 async function allowedRoots(config: OfficegenConfig, extraRoots: string[] = []): Promise<string[]> {

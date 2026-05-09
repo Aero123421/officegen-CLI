@@ -35,9 +35,13 @@ export interface ObjectMapEntry {
   kind: string;
   label?: string;
   text?: string;
+  textPreview?: string;
   sourcePath?: string;
   xmlPath?: string;
   bounds?: ObjectBounds;
+  bbox?: [number, number, number, number];
+  selectorHints?: Record<string, unknown>;
+  trust?: { level: "untrusted"; reason: string };
   untrusted: true;
 }
 
@@ -200,6 +204,15 @@ export async function loadZip(input: NormalizedInput, options: LoadZipOptions = 
 
 export function getLoadedZipSafetyReport(zip: JSZip): ZipSafetyReport | undefined {
   return zipSafetyReports.get(zip);
+}
+
+export function zipSafetyCaveats(report: ZipSafetyReport | undefined): string[] {
+  if (!report) return [];
+  const prefix = report.ok ? "Zip safety check passed" : "Zip safety check reported warnings";
+  return [
+    `${prefix}: ${report.entryCount} entries, ${report.expandedBytes} expanded bytes, ${report.warnings.length} warnings.`,
+    ...report.warnings.map((warning) => `Zip safety ${warning.severity}: ${warning.code}${warning.entry ? ` in ${warning.entry}` : ""} - ${warning.message}`)
+  ];
 }
 
 export function sortedZipFiles(zip: JSZip): string[] {

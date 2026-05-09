@@ -4,6 +4,10 @@ import { SCHEMA_REGISTRY_VERSION, OFFICEGEN_CLI_VERSION } from "./types.js";
 import type { CapabilitiesDocument, CapabilityFeature, FeatureName, OfficegenConfig } from "./types.js";
 
 const commandMap: Record<FeatureName, string[]> = {
+  capabilities: ["capabilities"],
+  help: ["help", "help workflow", "help error"],
+  config: ["config show", "config set"],
+  doctor: ["doctor"],
   inspect: ["inspect"],
   view: ["view"],
   edit: ["edit"],
@@ -13,18 +17,19 @@ const commandMap: Record<FeatureName, string[]> = {
   validate: ["validate"],
   diagnose: ["diagnose"],
   repair: ["repair"],
-  asset: ["asset"],
-  chart: ["chart"],
-  diagram: ["diagram"],
-  schema: ["schema"],
-  errors: ["errors"],
-  template: ["template"],
-  design: ["design"],
-  layout: ["layout"],
-  agent: ["agent"],
-  mcp: ["mcp"],
-  renderer: ["renderer"],
-  plugin: ["plugin"]
+  run: ["run"],
+  asset: ["asset add", "asset inspect", "asset extract", "asset replace"],
+  chart: ["chart render"],
+  diagram: ["diagram render"],
+  schema: ["schema list", "schema get", "schema validate", "schema migrate"],
+  errors: ["errors list", "errors inspect"],
+  template: ["template list", "template inspect", "template candidates", "template create", "template apply-map", "template validate", "template fill"],
+  design: ["design list", "design inspect", "design init", "design edit", "design update", "design validate", "design capture", "design apply"],
+  layout: ["layout apply"],
+  agent: ["agent install", "agent refresh"],
+  mcp: ["mcp serve"],
+  renderer: ["renderer list", "renderer inspect", "renderer trust"],
+  plugin: ["plugin list", "plugin inspect", "plugin install", "plugin trust"]
 };
 
 export function buildFeatureRegistry(config: OfficegenConfig): CapabilityFeature[] {
@@ -55,6 +60,7 @@ export function computeCapabilitiesHash(config: OfficegenConfig, cliVersion = OF
     features: config.features,
     security: config.security,
     agent: config.agent,
+    commandMap,
     schemaRegistryVersion: SCHEMA_REGISTRY_VERSION
   };
   return `sha256:${createHash("sha256").update(stableStringify(payload)).digest("hex")}`;

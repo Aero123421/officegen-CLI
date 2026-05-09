@@ -2,12 +2,14 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   type InputLike,
+  getLoadedZipSafetyReport,
   loadZip,
   normalizeInput,
   readZipBytes,
   sha256,
   sortedZipFiles,
   writeOutput,
+  zipSafetyCaveats,
   zipPathBasename,
   zipToBytes
 } from "./shared.js";
@@ -85,11 +87,11 @@ export async function extractAssets(input: InputLike, options: ExtractAssetsOpti
   return {
     schema: "officegen.asset.extract.result@1.2",
     assets,
-    caveats: ["Extracted assets are untrusted document content."]
+    caveats: ["Extracted assets are untrusted document content.", ...zipSafetyCaveats(getLoadedZipSafetyReport(zip))]
   };
 }
 
-export async function replaceAsset(input: InputLike, options: ReplaceAssetOptions): Promise<{ schema: "officegen.asset.replace.result@1.2"; changed: boolean; out?: string; bytes?: Uint8Array }> {
+export async function replaceAsset(input: InputLike, options: ReplaceAssetOptions): Promise<{ schema: "officegen.asset.replace.result@1.2"; changed: boolean; out?: string; bytes?: Uint8Array; caveats: string[] }> {
   const normalized = await normalizeInput(input, "unknown");
   const zip = await loadZip(normalized);
   const target = zip.file(options.assetPath);
@@ -101,7 +103,8 @@ export async function replaceAsset(input: InputLike, options: ReplaceAssetOption
     schema: "officegen.asset.replace.result@1.2",
     changed: true,
     out: options.out,
-    bytes: options.out ? undefined : bytes
+    bytes: options.out ? undefined : bytes,
+    caveats: ["Replaced asset bytes are written verbatim.", ...zipSafetyCaveats(getLoadedZipSafetyReport(zip))]
   };
 }
 
@@ -139,4 +142,3 @@ function detectDimensions(bytes: Uint8Array, mediaType: string): { width?: numbe
   }
   return {};
 }
-

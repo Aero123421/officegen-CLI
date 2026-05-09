@@ -12,6 +12,10 @@ import type {
 } from "./types.js";
 
 const featureNames: FeatureName[] = [
+  "capabilities",
+  "help",
+  "config",
+  "doctor",
   "inspect",
   "view",
   "edit",
@@ -21,6 +25,7 @@ const featureNames: FeatureName[] = [
   "validate",
   "diagnose",
   "repair",
+  "run",
   "asset",
   "chart",
   "diagram",
@@ -50,6 +55,10 @@ function featuresFromBooleans(values: Partial<Record<FeatureName, boolean>>): Fe
 }
 
 const substrateBooleans: Record<FeatureName, boolean> = {
+  capabilities: true,
+  help: true,
+  config: true,
+  doctor: true,
   inspect: true,
   view: true,
   edit: true,
@@ -59,6 +68,7 @@ const substrateBooleans: Record<FeatureName, boolean> = {
   validate: true,
   diagnose: true,
   repair: true,
+  run: true,
   asset: true,
   chart: true,
   diagram: true,

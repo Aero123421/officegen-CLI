@@ -124,6 +124,12 @@ export async function writeJsonFile(filePath: string, value: unknown): Promise<s
   return filePath;
 }
 
+export async function writeTextFile(filePath: string, value: string): Promise<string> {
+  await ensureDir(path.dirname(filePath));
+  await writeFile(filePath, value.endsWith("\n") ? value : `${value}\n`, "utf8");
+  return filePath;
+}
+
 export async function readJsonFile<T>(filePath: string): Promise<T> {
   const raw = await readFile(filePath, "utf8");
   return JSON.parse(raw) as T;

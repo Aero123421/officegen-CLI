@@ -11,7 +11,8 @@ export * from "./repair.js";
 export {
   getLoadedZipSafetyReport,
   inspectInputZipSafety,
-  loadZip
+  loadZip,
+  stableHashId
 } from "./shared.js";
 export type {
   LoadZipOptions,

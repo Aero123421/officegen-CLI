@@ -9,7 +9,7 @@ describe("schema registry", () => {
       target: "pptx",
       ops: [
         {
-          op: "pptx.setShapeText",
+          op: "setText",
           selector: { stableObjectId: "pptx:s001:shape:0007" },
           text: "Hello"
         }
@@ -19,6 +19,21 @@ describe("schema registry", () => {
 
     expect(validateSchema("officegen.edit.ops@1.2", good).ok).toBe(true);
     expect(validateSchema("officegen.edit.ops@1.2", bad).ok).toBe(false);
+    expect(validateSchema("officegen.edit.ops@1.2", {
+      schema: "officegen.edit.ops@1.2",
+      target: "pptx",
+      ops: [{ op: "pptx.reorderSlides" }]
+    }).ok).toBe(false);
+    expect(validateSchema("officegen.edit.ops@1.2", {
+      schema: "officegen.edit.ops@1.2",
+      target: "xlsx",
+      ops: [{ op: "xlsx.setCell", cell: "A1" }]
+    }).ok).toBe(false);
+    expect(validateSchema("officegen.edit.ops@1.2", {
+      schema: "officegen.edit.ops@1.2",
+      target: "xlsx",
+      ops: [{ op: "xlsx.setCell", cell: "A1", value: "ok" }]
+    }).ok).toBe(true);
   });
 
   it("returns actionable validation failures for unknown schemas and schema id mismatches", () => {

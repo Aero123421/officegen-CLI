@@ -9,7 +9,7 @@ interface Captured {
   stderr: string[];
 }
 
-async function run(args: string[], cwd = process.cwd()): Promise<Captured> {
+async function run(args: string[], cwd = process.cwd(), env: NodeJS.ProcessEnv = {}): Promise<Captured> {
   const captured: Captured = { stdout: [], stderr: [] };
   process.exitCode = undefined;
   await runCli(["node", "officegen", ...args], {
@@ -17,7 +17,7 @@ async function run(args: string[], cwd = process.cwd()): Promise<Captured> {
     now: new Date("2026-05-09T00:00:00.000Z"),
     stdout: (text) => captured.stdout.push(text),
     stderr: (text) => captured.stderr.push(text),
-    env: {}
+    env
   });
   return captured;
 }
@@ -165,5 +165,51 @@ describe("officegen CLI command surface", () => {
     expect(envelope.ok).toBe(false);
     expect(envelope.error.code).toBe("FEATURE_HIDDEN_FROM_AGENT");
     expect(process.exitCode).toBe(5);
+  });
+
+  it("prints native help with profile-aware commands and exits successfully", async () => {
+    const cwd = await tempWorkspace({ profile: "substrate" });
+    const captured = await run(["--help"], cwd);
+
+    expect(captured.stdout[0]).toContain("officegen - AI-friendly Office/PDF runtime");
+    expect(captured.stdout[0]).toContain("inspect");
+    expect(captured.stdout[0]).not.toContain("template");
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it("warns when the supplied capabilities hash is stale", async () => {
+    const captured = await run(["capabilities", "--json", "--capabilities-hash", "sha256:stale"]);
+    const envelope = parseEnvelope(captured);
+
+    expect(envelope.ok).toBe(true);
+    expect(envelope.warnings).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: "AGENT_ADAPTER_STALE",
+        expected: "sha256:stale"
+      })
+    ]));
+  });
+
+  it("also accepts the expected capabilities hash from the environment", async () => {
+    const captured = await run(["capabilities", "--json"], process.cwd(), { OFFICEGEN_CAPABILITIES_HASH: "sha256:env-stale" });
+    const envelope = parseEnvelope(captured);
+
+    expect(envelope.warnings).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: "AGENT_ADAPTER_STALE",
+        expected: "sha256:env-stale"
+      })
+    ]));
+  });
+
+  it("truncates agent JSON output when an explicit budget is exceeded", async () => {
+    const captured = await run(["capabilities", "--agent", "--json", "--json-budget-bytes", "512"]);
+    const envelope = parseEnvelope(captured);
+
+    expect(envelope.ok).toBe(true);
+    expect(envelope.result.schema).toBe("officegen.progressive-disclosure@1.2");
+    expect(envelope.warnings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "AGENT_JSON_BUDGET_EXCEEDED" })
+    ]));
   });
 });

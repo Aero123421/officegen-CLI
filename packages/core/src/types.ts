@@ -9,6 +9,10 @@ export type JsonObject = { [key: string]: JsonValue };
 export type OfficegenProfile = "substrate" | "authoring" | "enterprise";
 
 export type FeatureName =
+  | "capabilities"
+  | "help"
+  | "config"
+  | "doctor"
   | "inspect"
   | "view"
   | "edit"
@@ -18,6 +22,7 @@ export type FeatureName =
   | "validate"
   | "diagnose"
   | "repair"
+  | "run"
   | "asset"
   | "chart"
   | "diagram"

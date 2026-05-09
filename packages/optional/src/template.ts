@@ -4,6 +4,7 @@ import {
   OptionalContext,
   ValidationResult,
   featureRoot,
+  hashFile,
   listJsonFiles,
   nowIso,
   readJsonFile,
@@ -18,7 +19,10 @@ import {
   type DesignContextCandidate,
   type DesignMapCandidate,
   type DesignPreviewCandidate,
-  type PptxDesignSignals
+  type NamedShapeCandidate,
+  type PptxDesignSignals,
+  type TemplatePlaceholderCandidate,
+  type TemplateSchemaCandidate
 } from "./design.js";
 
 export type TemplateFieldType = "string" | "number" | "boolean" | "date" | "json";
@@ -44,6 +48,15 @@ export interface TemplateDefinition {
     sha256?: string;
   };
   mapping?: Record<string, string>;
+  sourceCapture?: {
+    metadata?: PptxDesignSignals["metadata"];
+    artifactPaths?: PptxDesignSignals["artifactPaths"];
+    placeholderCandidates?: TemplatePlaceholderCandidate[];
+    namedShapeCandidates?: NamedShapeCandidate[];
+    schemaCandidates?: TemplateSchemaCandidate[];
+    templateMapSuggested?: PptxDesignSignals["templateMapSuggested"];
+    trust?: PptxDesignSignals["trust"];
+  };
   requiredCapabilities?: string[];
   createdAt?: string;
   updatedAt?: string;
@@ -58,10 +71,18 @@ export interface TemplateCandidate {
   previewCandidates?: DesignPreviewCandidate[];
   contextCandidates?: DesignContextCandidate[];
   mapCandidates?: DesignMapCandidate[];
+  placeholderCandidates?: TemplatePlaceholderCandidate[];
+  namedShapeCandidates?: NamedShapeCandidate[];
+  schemaCandidates?: TemplateSchemaCandidate[];
+  templateMapSuggested?: PptxDesignSignals["templateMapSuggested"];
+  artifactPaths?: PptxDesignSignals["artifactPaths"];
+  trust?: PptxDesignSignals["trust"];
+  generatedFromSource?: boolean;
 }
 
 export interface TemplateCreateOptions extends OptionalContext {
   template: Omit<TemplateDefinition, "createdAt" | "updatedAt" | "hash">;
+  sourcePath?: string;
 }
 
 export interface TemplateQueryOptions extends OptionalContext {
@@ -88,9 +109,44 @@ export interface TemplateFillOptions extends TemplateIdOptions {
 export async function createTemplate(options: TemplateCreateOptions): Promise<TemplateDefinition> {
   requireFeature(options, "template", "template create");
   const now = nowIso();
+  const id = slugify(options.template.id);
+  const sourcePath = options.sourcePath ?? options.template.source?.path;
+  const resolvedSourcePath = sourcePath ? path.resolve(options.cwd ?? process.cwd(), sourcePath) : undefined;
+  const sourceSignals = resolvedSourcePath
+    ? await capturePptxDesignSignals(resolvedSourcePath, {
+        cwd: options.cwd,
+        artifactsDir: path.join(featureRoot(options, "template"), "captures", id, slugify(path.basename(resolvedSourcePath, path.extname(resolvedSourcePath))))
+      })
+    : undefined;
+  const inferredFields = sourceSignals?.schemaCandidates.map((field) => ({
+    name: field.name,
+    type: field.type,
+    required: field.required,
+    description: `${field.reason}; confidence ${field.confidence}`
+  }));
   const template: TemplateDefinition = {
     ...options.template,
-    id: slugify(options.template.id),
+    id,
+    fields: options.template.fields && options.template.fields.length > 0 ? options.template.fields : inferredFields ?? options.template.fields,
+    mapping: options.template.mapping ?? sourceSignals?.templateMapSuggested.mapping,
+    source: resolvedSourcePath
+      ? {
+          path: resolvedSourcePath,
+          format: path.extname(resolvedSourcePath).replace(/^\./, "").toLowerCase() || options.template.source?.format,
+          sha256: await hashFile(resolvedSourcePath)
+        }
+      : options.template.source,
+    sourceCapture: sourceSignals
+      ? {
+          metadata: sourceSignals.metadata,
+          artifactPaths: sourceSignals.artifactPaths,
+          placeholderCandidates: sourceSignals.placeholderCandidates,
+          namedShapeCandidates: sourceSignals.namedShapeCandidates,
+          schemaCandidates: sourceSignals.schemaCandidates,
+          templateMapSuggested: sourceSignals.templateMapSuggested,
+          trust: sourceSignals.trust
+        }
+      : options.template.sourceCapture,
     createdAt: now,
     updatedAt: now
   };
@@ -118,11 +174,19 @@ export async function templateCandidates(options: TemplateQueryOptions = {}): Pr
   const query = options.query?.trim().toLowerCase();
   const tags = new Set((options.tags ?? []).map((tag) => tag.toLowerCase()));
   const fields = new Set((options.fields ?? []).map((field) => field.toLowerCase()));
-  const sourceSignals = options.sourcePath
-    ? await capturePptxDesignSignals(path.resolve(options.cwd ?? process.cwd(), options.sourcePath))
+  const resolvedSourcePath = options.sourcePath ? path.resolve(options.cwd ?? process.cwd(), options.sourcePath) : undefined;
+  const sourceSignals = resolvedSourcePath
+    ? await capturePptxDesignSignals(resolvedSourcePath, {
+        cwd: options.cwd,
+        artifactsDir: path.join(
+          featureRoot(options, "template"),
+          "candidates",
+          slugify(path.basename(resolvedSourcePath, path.extname(resolvedSourcePath)))
+        )
+      })
     : undefined;
 
-  return templates
+  const registryCandidates = templates
     .map((template) => {
       const reasons: string[] = [];
       let score = 0;
@@ -172,12 +236,22 @@ export async function templateCandidates(options: TemplateQueryOptions = {}): Pr
               sourceMetadata: sourceSignals.metadata,
               previewCandidates: sourceSignals.previewCandidates,
               contextCandidates: sourceSignals.contextCandidates,
-              mapCandidates
+              mapCandidates,
+              placeholderCandidates: sourceSignals.placeholderCandidates,
+              namedShapeCandidates: sourceSignals.namedShapeCandidates,
+              schemaCandidates: sourceSignals.schemaCandidates,
+              templateMapSuggested: sourceSignals.templateMapSuggested,
+              artifactPaths: sourceSignals.artifactPaths,
+              trust: sourceSignals.trust
             }
           : {})
       };
     })
-    .filter((candidate) => candidate.score > 0)
+    .filter((candidate) => candidate.score > 0);
+
+  const sourceDerivedCandidate = sourceSignals && resolvedSourcePath ? makeSourceDerivedTemplateCandidate(resolvedSourcePath, sourceSignals) : undefined;
+
+  return [...(sourceDerivedCandidate ? [sourceDerivedCandidate] : []), ...registryCandidates]
     .sort((left, right) => right.score - left.score || left.template.id.localeCompare(right.template.id));
 }
 
@@ -296,6 +370,58 @@ function matchTemplateMapCandidates(
     if (matched.length >= 8) break;
   }
   return matched;
+}
+
+function makeSourceDerivedTemplateCandidate(sourcePath: string, sourceSignals: PptxDesignSignals): TemplateCandidate {
+  const name = path.basename(sourcePath, path.extname(sourcePath));
+  const fields = sourceSignals.schemaCandidates.map((field) => ({
+    name: field.name,
+    type: field.type,
+    required: field.required,
+    description: `${field.reason}; confidence ${field.confidence}`
+  }));
+  const template: TemplateDefinition = {
+    id: slugify(`suggested-${name}`),
+    name: `Suggested template from ${name}`,
+    version: "0.1.0",
+    description: "Generated from sourcePath PPTX analysis. Review untrusted text before use.",
+    tags: ["pptx", "source-derived"],
+    fields,
+    source: {
+      path: sourcePath,
+      format: "pptx",
+      sha256: sourceSignals.trust.trusted.sha256
+    },
+    mapping: sourceSignals.templateMapSuggested.mapping,
+    sourceCapture: {
+      metadata: sourceSignals.metadata,
+      artifactPaths: sourceSignals.artifactPaths,
+      placeholderCandidates: sourceSignals.placeholderCandidates,
+      namedShapeCandidates: sourceSignals.namedShapeCandidates,
+      schemaCandidates: sourceSignals.schemaCandidates,
+      templateMapSuggested: sourceSignals.templateMapSuggested,
+      trust: sourceSignals.trust
+    },
+    createdAt: sourceSignals.trust.trusted.generatedAt,
+    updatedAt: sourceSignals.trust.trusted.generatedAt
+  };
+  template.hash = sha256Json({ ...template, hash: undefined });
+  return {
+    template,
+    score: 100 + sourceSignals.schemaCandidates.length + sourceSignals.placeholderCandidates.length,
+    reasons: ["source:pptx-analysis", "template-map:suggested", "schema:candidates"],
+    sourceMetadata: sourceSignals.metadata,
+    previewCandidates: sourceSignals.previewCandidates,
+    contextCandidates: sourceSignals.contextCandidates,
+    mapCandidates: sourceSignals.mapCandidates,
+    placeholderCandidates: sourceSignals.placeholderCandidates,
+    namedShapeCandidates: sourceSignals.namedShapeCandidates,
+    schemaCandidates: sourceSignals.schemaCandidates,
+    templateMapSuggested: sourceSignals.templateMapSuggested,
+    artifactPaths: sourceSignals.artifactPaths,
+    trust: sourceSignals.trust,
+    generatedFromSource: true
+  };
 }
 
 function normalizeField(value: string): string {

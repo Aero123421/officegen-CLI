@@ -72,6 +72,56 @@ const selectorSchema: JsonObject = {
   }
 };
 
+function editOperationSchemas(): JsonObject[] {
+  const base = {
+    selector: selectorSchema,
+    from: { type: "string" },
+    to: { type: "string" },
+    text: { type: "string" },
+    slide: { type: "integer", minimum: 1 },
+    after: { type: "integer", minimum: 0 },
+    order: { type: "array", minItems: 1, items: { type: "integer", minimum: 1 } },
+    items: { type: "array", minItems: 1, items: { type: "string" } },
+    sheet: { type: "integer", minimum: 1 },
+    rowIndex: { type: "integer", minimum: 1 },
+    rows: { type: "array", minItems: 1, items: { type: "array" } },
+    cell: { type: "string", pattern: "^[A-Za-z]+[1-9][0-9]*$" },
+    value: { type: ["string", "number", "boolean", "null"] },
+    startCell: { type: "string", pattern: "^[A-Za-z]+[1-9][0-9]*$" },
+    page: { type: "integer", minimum: 1 },
+    x: { type: "number" },
+    y: { type: "number" },
+    size: { type: "number", minimum: 1 },
+    color: { type: "string" },
+    width: { type: "number", minimum: 0 },
+    height: { type: "number", minimum: 0 }
+  };
+  const op = (name: string, required: string[], extra: Record<string, unknown> = {}): JsonObject => ({
+    type: "object",
+    required: ["op", ...required],
+    additionalProperties: false,
+    properties: {
+      ...base,
+      ...extra,
+      op: { const: name }
+    }
+  });
+  return [
+    op("replaceText", ["from", "to"]),
+    op("setText", ["selector", "text"]),
+    op("pptx.duplicateSlide", [], {}),
+    op("pptx.reorderSlides", ["order"]),
+    op("pptx.insertBulletItems", ["selector", "items"]),
+    op("pptx.replaceBulletItems", ["selector", "items"]),
+    op("docx.insertParagraphAfter", ["selector", "text"]),
+    op("xlsx.insertRows", ["rowIndex", "rows"]),
+    op("xlsx.setCell", ["cell", "value"]),
+    op("xlsx.updateTable", ["startCell", "rows"]),
+    op("pdf.textOverlay", ["page", "text", "x", "y"]),
+    op("pdf.annotation", ["page", "text", "x", "y"])
+  ];
+}
+
 const editOpsSchema: JsonObject = {
   $id: "officegen.edit.ops@1.2",
   type: "object",
@@ -95,15 +145,7 @@ const editOpsSchema: JsonObject = {
     ops: {
       type: "array",
       minItems: 1,
-      items: {
-        type: "object",
-        required: ["op", "selector"],
-        additionalProperties: true,
-        properties: {
-          op: { type: "string", minLength: 1 },
-          selector: selectorSchema
-        }
-      }
+      items: { oneOf: editOperationSchemas() }
     }
   }
 };
@@ -240,6 +282,16 @@ const viewObjectMapSchema: JsonObject = {
           name: { type: "string" },
           bbox: { type: "array", minItems: 4, maxItems: 4, items: { type: "number" } },
           textPreview: { type: "string" },
+          selectorHints: { type: "object", additionalProperties: true },
+          trust: {
+            type: "object",
+            required: ["level", "reason"],
+            additionalProperties: false,
+            properties: {
+              level: { enum: ["untrusted"] },
+              reason: { type: "string" }
+            }
+          },
           editable: { type: "boolean" },
           untrusted: { type: "boolean" }
         }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import JSZip from "jszip";
-import { edit, inspect, inspectInputZipSafety, render, renderChart, renderDiagram, resolveEditSelectors, view } from "../src/index.js";
+import { edit, exportDocument, inspect, inspectInputZipSafety, render, renderChart, renderDiagram, resolveEditSelectors, view } from "../src/index.js";
 
 describe("@officegen/formats MVP", () => {
   it("renders and inspects a basic PPTX with untrusted text separation", async () => {
@@ -17,7 +17,9 @@ describe("@officegen/formats MVP", () => {
 
     expect(inspected.trusted.summary.slides).toBe(1);
     expect(inspected.untrusted.slides).toHaveLength(1);
-    expect(inspected.objectMap[0]?.stableObjectId).toMatch(/^pptx:s001:text:/);
+    expect(inspected.objectMap[0]?.stableObjectId).toMatch(/^pptx:s001:shape:/);
+    expect(inspected.objectMap[0]?.bbox?.length).toBe(4);
+    expect(inspected.objectMap[0]?.textPreview).toBe("Revenue");
     expect(inspected.agentInstruction).toContain("not instructions");
   });
 
@@ -116,6 +118,65 @@ describe("@officegen/formats MVP", () => {
     expect(dryRun.resolvedSelectors?.[0]?.matched).toBe(true);
   });
 
+  it("applies structural PPTX, DOCX, and XLSX edit ops and confirms through inspect", async () => {
+    const pptx = await render(
+      { title: "Deck", slides: [{ title: "First", body: "Body" }, { title: "Second", body: "Other" }] },
+      { target: "pptx" }
+    );
+    const pptxEdited = await edit(
+      { data: pptx.bytes, format: "pptx" },
+      [
+        { op: "pptx.duplicateSlide", slide: 1, after: 1 },
+        { op: "pptx.reorderSlides", order: [3, 1, 2] },
+        { op: "pptx.replaceBulletItems", selector: { contains: "Body" }, items: ["Alpha", "Beta"] }
+      ],
+      { resolveSelectors: true }
+    );
+    const inspectedPptx = await inspect({ data: pptxEdited.bytes, format: "pptx" });
+    expect(inspectedPptx.trusted.summary.slides).toBe(3);
+    expect(String(inspectedPptx.untrusted.slides[0]?.text)).toContain("Second");
+    expect(inspectedPptx.objectMap.map((entry) => entry.text).join("\n")).toContain("AlphaBeta");
+
+    const docx = await render({ title: "Doc", sections: [{ title: "Section", body: "First para" }] }, { target: "docx" });
+    const docxInspected = await inspect({ data: docx.bytes, format: "docx" });
+    const paragraphId = docxInspected.objectMap.find((entry) => entry.text === "First para")?.stableObjectId;
+    const docxEdited = await edit(
+      { data: docx.bytes, format: "docx" },
+      [{ op: "docx.insertParagraphAfter", selector: { stableObjectId: paragraphId }, text: "Inserted para" }]
+    );
+    const inspectedDocx = await inspect({ data: docxEdited.bytes, format: "docx" });
+    expect(inspectedDocx.objectMap.map((entry) => entry.text)).toContain("Inserted para");
+
+    const xlsx = await render({ title: "Book", sheets: [{ rows: [["A", "B"], ["old", "value"]] }] }, { target: "xlsx" });
+    const xlsxEdited = await edit(
+      { data: xlsx.bytes, format: "xlsx" },
+      [
+        { op: "xlsx.insertRows", sheet: 1, rowIndex: 2, rows: [["Inserted", "Row"]] },
+        { op: "xlsx.setCell", sheet: 1, cell: "B3", value: "Updated" },
+        { op: "xlsx.updateTable", sheet: 1, startCell: "C2", rows: [["T1"], ["T2"]] }
+      ]
+    );
+    const inspectedXlsx = await inspect({ data: xlsxEdited.bytes, format: "xlsx" });
+    const valuesByRef = new Map(inspectedXlsx.objectMap.map((entry) => [entry.label, entry.text]));
+    expect(valuesByRef.get("A2")).toBe("Inserted");
+    expect(valuesByRef.get("B3")).toBe("Updated");
+    expect(valuesByRef.get("C2")).toBe("T1");
+  });
+
+  it("returns clear ambiguous selector errors and keeps atomic edits unwritten", async () => {
+    const rendered = await render({ title: "Same", slides: [{ title: "Same", body: "Same" }] }, { target: "pptx" });
+    const result = await edit(
+      { data: rendered.bytes, format: "pptx" },
+      [{ op: "setText", selector: { contains: "Same" }, text: "Changed" }],
+      { atomic: true, resolveSelectors: true }
+    );
+    const inspected = await inspect({ data: result.bytes ?? rendered.bytes, format: "pptx" });
+
+    expect(result.changed).toBe(false);
+    expect(result.errors?.[0]?.reason).toBe("ambiguous");
+    expect(inspected.objectMap.map((entry) => entry.text)).not.toContain("Changed");
+  });
+
   it("surfaces zip safety reports and blocks unsafe XML before format parsing", async () => {
     const zip = new JSZip();
     zip.file("[Content_Types].xml", "<!DOCTYPE x [<!ENTITY e SYSTEM 'file:///etc/passwd'>]><Types />");
@@ -126,5 +187,13 @@ describe("@officegen/formats MVP", () => {
     expect(report?.ok).toBe(false);
     expect(report?.warnings.map((warning) => warning.code)).toContain("ZIP_XML_ENTITY_DENIED");
     await expect(inspect({ data: bytes, format: "pptx" })).rejects.toThrow(/Zip safety check failed/);
+  });
+
+  it("requires explicit file-backed native renderer for Office-to-PDF export", async () => {
+    const rendered = await render({ title: "Native export", slides: [{ title: "Slide", body: "Body" }] }, { target: "pptx" });
+
+    await expect(
+      exportDocument({ data: rendered.bytes, format: "pptx" }, { to: "pdf", mode: "native" })
+    ).rejects.toThrow(/EXPORT_UNSUPPORTED: native Office-to-PDF export requires an input file path/);
   });
 });
