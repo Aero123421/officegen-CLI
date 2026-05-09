@@ -30,6 +30,7 @@ jobs:
         run: npm ci --ignore-scripts --prefer-online --no-audit --no-fund
 
       - name: npm audit
+        if: runner.os != 'Windows'
         run: npm audit --audit-level=moderate
 
       - name: Typecheck
