@@ -58,10 +58,13 @@ async function allowedRoots(config, extraRoots = []) {
     }
     return [...new Set(roots.map(normalizeCase))];
 }
-async function assertNoSymlinkComponents(targetPath) {
+async function assertNoSymlinkComponents(targetPath, basePath) {
+    const absoluteBase = path.resolve(basePath);
+    const relative = path.relative(absoluteBase, targetPath);
+    const startsInsideBase = relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
     const parsed = path.parse(targetPath);
-    const relativeParts = path.relative(parsed.root, targetPath).split(path.sep).filter(Boolean);
-    let current = parsed.root;
+    const relativeParts = (startsInsideBase ? relative : path.relative(parsed.root, targetPath)).split(path.sep).filter(Boolean);
+    let current = startsInsideBase ? absoluteBase : parsed.root;
     for (const part of relativeParts) {
         current = path.join(current, part);
         try {
@@ -103,7 +106,7 @@ export async function validatePath(config, options) {
         }
     }
     if (!config.security.followSymlinks) {
-        await assertNoSymlinkComponents(candidate.absolutePath);
+        await assertNoSymlinkComponents(candidate.absolutePath, config.paths.projectRoot);
         if (candidate.existed && normalizeCase(candidate.absolutePath) !== normalizeCase(candidate.realPath)) {
             throw new OfficegenError("SECURITY_SYMLINK_DENIED", `Symlink or reparse point denied: ${options.path}`);
         }
