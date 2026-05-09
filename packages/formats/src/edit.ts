@@ -560,7 +560,7 @@ async function editPdf(
     }
   }
 
-  const bytes = options.dryRun ? input.bytes : await pdf.save();
+  const bytes = options.dryRun ? input.bytes : await pdf.save({ useObjectStreams: false });
   if (!options.dryRun) await writeOutput(options.out, bytes);
   return {
     schema: "officegen.edit.result@1.2",

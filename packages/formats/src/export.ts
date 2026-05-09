@@ -54,7 +54,7 @@ export async function exportDocument(input: InputLike | DocumentIR, options: Exp
   const normalized = await normalizeInput(input as InputLike, "unknown");
   if (normalized.format === "pdf" && options.to === "pdf") {
     const pdf = await PDFDocument.load(normalized.bytes, { ignoreEncryption: true });
-    const bytes = await pdf.save();
+    const bytes = await pdf.save({ useObjectStreams: false });
     await writeOutput(options.out, bytes);
     return result(normalized.format, options, bytes, ["PDF was normalized through pdf-lib."]);
   }
@@ -85,7 +85,7 @@ export async function exportDocument(input: InputLike | DocumentIR, options: Exp
         y -= 16;
       }
     }
-    const bytes = await pdf.save();
+    const bytes = await pdf.save({ useObjectStreams: false });
     await writeOutput(options.out, bytes);
     return result(normalized.format, options, bytes, [
       "Fast Office-to-PDF export is approximate and text-summary based.",
@@ -110,7 +110,7 @@ export async function mergePdfs(inputs: InputLike[], options: PdfOperationOption
     const pages = await output.copyPages(source, source.getPageIndices());
     for (const page of pages) output.addPage(page);
   }
-  const bytes = await output.save();
+  const bytes = await output.save({ useObjectStreams: false });
   await writeOutput(options.out, bytes);
   return result("pdf", { to: "pdf", out: options.out }, bytes, ["Merged PDFs with pdf-lib; outlines and advanced annotations may not be preserved."]);
 }
@@ -124,7 +124,7 @@ export async function splitPdf(input: InputLike, ranges: Array<number[]>, option
     const indices = range.map((page) => page - 1).filter((page) => page >= 0 && page < source.getPageCount());
     const pages = await output.copyPages(source, indices);
     for (const page of pages) output.addPage(page);
-    const bytes = await output.save();
+    const bytes = await output.save({ useObjectStreams: false });
     const out = options.out ? options.out.replace(/(\.pdf)?$/i, `.${rangeIndex + 1}.pdf`) : undefined;
     await writeOutput(out, bytes);
     results.push(result("pdf", { to: "pdf", out }, bytes, ["Split PDF with pdf-lib."]));
@@ -139,7 +139,7 @@ export async function reorderPdf(input: InputLike, order: number[], options: Pdf
   const indices = order.map((page) => page - 1).filter((page) => page >= 0 && page < source.getPageCount());
   const pages = await output.copyPages(source, indices);
   for (const page of pages) output.addPage(page);
-  const bytes = await output.save();
+  const bytes = await output.save({ useObjectStreams: false });
   await writeOutput(options.out, bytes);
   return result("pdf", { to: "pdf", out: options.out }, bytes, ["Reordered PDF pages with pdf-lib."]);
 }
@@ -187,7 +187,7 @@ async function exportOfficeToPdfWithLibreOffice(
     ]);
     const generated = await findConvertedPdf(outDir, input.path);
     const pdf = await PDFDocument.load(await readFile(generated), { ignoreEncryption: true });
-    const bytes = await pdf.save();
+    const bytes = await pdf.save({ useObjectStreams: false });
     await writeOutput(options.out, bytes);
     return {
       schema: "officegen.export.result@1.2",

@@ -132,7 +132,7 @@ async function renderPdf(ir: DocumentIR, options: RenderOptions): Promise<Render
       if (y < 54) break;
     }
   }
-  const bytes = await pdf.save();
+  const bytes = await pdf.save({ useObjectStreams: false });
   await writeOutput(options.out, bytes);
   return {
     schema: "officegen.render.result@1.2",
