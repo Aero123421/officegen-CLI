@@ -8,7 +8,8 @@ export async function createRuntimeContext(argv, cwd, env) {
     });
     const registry = buildActiveRegistry(config);
     const agent = hasFlag(argv, "--agent");
-    const json = hasFlag(argv, "--json");
+    const strictJson = hasFlag(argv, "--strict-json") || env.OFFICEGEN_STRICT_JSON === "1";
+    const json = hasFlag(argv, "--json") || strictJson;
     const capabilitiesHash = computeCapabilitiesHash(config);
     const explicitJsonBudgetBytes = parsePositiveInt(optionValue(argv, "--json-budget-bytes") ?? env.OFFICEGEN_JSON_BUDGET_BYTES);
     const jsonBudgetBytes = explicitJsonBudgetBytes ?? (agent ? config.agent.defaultJsonBudgetBytes : undefined);
@@ -18,6 +19,7 @@ export async function createRuntimeContext(argv, cwd, env) {
         cwd,
         agent,
         json,
+        strictJson,
         config,
         registry,
         capabilitiesHash,
@@ -39,10 +41,15 @@ export function buildActiveRegistry(config) {
 export function gateTopLevelCommand(command, context) {
     const entry = context.registry.find((candidate) => candidate.commandGroup === command);
     if (!entry) {
+        const didYouMean = closestCommand(command, context);
         return {
             code: "UNKNOWN_COMMAND",
             command,
-            message: `Unknown command: ${command}`
+            message: `Unknown command: ${command}`,
+            details: didYouMean ? {
+                didYouMean,
+                repairPlan: `Run ${didYouMean} with --agent --json, or use officegen help --agent --json to inspect the command surface.`
+            } : undefined
         };
     }
     if (!entry.enabled) {
@@ -76,14 +83,27 @@ export function gateTopLevelCommand(command, context) {
     if (second && entry.commands.length > 1) {
         const allowed = new Set(entry.commands.map((registered) => registered.split(" ")[1]).filter(Boolean));
         if (allowed.size > 0 && !allowed.has(second)) {
+            const alias = entry.commandGroup === "schema" && second === "fetch" ? "schema get" : undefined;
             return {
                 code: "UNKNOWN_COMMAND",
                 command: `${command} ${second}`,
-                message: `Unknown command: ${command} ${second}`
+                message: `Unknown command: ${command} ${second}`,
+                details: alias ? {
+                    didYouMean: alias,
+                    repairPlan: `Use officegen ${alias} <schema-id> --agent --json.`
+                } : undefined
             };
         }
     }
     return undefined;
+}
+function closestCommand(command, context) {
+    const commands = context.registry.flatMap((entry) => [entry.commandGroup, ...entry.commands]);
+    if (command === "schemas")
+        return "schema";
+    if (command === "bench")
+        return "benchmark";
+    return commands.find((candidate) => candidate.startsWith(command) || command.startsWith(candidate));
 }
 const NO_POSITIONAL_LEAF_COMMANDS = new Set([
     "capabilities",

@@ -74,6 +74,9 @@ jobs:
       - name: GitHub install smoke
         run: npm run github-install:smoke
 
+      - name: Remote GitHub install smoke
+        run: npm run github-install:remote-smoke
+
       - name: Package npm tarball
         shell: bash
         run: |

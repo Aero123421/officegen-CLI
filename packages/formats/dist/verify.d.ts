@@ -7,11 +7,18 @@ export interface VerifyOptions {
     namedRanges?: boolean;
     externalLinks?: boolean;
     protectedSheets?: boolean;
+    timeoutMs?: number;
     config?: OfficegenConfig;
 }
 export interface VerifyResult {
     schema: "officegen.verify.result@1.2";
-    readiness: "pass" | "warning" | "blocked";
+    readiness: "pass" | "pass_with_environment_gap" | "warning" | "blocked";
+    partial?: boolean;
+    phaseTimings?: Array<{
+        phase: string;
+        durationMs: number;
+        timeout?: boolean;
+    }>;
     score: number;
     format: string;
     openable: boolean;
@@ -33,13 +40,18 @@ export interface VerifyResult {
         code: string;
         count: number;
         severity: "warning" | "error";
+        category: WarningCategory;
         examples: string[];
     }>;
     topRisks: Array<{
         code: string;
         severity: "warning" | "error";
+        category: WarningCategory;
         count: number;
         message: string;
+        slide?: number;
+        page?: number;
+        stableObjectId?: string;
         repair?: string;
     }>;
     scoreBreakdown: Record<string, unknown>;
@@ -51,4 +63,6 @@ export interface VerifyResult {
     artifacts: Record<string, unknown>;
 }
 export declare function verify(input: InputLike, options?: VerifyOptions): Promise<VerifyResult>;
+type WarningCategory = "quality" | "compatibility" | "security" | "environment";
 export declare const verifyDocument: typeof verify;
+export {};

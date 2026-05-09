@@ -326,6 +326,29 @@ export async function fillTemplate(options: TemplateFillOptions): Promise<Record
   const ops = canMutateOffice ? await templateFillOperations(template, options.values, options.cwd) : [];
   const feasibility = await templateFillFeasibility(template, { sourcePath, outputPath, outputFormat, canMutateOffice, ops, cwd: options.cwd });
   if (options.validateOnly) {
+    const resolver = canMutateOffice && sourcePath && ops.length
+      ? await edit(sourcePath, ops, {
+          format: outputFormat as "pptx" | "docx" | "xlsx",
+          dryRun: true,
+          resolveSelectors: true,
+          validateFirst: true,
+          atomic: true
+        }).catch((error) => ({ changed: false, errors: [error instanceof Error ? error.message : String(error)] }))
+      : undefined;
+    const resolverRecord = resolver as Record<string, unknown> | undefined;
+    const resolverErrors = Array.isArray(resolverRecord?.errors) ? resolverRecord.errors : [];
+    const resolverResolved = Array.isArray(resolverRecord?.resolvedSelectors) ? resolverRecord.resolvedSelectors : [];
+    if (canMutateOffice && (!ops.length || resolverErrors.length > 0)) {
+      throw new TemplateFillError("Template validate-only failed: one or more bindings cannot be resolved by the real edit resolver.", {
+        validateOnly: true,
+        validationCode: "TEMPLATE_VALIDATE_FAILED",
+        errors: resolverErrors.length ? resolverErrors : ["no edit operations were produced"],
+        resolver,
+        bindings: enrichBindingsWithResolver(bindings, resolverResolved, resolverErrors),
+        operations: ops.map(operationSummary),
+        recommendedFix: "Run template candidates/create against the source Office file, inspect the objectMap, then correct template.mapping before retrying."
+      });
+    }
     return {
       kind: "officegen.template.fill",
       schema: "officegen.template.fill-validation@2.2",
@@ -338,9 +361,10 @@ export async function fillTemplate(options: TemplateFillOptions): Promise<Record
       supported: feasibility.supported,
       noopReason: feasibility.noopReason,
       formatCapabilities: feasibility.formatCapabilities,
-      bindings,
+      bindings: enrichBindingsWithResolver(bindings, resolverResolved, resolverErrors),
       operations: ops.map(operationSummary),
-      validation: result
+      validation: result,
+      resolver
     };
   }
   if (canMutateOffice && !ops.length) {
@@ -712,9 +736,36 @@ function templateBindingDiagnostics(template: TemplateDefinition): Array<Record<
       kind: binding?.kind ?? "text",
       selector: binding?.selector,
       editable: Boolean(binding?.selector),
+      selectorStatus: binding?.selector ? "unverified" : "missing",
+      matchCount: binding?.selector ? undefined : 0,
+      sourcePart: "slide",
+      unsupportedReason: binding?.selector ? undefined : "missing-template-mapping",
       editableOps,
       confidence: field.confidence,
       reason: field.reason ?? field.description
+    };
+  });
+}
+
+function enrichBindingsWithResolver(
+  bindings: Array<Record<string, unknown>>,
+  resolvedSelectors: unknown[],
+  errors: unknown[]
+): Array<Record<string, unknown>> {
+  const errorText = errors.map((error) => typeof error === "string" ? error : JSON.stringify(error)).join("\n");
+  return bindings.map((binding) => {
+    const selector = isRecord(binding.selector) ? binding.selector : {};
+    const stableObjectId = typeof selector.stableObjectId === "string" ? selector.stableObjectId : undefined;
+    const matched = stableObjectId && resolvedSelectors.some((item) => JSON.stringify(item).includes(stableObjectId));
+    const failed = stableObjectId && errorText.includes(stableObjectId);
+    const selectorStatus = !stableObjectId ? "missing" : failed ? "not-found" : matched ? "resolved" : errors.length ? "unverified" : "resolved";
+    return {
+      ...binding,
+      selectorStatus,
+      matchCount: selectorStatus === "resolved" ? 1 : 0,
+      editable: selectorStatus === "resolved",
+      sourcePart: "slide",
+      unsupportedReason: selectorStatus === "resolved" ? undefined : selectorStatus
     };
   });
 }

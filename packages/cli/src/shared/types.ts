@@ -31,6 +31,7 @@ export interface RuntimeContext {
   cwd: string;
   agent: boolean;
   json: boolean;
+  strictJson: boolean;
   config: OfficegenConfig;
   registry: ActiveCapability[];
   capabilitiesHash: string;

@@ -1,5 +1,5 @@
 export const OFFICEGEN_SCHEMA_VERSION = "1.2";
-export const OFFICEGEN_CLI_VERSION = "2.2.0";
+export const OFFICEGEN_CLI_VERSION = "2.3.0";
 export const SCHEMA_REGISTRY_VERSION = "1.2.0";
 
 export type JsonPrimitive = string | number | boolean | null;
@@ -25,6 +25,9 @@ export type FeatureName =
   | "repair"
   | "diff"
   | "run"
+  | "critique"
+  | "improve"
+  | "benchmark"
   | "asset"
   | "chart"
   | "diagram"
@@ -162,6 +165,7 @@ export type OfficegenErrorCode =
   | "TARGET_EXTENSION_MISMATCH"
   | "UNSUPPORTED_FORMAT"
   | "TEMPLATE_FILL_FAILED"
+  | "TEMPLATE_VALIDATE_FAILED"
   | "EXPORT_UNSUPPORTED";
 
 export interface ErrorCatalogEntry {

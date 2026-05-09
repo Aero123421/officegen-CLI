@@ -44,6 +44,7 @@ const REQUIRED_ERROR_CODES: OfficegenErrorCode[] = [
   "TARGET_EXTENSION_MISMATCH",
   "UNSUPPORTED_FORMAT",
   "TEMPLATE_FILL_FAILED",
+  "TEMPLATE_VALIDATE_FAILED",
   "EXPORT_UNSUPPORTED"
 ];
 
@@ -60,7 +61,7 @@ const defaultCategory = (code: OfficegenErrorCode): string => {
   if (code.startsWith("EDIT_") || code === "IDEMPOTENCY_REPLAY") return "edit";
   if (code === "TEXT_OVERFLOW" || code === "VIEW_FIDELITY_LOW") return "layout";
   if (code === "IMAGE_MISSING" || code === "ASSET_UNSUPPORTED_FORMAT") return "asset";
-  if (code === "TEMPLATE_FILL_FAILED") return "template";
+  if (code === "TEMPLATE_FILL_FAILED" || code === "TEMPLATE_VALIDATE_FAILED") return "template";
   if (code === "CHART_SPEC_INVALID") return "chart";
   if (code === "DIAGRAM_SPEC_INVALID") return "diagram";
   return "export";
@@ -111,6 +112,7 @@ const messages: Partial<Record<OfficegenErrorCode, string>> = {
   TARGET_EXTENSION_MISMATCH: "The requested render target does not match the output file extension.",
   UNSUPPORTED_FORMAT: "The input format is not supported by this command.",
   TEMPLATE_FILL_FAILED: "Template fill could not create or validate the requested artifact.",
+  TEMPLATE_VALIDATE_FAILED: "Template fill validation found unresolved or unsupported bindings.",
   EXPORT_UNSUPPORTED: "The requested export conversion is unsupported."
 };
 
@@ -119,6 +121,7 @@ const suggestedOps: Partial<Record<OfficegenErrorCode, string[]>> = {
   SELECTOR_AMBIGUOUS: ["edit --dry-run --resolve-selectors", "inspect --summary"],
   SELECTOR_NOT_FOUND: ["inspect --summary", "view --object-map"],
   TEMPLATE_FILL_FAILED: ["template fill --validate-only", "inspect --depth shallow", "template apply-map"],
+  TEMPLATE_VALIDATE_FAILED: ["template candidates <source> --agent --json", "inspect <source> --depth shallow --agent --json", "template apply-map --map corrected-map.json"],
   CHART_SPEC_INVALID: ["schema validate --schema officegen.chart.vegalite-wrapper@1.2"],
   DIAGRAM_SPEC_INVALID: ["schema validate --schema officegen.diagram.spec@1.2"]
 };

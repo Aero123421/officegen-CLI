@@ -6,6 +6,30 @@ export function makeEnvelope(context: RuntimeContext, command: string, data: unk
   const result = redactForJson(data, context);
   const warnings = [...contextWarnings(context), ...extractArrayField(result, "warnings")];
   const artifacts = extractArrayField(result, "artifacts");
+  const missingArtifact = artifacts.find((artifact) => artifact && typeof artifact === "object" && (artifact as Record<string, unknown>).exists === false) as Record<string, unknown> | undefined;
+  if (missingArtifact) {
+    return {
+      schema: ENVELOPE_SCHEMA,
+      ok: false,
+      command,
+      runId: runId(now),
+      cliVersion: OFFICEGEN_CLI_VERSION,
+      capabilitiesHash: context.capabilitiesHash,
+      pathsRedacted: true,
+      result,
+      error: normalizeCliError({
+        code: "EDIT_TRANSACTION_FAILED",
+        command,
+        message: "Expected output artifact was not created.",
+        details: { artifacts }
+      }),
+      warnings,
+      diagnostics: extractArrayField(result, "diagnostics"),
+      artifacts,
+      availableCommands: availableCommands(context),
+      nextSuggestedCommands: errorSuggestedCommands(context, { code: "EDIT_TRANSACTION_FAILED", command, message: "Expected output artifact was not created.", details: { artifacts } })
+    };
+  }
   return {
     schema: ENVELOPE_SCHEMA,
     ok: true,
@@ -133,7 +157,8 @@ function applyAgentBudget(context: RuntimeContext, envelope: Envelope): Envelope
       budgetBytes: context.jsonBudgetBytes,
       originalBytes: bytes,
       capabilitiesHash: context.capabilitiesHash,
-      message: "JSON output exceeded the agent budget. Re-run with a narrower command or a larger --json-budget-bytes value."
+      message: "JSON output exceeded the agent budget. Re-run with a narrower command or a larger --json-budget-bytes value.",
+      recommendedNarrowCommands: recommendedNarrowCommands(envelope.command, context)
     },
     warnings: [
       ...envelope.warnings,
@@ -169,7 +194,11 @@ function errorSuggestedCommands(context: RuntimeContext, error: CliErrorPayload)
   const agent = context.agent ? " --agent" : "";
   const command = error.command ?? context.argv.slice(2).join(" ");
   const suggestions: string[] = [];
-  if (error.code === "INPUT_PARSE_ERROR") {
+  if (error.code === "UNKNOWN_COMMAND") {
+    const attempted = String(error.command ?? "");
+    const alias = commandAliasSuggestion(attempted, context);
+    if (alias) suggestions.push(alias);
+  } else if (error.code === "INPUT_PARSE_ERROR") {
     suggestions.push(`officegen schema validate <input.json> --schema officegen.ir.document@1.2${agent} --json`);
   } else if (error.code === "INPUT_NOT_FOUND") {
     suggestions.push(`officegen inspect <existing-file> --depth summary${agent} --json`);
@@ -196,4 +225,36 @@ function errorSuggestedCommands(context: RuntimeContext, error: CliErrorPayload)
     suggestions.push("officegen scaffold --kind pptx --title \"Draft\" --out draft.ir.json --json");
   }
   return [...new Set([...suggestions, ...nextSuggestedCommands(context)])];
+}
+
+function recommendedNarrowCommands(command: string, context: RuntimeContext): string[] {
+  const agent = context.agent ? " --agent" : "";
+  if (command.startsWith("inspect")) {
+    return [
+      `officegen inspect <input> --depth summary --object-map-limit 50${agent} --json`,
+      `officegen inspect <deck.pptx> --slides 1-5 --depth summary${agent} --json`,
+      `officegen inspect <workbook.xlsx> --sheet Sheet1 --range A1:K40${agent} --json`,
+      `officegen inspect <file> --fields schema,trusted,objectMap${agent} --json`
+    ];
+  }
+  if (command.startsWith("view")) {
+    return [
+      "officegen view <input> --max-pages 3 --object-map-limit 50 --out .officegen/runs/view --json",
+      "officegen view <pdf> --pages 1-3 --out .officegen/runs/pdf-view --json"
+    ];
+  }
+  if (command.startsWith("verify")) {
+    return [`officegen verify <input> --timeout-ms 60000${agent} --json`];
+  }
+  return [`officegen ${command || "<command>"} --json-budget-bytes ${Math.max((context.jsonBudgetBytes ?? 32768) * 2, 65536)}${agent} --json`];
+}
+
+function commandAliasSuggestion(command: string, context: RuntimeContext): string | undefined {
+  const agent = context.agent ? " --agent" : "";
+  if (command.startsWith("schema fetch")) {
+    const schemaId = command.split(/\s+/).slice(2).join(" ") || "officegen.ir.document@1.2";
+    return `officegen schema get ${schemaId}${agent} --json`;
+  }
+  if (command === "schema") return `officegen schema list${agent} --json`;
+  return undefined;
 }

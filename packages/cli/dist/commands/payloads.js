@@ -36,14 +36,16 @@ export function capabilitiesPayload(context) {
             security: entry.security,
             dryRun: ["edit", "repair"].includes(entry.feature),
             outputPolicy: ["render", "export", "edit", "repair", "asset", "template", "design", "layout"].includes(entry.feature) ? "fail-by-default; use --overwrite explicitly where supported" : undefined,
-            planOnly: false,
+            planOnly: entry.feature === "improve",
             mutatesOffice: ["render", "export", "edit", "repair", "asset", "template", "design", "layout"].includes(entry.feature),
             outputKinds: ["template", "design", "layout"].includes(entry.feature)
                 ? ["office-artifact", "json-plan", "json-report"]
                 : ["render", "export", "edit", "repair", "asset"].includes(entry.feature)
                     ? ["office-or-pdf-artifact", "json-report"]
                     : ["json-report"],
-            sideEffects: ["template", "design", "layout"].includes(entry.feature) ? "writes JSON plans/captures when no Office target/out is supplied; mutates Office files when given a source/target and Office --out path" : undefined,
+            sideEffects: entry.feature === "improve"
+                ? "dry-run suggestions only; never mutates Office files"
+                : ["template", "design", "layout"].includes(entry.feature) ? "writes JSON plans/captures when no Office target/out is supplied; mutates Office files when given a source/target and Office --out path" : undefined,
             supportedFormats: supportedFormatsForFeature(entry.feature),
             formatCapabilities: formatCapabilitiesForFeature(entry.feature),
             requiresNativeRenderer: ["export", "verify", "diff"].includes(entry.feature) ? "only when --mode native or --native is requested" : false,
@@ -330,6 +332,10 @@ export function errorLookup(code) {
 function supportedFormatsForFeature(feature) {
     if (feature === "inspect" || feature === "view" || feature === "diagnose" || feature === "verify")
         return ["pptx", "docx", "xlsx", "pdf"];
+    if (feature === "critique" || feature === "improve")
+        return ["pptx", "docx", "xlsx"];
+    if (feature === "benchmark")
+        return ["json", "pptx", "docx", "xlsx", "pdf"];
     if (feature === "render")
         return ["pptx", "docx", "xlsx", "pdf"];
     if (feature === "edit")
@@ -366,6 +372,12 @@ function formatCapabilitiesForFeature(feature) {
     }
     if (feature === "verify")
         return { native: "optional-gated", visual: "approximate unless trusted native renderer is enabled" };
+    if (feature === "critique")
+        return { pptx: { businessQualityLint: true }, docx: { structureQualityLint: true }, xlsx: { dashboardQualityLint: true } };
+    if (feature === "improve")
+        return { planOnly: true, mutatesOffice: false };
+    if (feature === "benchmark")
+        return { corpusFiles: "external-manifest-only", mutatesOffice: false };
     return undefined;
 }
 function knownLimitationsForFeature(feature) {
@@ -383,14 +395,55 @@ function designStrategyOption(context) {
     const value = optionValue(context.argv, "--strategy");
     return value === "theme-only" || value === "faithful" || value === "inspired" ? value : "inspired";
 }
+async function maybeWriteReport(context, payload, sourceCommand) {
+    const reportOut = optionValue(context.argv, "--report-out");
+    const limited = applyOutputProjection(context, payload);
+    if (!reportOut)
+        return limited;
+    const reportPath = await validateOutputPath(context, reportOut);
+    await fs.mkdir(path.dirname(reportPath), { recursive: true });
+    await fs.writeFile(reportPath, `${JSON.stringify(limited, null, 2)}\n`, "utf8");
+    return {
+        ...(asRecord(limited)),
+        reportOut: reportPath,
+        artifacts: [
+            ...asArray(asRecord(limited).artifacts),
+            { path: reportPath, exists: true, kind: "report", format: "json", sourceCommand }
+        ]
+    };
+}
+function applyOutputProjection(context, payload) {
+    const objectMapLimit = numberOption(context, "--object-map-limit");
+    const fields = optionValue(context.argv, "--fields")?.split(",").map((field) => field.trim()).filter(Boolean);
+    let result = payload;
+    if (objectMapLimit !== undefined && isPlainObject(result) && Array.isArray(result.objectMap)) {
+        result = { ...result, objectMap: result.objectMap.slice(0, objectMapLimit), objectMapTruncated: result.objectMap.length > objectMapLimit };
+    }
+    if (fields?.length && isPlainObject(result)) {
+        const projected = {};
+        for (const field of fields)
+            if (field in result)
+                projected[field] = result[field];
+        result = {
+            schema: typeof result.schema === "string" ? result.schema : "officegen.projected-result@2.3",
+            projectedFields: fields,
+            ...projected
+        };
+    }
+    return result;
+}
+function isPlainObject(value) {
+    return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
 export async function inspectPayload(context) {
     const input = requireInput(context, 3, "inspect");
-    return inspect(await validateInputPath(context, input), withFormatConfig(context, {
+    const result = await inspect(await validateInputPath(context, input), withFormatConfig(context, {
         depth: optionValue(context.argv, "--depth") ?? "summary",
         structure: hasFlag(context.argv, "--structure"),
         sheet: optionValue(context.argv, "--sheet"),
         range: optionValue(context.argv, "--range")
     }));
+    return maybeWriteReport(context, result, "inspect");
 }
 export async function viewPayload(context) {
     const input = requireInput(context, 3, "view");
@@ -414,9 +467,9 @@ export async function viewPayload(context) {
         await fs.mkdir(outDir, { recursive: true });
         await Promise.all(result.pages.map((page) => fs.writeFile(path.join(outDir, `page-${String(page.page).padStart(3, "0")}.${page.format}`), page.content, "utf8")));
         await fs.writeFile(path.join(outDir, "object-map.json"), `${JSON.stringify(result.objectMap, null, 2)}\n`, "utf8");
-        return { ...result, artifacts: [{ path: out }], pages: result.pages.map((page) => ({ ...page, content: undefined })) };
+        return maybeWriteReport(context, { ...result, artifacts: [{ path: out, exists: true, kind: "view", sourceCommand: "view" }], pages: result.pages.map((page) => ({ ...page, content: undefined })) }, "view");
     }
-    return result;
+    return maybeWriteReport(context, result, "view");
 }
 export async function editPayload(context) {
     const input = requireInput(context, 3, "edit");
@@ -541,15 +594,18 @@ export async function diagnosePayload(context) {
 }
 export async function verifyPayload(context) {
     const input = requireInput(context, 3, "verify");
-    return verify(await validateInputPath(context, input), withFormatConfig(context, {
+    const reportOut = optionValue(context.argv, "--report-out") ?? optionValue(context.argv, "--out");
+    const result = await verify(await validateInputPath(context, input), withFormatConfig(context, {
         native: hasFlag(context.argv, "--native"),
         visual: hasFlag(context.argv, "--visual"),
-        out: await validatedOutOption(context),
+        out: reportOut ? await validateOutputPath(context, reportOut) : undefined,
         formulas: hasFlag(context.argv, "--formulas"),
         namedRanges: hasFlag(context.argv, "--named-ranges"),
         externalLinks: hasFlag(context.argv, "--external-links"),
-        protectedSheets: hasFlag(context.argv, "--protected-sheets")
+        protectedSheets: hasFlag(context.argv, "--protected-sheets"),
+        timeoutMs: numberOption(context, "--timeout-ms")
     }));
+    return maybeWriteReport(context, result, "verify");
 }
 export async function repairPayload(context) {
     const input = requireInput(context, 3, "repair");
@@ -572,11 +628,185 @@ export async function diffPayload(context) {
             message: "diff requires before and after input files."
         }, 2);
     }
-    return diffDocuments(await validateInputPath(context, before), await validateInputPath(context, after), withFormatConfig(context, {
+    const result = await diffDocuments(await validateInputPath(context, before), await validateInputPath(context, after), withFormatConfig(context, {
         visual: hasFlag(context.argv, "--visual"),
         native: hasFlag(context.argv, "--native"),
         maxPages: numberOption(context, "--max-pages")
     }));
+    return maybeWriteReport(context, result, "diff");
+}
+export async function critiquePayload(context) {
+    const input = requireInput(context, 3, "critique");
+    const profile = optionValue(context.argv, "--profile") ?? "business";
+    const inputPath = await validateInputPath(context, input);
+    const inspected = await inspect(inputPath, withFormatConfig(context, {
+        depth: "summary",
+        structure: true,
+        sheet: optionValue(context.argv, "--sheet"),
+        range: optionValue(context.argv, "--range")
+    }));
+    const trusted = asRecord(inspected.trusted);
+    const summary = asRecord(trusted.summary);
+    const findings = critiqueFindings(String(trusted.format ?? path.extname(inputPath).slice(1)), summary, asRecord(inspected.untrusted), inspected.objectMap, profile);
+    const score = Number(Math.max(0, 1 - findings.reduce((sum, finding) => sum + severityPenalty(String(asRecord(finding).severity)), 0)).toFixed(2));
+    const result = {
+        schema: "officegen.critique.result@2.3",
+        profile,
+        input: inputPath,
+        format: trusted.format,
+        score,
+        readiness: findings.some((finding) => asRecord(finding).severity === "error") ? "blocked" : findings.length ? "warning" : "pass",
+        findings,
+        suggestedOps: findings.map((finding) => asRecord(finding).suggestedOp).filter(Boolean)
+    };
+    return maybeWriteReport(context, result, "critique");
+}
+export async function improvePayload(context) {
+    const input = requireInput(context, 3, "improve");
+    if (!hasFlag(context.argv, "--dry-run")) {
+        throw new CliFailure({
+            code: "SCHEMA_INVALID",
+            command: "improve",
+            message: "improve is suggestion-only in v2.3.0 and requires --dry-run."
+        }, 2);
+    }
+    const inputPath = await validateInputPath(context, input);
+    const inspected = await inspect(inputPath, withFormatConfig(context, { depth: "summary", structure: true }));
+    const trusted = asRecord(inspected.trusted);
+    const critique = {
+        findings: critiqueFindings(String(trusted.format), asRecord(trusted.summary), asRecord(inspected.untrusted), inspected.objectMap, optionValue(context.argv, "--profile") ?? "business")
+    };
+    const suggestions = asArray(critique.findings).map((finding) => {
+        const record = asRecord(finding);
+        return {
+            findingCode: record.code,
+            reason: record.repair ?? record.message,
+            dryRunOnly: true,
+            suggestedOps: record.suggestedOp ? [record.suggestedOp] : []
+        };
+    });
+    return maybeWriteReport(context, {
+        schema: "officegen.improve.plan@2.3",
+        input,
+        planOnly: true,
+        mutatesOffice: false,
+        suggestions
+    }, "improve");
+}
+function critiqueFindings(format, summary, untrusted, objectMap, profile) {
+    const findings = [];
+    if (format === "pptx") {
+        const slides = Number(summary.slides ?? 0);
+        const assets = Number(summary.assets ?? 0);
+        const charts = Number(summary.charts ?? 0);
+        const textObjects = Number(summary.textObjects ?? objectMap.length);
+        if (slides > 1 && assets === 0)
+            findings.push(qualityFinding("PPTX_ASSETS_NONE", "warning", "Deck has no image/logo assets; branded business decks usually need at least one visual anchor.", "Add logo/image blocks or run scaffold with a business scenario."));
+        if (/kpi|dashboard|board|sales|business/i.test(profile) && charts === 0)
+            findings.push(qualityFinding("PPTX_CHARTS_NONE", "warning", "Business/KPI deck has no charts.", "Add chart blocks or use chartData template bindings."));
+        if (slides > 0 && textObjects / slides > 18)
+            findings.push(qualityFinding("PPTX_TEXT_DENSITY_HIGH", "warning", "Average text object density is high; slide readability may be poor.", "Split dense slides or run layout repair/fit-text."));
+    }
+    else if (format === "xlsx") {
+        const charts = Number(summary.charts ?? 0);
+        const formulas = Number(summary.formulas ?? 0);
+        const tables = Number(summary.tables ?? 0);
+        if (/dashboard|kpi|business/i.test(profile) && charts === 0)
+            findings.push(qualityFinding("XLSX_DASHBOARD_CHARTS_NONE", "warning", "Workbook profile expects dashboard charts, but no chart objects were detected.", "Add chart sheets or use xlsx chart update workflow."));
+        if (tables === 0)
+            findings.push(qualityFinding("XLSX_TABLES_NONE", "warning", "Workbook has no Excel table objects.", "Use xlsx.writeTable/updateTableRows for structured data."));
+        if (formulas === 0)
+            findings.push(qualityFinding("XLSX_FORMULAS_NONE", "info", "No formulas were detected; confirm this is intended for generated workbooks.", "Inspect with --sheet/--range and add formulas where calculations are expected."));
+    }
+    else if (format === "docx") {
+        const structure = asRecord(untrusted.structureMap);
+        const headings = Array.isArray(structure.headingTree) ? structure.headingTree : [];
+        const duplicateHeading = headings.some((heading, index) => index > 0 && JSON.stringify(heading) === JSON.stringify(headings[index - 1]));
+        if (duplicateHeading)
+            findings.push(qualityFinding("DOCX_REPEATED_HEADINGS", "warning", "Adjacent repeated headings were detected.", "Collapse duplicate headings or adjust generated outline."));
+        if (Number(summary.headers ?? 0) === 0 && /proposal|report|business/i.test(profile))
+            findings.push(qualityFinding("DOCX_HEADERS_NONE", "info", "Business DOCX has no header parts.", "Add header/footer if the deliverable needs a formal template."));
+    }
+    return findings;
+}
+function qualityFinding(code, severity, message, repair) {
+    return { code, severity, category: "quality", message, repair, suggestedOp: { reason: repair, dryRunOnly: true } };
+}
+function severityPenalty(severity) {
+    if (severity === "error")
+        return 0.35;
+    if (severity === "warning")
+        return 0.12;
+    return 0.03;
+}
+export async function benchmarkPayload(context, subcommand) {
+    if (subcommand === "compare")
+        return benchmarkComparePayload(context);
+    const manifestPath = optionValue(context.argv, "--manifest") ?? "benchmarks/office-corpus/manifest.json";
+    const manifest = asRecord(await readInputJson(context, manifestPath));
+    const storageRoot = path.resolve(context.cwd, String(manifest.storageRoot ?? ".officegen/benchmark-corpus"));
+    const entries = Array.isArray(manifest.documents) ? manifest.documents : Array.isArray(manifest.files) ? manifest.files : Array.isArray(manifest.items) ? manifest.items : [];
+    const results = [];
+    for (const item of entries.map(asRecord)) {
+        const ext = typeof item.kind === "string" ? `.${item.kind}` : "";
+        const relative = String(item.path ?? item.fileName ?? `${String(item.id ?? "")}${ext}`);
+        const filePath = path.resolve(storageRoot, relative);
+        const startedAt = new Date().toISOString();
+        try {
+            await fs.stat(filePath);
+            const inspected = await inspect(filePath, withFormatConfig(context, { depth: "summary", structure: true }));
+            const verified = await verify(filePath, withFormatConfig(context, { timeoutMs: numberOption(context, "--timeout-ms") ?? 60000 }));
+            const critiqued = await critiqueResultForBenchmark(context, filePath);
+            results.push({ id: item.id ?? relative, filePath, ok: true, startedAt, inspect: inspected.trusted.summary, verify: { score: verified.score, readiness: verified.readiness, partial: verified.partial }, critique: { score: critiqued.score, readiness: critiqued.readiness } });
+        }
+        catch (error) {
+            results.push({ id: item.id ?? relative, filePath, ok: false, startedAt, error: error instanceof Error ? error.message : String(error) });
+        }
+    }
+    const result = {
+        schema: "officegen.benchmark.run.result@2.3",
+        manifestPath,
+        storageRoot,
+        count: results.length,
+        okCount: results.filter((entry) => entry.ok).length,
+        results
+    };
+    return maybeWriteReport(context, result, "benchmark run");
+}
+async function critiqueResultForBenchmark(context, filePath) {
+    const inspected = await inspect(filePath, withFormatConfig(context, { depth: "summary", structure: true }));
+    const trusted = asRecord(inspected.trusted);
+    const findings = critiqueFindings(String(trusted.format), asRecord(trusted.summary), asRecord(inspected.untrusted), inspected.objectMap, "benchmark");
+    const score = Number(Math.max(0, 1 - findings.reduce((sum, finding) => sum + severityPenalty(String(asRecord(finding).severity)), 0)).toFixed(2));
+    return { score, readiness: findings.length ? "warning" : "pass", findings };
+}
+async function benchmarkComparePayload(context) {
+    const args = positionalArgs(context.argv, 4);
+    const beforePath = args[0] ?? optionValue(context.argv, "--from");
+    const afterPath = args[1] ?? optionValue(context.argv, "--to");
+    if (!beforePath || !afterPath) {
+        throw new CliFailure({ code: "SCHEMA_INVALID", command: "benchmark compare", message: "benchmark compare requires before and after JSON reports." }, 2);
+    }
+    const before = asRecord(await readInputJson(context, beforePath));
+    const after = asRecord(await readInputJson(context, afterPath));
+    const beforeResults = Array.isArray(before.results) ? before.results.map(asRecord) : [];
+    const afterResults = Array.isArray(after.results) ? after.results.map(asRecord) : [];
+    const beforeScores = beforeResults.map((entry) => Number(asRecord(entry.verify).score ?? 0)).filter(Number.isFinite);
+    const afterScores = afterResults.map((entry) => Number(asRecord(entry.verify).score ?? 0)).filter(Number.isFinite);
+    const result = {
+        schema: "officegen.benchmark.compare.result@2.3",
+        before: beforePath,
+        after: afterPath,
+        beforeAverageVerifyScore: average(beforeScores),
+        afterAverageVerifyScore: average(afterScores),
+        delta: Number((average(afterScores) - average(beforeScores)).toFixed(4)),
+        beforeOkCount: beforeResults.filter((entry) => entry.ok).length,
+        afterOkCount: afterResults.filter((entry) => entry.ok).length
+    };
+    return maybeWriteReport(context, result, "benchmark compare");
+}
+function average(values) {
+    return values.length ? Number((values.reduce((sum, value) => sum + value, 0) / values.length).toFixed(4)) : 0;
 }
 export async function runPayload(context) {
     const planPath = positionalArgs(context.argv, 3)[0];
@@ -597,8 +827,24 @@ export async function runPayload(context) {
         }, 2);
     }
     const folder = await createRunFolder(context.config);
+    const logJsonl = optionValue(context.argv, "--log-jsonl") ? await validateOutputPath(context, optionValue(context.argv, "--log-jsonl")) : undefined;
+    const manifestOut = optionValue(context.argv, "--manifest") ? await validateOutputPath(context, optionValue(context.argv, "--manifest")) : undefined;
+    const summaryOut = optionValue(context.argv, "--summary") ? await validateOutputPath(context, optionValue(context.argv, "--summary")) : undefined;
+    const outputRoot = optionValue(context.argv, "--output-root") ? await validateOutputPath(context, optionValue(context.argv, "--output-root"), { directory: true }) : undefined;
+    const denyOutsideOutputRoot = hasFlag(context.argv, "--deny-outside-output-root");
+    if (logJsonl)
+        await fs.mkdir(path.dirname(logJsonl), { recursive: true });
+    if (manifestOut)
+        await fs.mkdir(path.dirname(manifestOut), { recursive: true });
+    if (summaryOut)
+        await fs.mkdir(path.dirname(summaryOut), { recursive: true });
+    if (outputRoot)
+        await fs.mkdir(outputRoot, { recursive: true });
+    const expectedArtifacts = await readExpectedArtifacts(context);
+    const beforeOutputRoot = outputRoot ? await snapshotFiles(outputRoot) : new Set();
     const stepOutputs = new Map();
     const results = [];
+    const artifacts = [];
     const validatedPlanPath = await validateInputPath(context, planPath);
     await fs.copyFile(validatedPlanPath, path.join(folder.irDir, "plan.json"));
     await updateManifest(folder, (manifest) => {
@@ -608,12 +854,15 @@ export async function runPayload(context) {
         const id = String(step.id ?? `step-${index + 1}`);
         const command = String(step.command ?? step.type ?? "");
         const startedAt = new Date().toISOString();
+        await appendRunJsonl(logJsonl, { event: "step.start", id, command, startedAt });
         await appendTrace(folder, { event: "step.start", id, command, startedAt });
         const resultPath = path.join(folder.logsDir, `${String(index + 1).padStart(2, "0")}-${safeFileToken(id)}.result.json`);
         try {
-            const result = await executeRunStep(context, folder, step, stepOutputs, index);
+            const result = await executeRunStep(context, folder, step, stepOutputs, index, outputRoot, denyOutsideOutputRoot);
             await fs.writeFile(resultPath, `${JSON.stringify(result, null, 2)}\n`, "utf8");
             const resultOut = typeof result.out === "string" ? String(result.out) : undefined;
+            const resultArtifacts = await collectResultArtifacts(result, command, inputArtifactForStep(step));
+            artifacts.push(...resultArtifacts);
             if (resultOut) {
                 stepOutputs.set(id, resultOut);
                 await updateManifest(folder, (manifest) => {
@@ -628,31 +877,82 @@ export async function runPayload(context) {
                     });
                 }
             }
-            results.push({ id, command, resultPath, ok: true, ...(resultOut ? { out: resultOut } : {}) });
-            await appendTrace(folder, { event: "step.end", id, command, ok: true, resultPath, ...(resultOut ? { out: resultOut } : {}), finishedAt: new Date().toISOString() });
+            const finishedAt = new Date().toISOString();
+            const stepRecord = { id, command, resultPath, ok: true, exitCode: 0, envelopeOk: true, startedAt, finishedAt, ...(resultOut ? { out: resultOut } : {}), artifacts: resultArtifacts };
+            results.push(stepRecord);
+            await appendRunJsonl(logJsonl, { event: "step.end", ...stepRecord });
+            await appendTrace(folder, { event: "step.end", id, command, ok: true, resultPath, ...(resultOut ? { out: resultOut } : {}), finishedAt });
         }
         catch (error) {
             const failure = runStepFailurePayload(id, command, error);
             await fs.writeFile(resultPath, `${JSON.stringify(failure, null, 2)}\n`, "utf8");
-            results.push({ id, command, resultPath, ok: false });
-            await appendTrace(folder, { event: "step.end", id, command, ok: false, resultPath, error: failure.error, finishedAt: new Date().toISOString() });
+            const finishedAt = new Date().toISOString();
+            results.push({ id, command, resultPath, ok: false, exitCode: 1, envelopeOk: false, startedAt, finishedAt });
+            await appendRunJsonl(logJsonl, { event: "step.end", id, command, ok: false, exitCode: 1, envelopeOk: false, resultPath, error: failure.error, finishedAt });
+            await appendTrace(folder, { event: "step.end", id, command, ok: false, resultPath, error: failure.error, finishedAt });
             throw error;
         }
     }
+    const missingExpected = await missingExpectedArtifacts(expectedArtifacts);
+    const afterOutputRoot = outputRoot ? await snapshotFiles(outputRoot) : new Set();
+    const unexpectedArtifacts = outputRoot ? [...afterOutputRoot].filter((file) => !beforeOutputRoot.has(file) && !expectedArtifacts.some((artifact) => path.resolve(String(artifact.path)) === file)) : [];
+    if (denyOutsideOutputRoot && outputRoot) {
+        const outside = artifacts.filter((artifact) => typeof artifact.path === "string" && isOutside(outputRoot, String(artifact.path)));
+        if (outside.length) {
+            throw new CliFailure({
+                code: "SECURITY_PATH_OUTSIDE_ROOT",
+                command: "run",
+                message: "Run produced artifacts outside --output-root.",
+                details: { artifacts: outside }
+            }, 4);
+        }
+    }
+    const runManifest = {
+        schema: "officegen.run.manifest@2.3",
+        runId: folder.runId,
+        planPath: validatedPlanPath,
+        root: folder.root,
+        outputRoot,
+        steps: results,
+        artifacts,
+        expectedArtifacts,
+        missingExpectedArtifacts: missingExpected,
+        unexpectedArtifacts,
+        logJsonl,
+        tracePath: folder.tracePath
+    };
+    if (manifestOut)
+        await fs.writeFile(manifestOut, `${JSON.stringify(runManifest, null, 2)}\n`, "utf8");
+    if (summaryOut)
+        await fs.writeFile(summaryOut, runSummaryMarkdown(runManifest), "utf8");
+    if (missingExpected.length) {
+        throw new CliFailure({
+            code: "EDIT_TRANSACTION_FAILED",
+            command: "run",
+            message: "Run completed steps but one or more expected artifacts were not created.",
+            details: { artifacts: missingExpected, manifestPath: manifestOut ?? folder.manifestPath }
+        }, 3);
+    }
     return {
-        schema: "officegen.run.result@1.2",
+        schema: "officegen.run.result@2.3",
         runId: folder.runId,
         root: folder.root,
         manifestPath: folder.manifestPath,
+        manifestOut,
+        summaryOut,
+        logJsonl,
         tracePath: folder.tracePath,
         steps: results,
+        artifacts,
+        expectedArtifacts,
+        unexpectedArtifacts,
         caveats: ["Run executes deterministic built-in steps and can invoke native verification/export only when the active security policy enables renderers."]
     };
 }
-async function executeRunStep(context, folder, step, stepOutputs, index) {
+async function executeRunStep(context, folder, step, stepOutputs, index, outputRoot, denyOutsideOutputRoot = false) {
     const command = String(step.command ?? step.type ?? "");
     const input = await resolveRunInput(context, step.input, stepOutputs);
-    const out = await resolveRunOutput(context, folder, step, index);
+    const out = await resolveRunOutput(context, folder, step, index, outputRoot, denyOutsideOutputRoot);
     if (command === "inspect")
         return inspect(requireRunInput(command, input), withFormatConfig(context, { depth: step.depth ?? "summary" }));
     if (command === "diagnose")
@@ -714,7 +1014,11 @@ async function resolveRunInput(context, value, stepOutputs) {
         return stepOutputs.get(value.slice(1));
     return validateInputPath(context, value);
 }
-async function resolveRunOutput(context, folder, step, index) {
+async function resolveRunOutput(context, folder, step, index, outputRoot, denyOutsideOutputRoot = false) {
+    const command = String(step.command ?? step.type ?? "artifact");
+    if (typeof step.out !== "string" && outputRoot && ["render", "edit", "export"].includes(command)) {
+        return path.join(outputRoot, `${String(index + 1).padStart(2, "0")}-${safeFileToken(String(step.id ?? command))}.${command === "export" ? String(step.to ?? "pdf") : String(step.target ?? "pptx")}`);
+    }
     if (typeof step.out !== "string")
         return undefined;
     if (step.out.startsWith("$run/")) {
@@ -730,7 +1034,104 @@ async function resolveRunOutput(context, folder, step, index) {
         }
         return candidate;
     }
-    return validateOutputPath(context, step.out);
+    const out = await validateOutputPath(context, step.out);
+    if (denyOutsideOutputRoot && outputRoot && isOutside(outputRoot, out)) {
+        throw new CliFailure({
+            code: "SECURITY_PATH_OUTSIDE_ROOT",
+            command: "run",
+            message: "run step output must stay inside --output-root when --deny-outside-output-root is set.",
+            details: { out: step.out, outputRoot }
+        }, 4);
+    }
+    return out;
+}
+async function appendRunJsonl(filePath, record) {
+    if (!filePath)
+        return;
+    await fs.appendFile(filePath, `${JSON.stringify(record)}\n`, "utf8");
+}
+async function readExpectedArtifacts(context) {
+    const expectedPath = optionValue(context.argv, "--expected-artifacts");
+    if (!expectedPath)
+        return [];
+    const raw = await readInputJson(context, expectedPath);
+    const items = Array.isArray(raw) ? raw : Array.isArray(asRecord(raw).artifacts) ? asRecord(raw).artifacts : [];
+    return items.map((item) => {
+        if (typeof item === "string")
+            return { path: path.resolve(context.cwd, item), expected: true };
+        const record = asRecord(item);
+        return { ...record, path: path.resolve(context.cwd, String(record.path ?? "")), expected: true };
+    });
+}
+async function missingExpectedArtifacts(expected) {
+    const missing = [];
+    for (const artifact of expected) {
+        const filePath = String(artifact.path ?? "");
+        const record = await artifactRecord(filePath, String(artifact.kind ?? "expected"), String(artifact.format ?? path.extname(filePath).slice(1)), "run");
+        if (!record.exists)
+            missing.push({ ...artifact, ...record, reason: "expected artifact was not created" });
+    }
+    return missing;
+}
+async function collectResultArtifacts(result, command, input) {
+    const record = asRecord(result);
+    const artifacts = [];
+    for (const item of asArray(record.artifacts).map(asRecord)) {
+        if (typeof item.path === "string") {
+            artifacts.push(await artifactRecord(item.path, String(item.kind ?? "artifact"), String(item.format ?? path.extname(item.path).slice(1)), command, input));
+        }
+    }
+    if (typeof record.out === "string" && !artifacts.some((artifact) => artifact.path === record.out)) {
+        artifacts.push(await artifactRecord(record.out, "output", String(record.format ?? path.extname(record.out).slice(1)), command, input));
+    }
+    return artifacts;
+}
+async function artifactRecord(filePath, kind, format, createdByCommand, input) {
+    try {
+        const stats = await fs.stat(filePath);
+        const sha256 = stats.isFile() ? await sha256File(filePath).catch(() => undefined) : undefined;
+        return { path: filePath, exists: true, bytes: stats.size, sha256, kind, format, createdByCommand, input };
+    }
+    catch {
+        return { path: filePath, exists: false, kind, format, createdByCommand, input, reason: "artifact does not exist" };
+    }
+}
+function inputArtifactForStep(step) {
+    return typeof step.input === "string" ? step.input : undefined;
+}
+async function snapshotFiles(root) {
+    const files = new Set();
+    async function walk(dir) {
+        const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+        for (const entry of entries) {
+            const full = path.join(dir, entry.name);
+            if (entry.isDirectory())
+                await walk(full);
+            else
+                files.add(path.resolve(full));
+        }
+    }
+    await walk(root);
+    return files;
+}
+function isOutside(root, filePath) {
+    const relative = path.relative(path.resolve(root), path.resolve(filePath));
+    return relative.startsWith("..") || path.isAbsolute(relative);
+}
+function runSummaryMarkdown(manifest) {
+    const lines = [
+        "# officegen run summary",
+        "",
+        `- runId: ${manifest.runId}`,
+        `- steps: ${manifest.steps?.length ?? 0}`,
+        `- artifacts: ${manifest.artifacts?.length ?? 0}`,
+        `- missing expected artifacts: ${manifest.missingExpectedArtifacts?.length ?? 0}`,
+        `- unexpected artifacts: ${manifest.unexpectedArtifacts?.length ?? 0}`,
+        "",
+        "## Steps",
+        ...(manifest.steps ?? []).map((step) => `- ${step.ok ? "ok" : "failed"} ${step.id}: ${step.command}`)
+    ];
+    return `${lines.join("\n")}\n`;
 }
 function requireRunInput(command, input) {
     if (input)
@@ -836,8 +1237,9 @@ export async function templatePayload(context, subcommand) {
         }
         catch (error) {
             if (error instanceof TemplateFillError) {
+                const validationCode = typeof error.details.validationCode === "string" ? error.details.validationCode : undefined;
                 throw new CliFailure({
-                    code: "TEMPLATE_FILL_FAILED",
+                    code: validationCode === "TEMPLATE_VALIDATE_FAILED" ? "TEMPLATE_VALIDATE_FAILED" : "TEMPLATE_FILL_FAILED",
                     category: "runtime",
                     severity: "error",
                     command: "template fill",

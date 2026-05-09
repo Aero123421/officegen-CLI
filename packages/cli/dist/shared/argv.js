@@ -13,6 +13,9 @@ export const VALUE_OPTIONS = new Set([
     "--views",
     "--include",
     "--slides",
+    "--pages",
+    "--object-map-limit",
+    "--fields",
     "--depth",
     "--role",
     "--name",
@@ -28,7 +31,15 @@ export const VALUE_OPTIONS = new Set([
     "--trust",
     "--allow-root",
     "--capabilities-hash",
-    "--json-budget-bytes"
+    "--json-budget-bytes",
+    "--report-out",
+    "--log-jsonl",
+    "--manifest",
+    "--summary",
+    "--output-root",
+    "--expected-artifacts",
+    "--timeout-ms",
+    "--profile"
 ]);
 export function commandFromArgv(argv) {
     const parts = [];

@@ -19,6 +19,9 @@ export declare function diagnosePayload(context: RuntimeContext): Promise<unknow
 export declare function verifyPayload(context: RuntimeContext): Promise<unknown>;
 export declare function repairPayload(context: RuntimeContext): Promise<unknown>;
 export declare function diffPayload(context: RuntimeContext): Promise<unknown>;
+export declare function critiquePayload(context: RuntimeContext): Promise<unknown>;
+export declare function improvePayload(context: RuntimeContext): Promise<unknown>;
+export declare function benchmarkPayload(context: RuntimeContext, subcommand?: string): Promise<unknown>;
 export declare function runPayload(context: RuntimeContext): Promise<unknown>;
 export declare function assetPayload(context: RuntimeContext, subcommand?: string): Promise<unknown>;
 export declare function chartPayload(context: RuntimeContext): Promise<unknown>;

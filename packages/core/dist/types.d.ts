@@ -1,5 +1,5 @@
 export declare const OFFICEGEN_SCHEMA_VERSION = "1.2";
-export declare const OFFICEGEN_CLI_VERSION = "2.2.0";
+export declare const OFFICEGEN_CLI_VERSION = "2.3.0";
 export declare const SCHEMA_REGISTRY_VERSION = "1.2.0";
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | {
@@ -9,7 +9,7 @@ export type JsonObject = {
     [key: string]: JsonValue;
 };
 export type OfficegenProfile = "substrate" | "authoring" | "enterprise";
-export type FeatureName = "capabilities" | "help" | "config" | "doctor" | "inspect" | "view" | "edit" | "render" | "scaffold" | "export" | "validate" | "verify" | "diagnose" | "repair" | "diff" | "run" | "asset" | "chart" | "diagram" | "schema" | "errors" | "template" | "design" | "layout" | "agent" | "mcp" | "renderer" | "plugin";
+export type FeatureName = "capabilities" | "help" | "config" | "doctor" | "inspect" | "view" | "edit" | "render" | "scaffold" | "export" | "validate" | "verify" | "diagnose" | "repair" | "diff" | "run" | "critique" | "improve" | "benchmark" | "asset" | "chart" | "diagram" | "schema" | "errors" | "template" | "design" | "layout" | "agent" | "mcp" | "renderer" | "plugin";
 export type NetworkPolicy = "deny" | "allow";
 export type ProcessPolicy = "deny" | "allow";
 export type OutOfProjectPolicy = "deny" | "warn" | "allow";
@@ -80,7 +80,7 @@ export interface ConfigLoadOptions {
     overrides?: OfficegenConfigInput;
 }
 export type ErrorSeverity = "info" | "warning" | "error" | "critical";
-export type OfficegenErrorCode = "FEATURE_DISABLED" | "FEATURE_HIDDEN_FROM_AGENT" | "UNKNOWN_COMMAND" | "UNKNOWN_OPTION" | "CAPABILITIES_STALE" | "INPUT_NOT_FOUND" | "INPUT_PARSE_ERROR" | "SCHEMA_INVALID" | "SCHEMA_DEPRECATED" | "SCHEMA_MIGRATION_REQUIRED" | "SECURITY_PATH_OUTSIDE_ROOT" | "SECURITY_ABSOLUTE_OUT_DENIED" | "SECURITY_SYMLINK_DENIED" | "SECURITY_HARDLINK_DENIED" | "SECURITY_INPUT_TOO_LARGE" | "SECURITY_EXTERNAL_PROCESS_DENIED" | "SECURITY_ZIP_BOMB_DETECTED" | "SECURITY_XML_ENTITY_DENIED" | "SECURITY_MACRO_DETECTED" | "PLUGIN_NOT_TRUSTED" | "PLUGIN_HASH_MISMATCH" | "PLUGIN_PERMISSION_DENIED" | "RENDERER_NOT_TRUSTED" | "SELECTOR_NOT_FOUND" | "SELECTOR_AMBIGUOUS" | "EDIT_TRANSACTION_FAILED" | "IDEMPOTENCY_REPLAY" | "TEXT_OVERFLOW" | "IMAGE_MISSING" | "ASSET_UNSUPPORTED_FORMAT" | "CHART_SPEC_INVALID" | "DIAGRAM_SPEC_INVALID" | "VIEW_FIDELITY_LOW" | "RENDER_FONT_UNSUPPORTED" | "TARGET_EXTENSION_MISMATCH" | "UNSUPPORTED_FORMAT" | "TEMPLATE_FILL_FAILED" | "EXPORT_UNSUPPORTED";
+export type OfficegenErrorCode = "FEATURE_DISABLED" | "FEATURE_HIDDEN_FROM_AGENT" | "UNKNOWN_COMMAND" | "UNKNOWN_OPTION" | "CAPABILITIES_STALE" | "INPUT_NOT_FOUND" | "INPUT_PARSE_ERROR" | "SCHEMA_INVALID" | "SCHEMA_DEPRECATED" | "SCHEMA_MIGRATION_REQUIRED" | "SECURITY_PATH_OUTSIDE_ROOT" | "SECURITY_ABSOLUTE_OUT_DENIED" | "SECURITY_SYMLINK_DENIED" | "SECURITY_HARDLINK_DENIED" | "SECURITY_INPUT_TOO_LARGE" | "SECURITY_EXTERNAL_PROCESS_DENIED" | "SECURITY_ZIP_BOMB_DETECTED" | "SECURITY_XML_ENTITY_DENIED" | "SECURITY_MACRO_DETECTED" | "PLUGIN_NOT_TRUSTED" | "PLUGIN_HASH_MISMATCH" | "PLUGIN_PERMISSION_DENIED" | "RENDERER_NOT_TRUSTED" | "SELECTOR_NOT_FOUND" | "SELECTOR_AMBIGUOUS" | "EDIT_TRANSACTION_FAILED" | "IDEMPOTENCY_REPLAY" | "TEXT_OVERFLOW" | "IMAGE_MISSING" | "ASSET_UNSUPPORTED_FORMAT" | "CHART_SPEC_INVALID" | "DIAGRAM_SPEC_INVALID" | "VIEW_FIDELITY_LOW" | "RENDER_FONT_UNSUPPORTED" | "TARGET_EXTENSION_MISMATCH" | "UNSUPPORTED_FORMAT" | "TEMPLATE_FILL_FAILED" | "TEMPLATE_VALIDATE_FAILED" | "EXPORT_UNSUPPORTED";
 export interface ErrorCatalogEntry {
     code: OfficegenErrorCode;
     category: string;

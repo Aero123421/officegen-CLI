@@ -3,7 +3,7 @@ import { OFFICEGEN_CLI_VERSION } from "../../../core/dist/index.js";
 import { commandFromArgv, positionalArgs } from "../shared/argv.js";
 import { makeEnvelope, writeResult } from "../shared/envelope.js";
 import { COMMAND_METADATA, metadataFor } from "../shared/metadata.js";
-import { agentPayload, assetPayload, capabilitiesPayload, chartPayload, configPayload, designPayload, diagnosePayload, diffPayload, diagramPayload, doctorPayload, editPayload, errorInspectPayload, errorsListPayload, exportPayload, groupPayload, helpPayload, inspectPayload, layoutPayload, mcpPayload, pluginPayload, renderPayload, rendererPayload, repairPayload, runPayload, scaffoldPayload, schemaGetPayload, schemaListPayload, schemaMigratePayload, templatePayload, validatePayload, verifyPayload, viewPayload } from "./payloads.js";
+import { agentPayload, assetPayload, capabilitiesPayload, chartPayload, configPayload, designPayload, diagnosePayload, diffPayload, critiquePayload, improvePayload, benchmarkPayload, diagramPayload, doctorPayload, editPayload, errorInspectPayload, errorsListPayload, exportPayload, groupPayload, helpPayload, inspectPayload, layoutPayload, mcpPayload, pluginPayload, renderPayload, rendererPayload, repairPayload, runPayload, scaffoldPayload, schemaGetPayload, schemaListPayload, schemaMigratePayload, templatePayload, validatePayload, verifyPayload, viewPayload } from "./payloads.js";
 const leafPayloads = {
     capabilities: capabilitiesPayload,
     help: (ctx) => helpPayload(ctx, positionalArgs(ctx.argv, 3)),
@@ -19,9 +19,12 @@ const leafPayloads = {
     diagnose: diagnosePayload,
     repair: repairPayload,
     diff: diffPayload,
-    run: runPayload
+    run: runPayload,
+    critique: critiquePayload,
+    improve: improvePayload
 };
 const groupPayloads = {
+    benchmark: benchmarkPayload,
     asset: assetPayload,
     chart: chartPayload,
     diagram: diagramPayload,
@@ -45,6 +48,7 @@ export function createProgram(context, stdout, _stderr, now) {
         .allowExcessArguments(true)
         .option("--json", "emit JSON envelope")
         .option("--agent", "filter output for agents")
+        .option("--strict-json", "force JSON-only stdout for agent execution")
         .option("--capabilities-hash <hash>", "expected active capabilities hash")
         .option("--json-budget-bytes <bytes>", "agent JSON output budget")
         .exitOverride();
@@ -81,6 +85,7 @@ export function writeNativeHelp(context, stdout) {
         "Options:",
         "  --json                         emit JSON envelope",
         "  --agent                        filter output for agents",
+        "  --strict-json                  force JSON-only stdout for agent execution",
         "  --capabilities-hash <hash>     warn if adapter capabilities are stale",
         "  --json-budget-bytes <bytes>    cap agent JSON output",
         "  -V, --version",
@@ -273,6 +278,7 @@ function registerSchema(program, context, stdout, now) {
     });
     schema.addCommand(baseCommand("list", "list schemas").action(async () => writeResult(context, makeEnvelope(context, commandFromArgv(context.argv), schemaListPayload(context), now), stdout)));
     schema.addCommand(baseCommand("get", "get schema").action(async () => writeResult(context, makeEnvelope(context, commandFromArgv(context.argv), schemaGetPayload(context), now), stdout)));
+    schema.addCommand(baseCommand("fetch", "alias for schema get").action(async () => writeResult(context, makeEnvelope(context, commandFromArgv(context.argv), schemaGetPayload(context), now), stdout)));
     schema.addCommand(baseCommand("validate", "validate schema").action(async () => writeResult(context, makeEnvelope(context, commandFromArgv(context.argv), await validatePayload(context), now), stdout)));
     schema.addCommand(baseCommand("migrate", "migrate schema").action(async () => writeResult(context, makeEnvelope(context, commandFromArgv(context.argv), await schemaMigratePayload(context), now), stdout)));
     program.addCommand(schema);
@@ -304,11 +310,17 @@ function baseCommand(name, description) {
         .argument("[args...]", "arguments")
         .option("--json", "emit JSON envelope")
         .option("--agent", "filter output for agents")
+        .option("--strict-json", "force JSON-only stdout for agent execution")
         .option("--capabilities-hash <hash>", "expected active capabilities hash")
         .option("--json-budget-bytes <bytes>", "agent JSON output budget")
+        .option("--report-out <path>", "write JSON report for report-style commands")
         .option("--depth <depth>", "inspection depth")
         .option("--format <format>", "view/export format")
         .option("--max-pages <number>", "maximum pages")
+        .option("--slides <range>", "limit PPTX operations to slides")
+        .option("--pages <range>", "limit PDF/page operations to pages")
+        .option("--object-map-limit <number>", "limit object map entries in output")
+        .option("--fields <csv>", "project selected top-level result fields")
         .option("--out <path>", "output path")
         .option("--overwrite", "allow overwriting an existing output")
         .option("--schema <id>", "schema id")
@@ -323,6 +335,7 @@ function baseCommand(name, description) {
         .option("--images", "extract image assets")
         .option("--visual", "include approximate visual diff/regression output")
         .option("--native", "use native renderer when enabled by policy")
+        .option("--timeout-ms <ms>", "per-command timeout budget where supported")
         .option("--structure", "include DOCX structure map")
         .option("--sheet <name>", "limit XLSX inspect to a sheet")
         .option("--range <range>", "limit XLSX inspect to an A1 range")
@@ -332,6 +345,13 @@ function baseCommand(name, description) {
         .option("--named-ranges", "verify XLSX named ranges")
         .option("--external-links", "verify external links")
         .option("--protected-sheets", "verify protected or hidden sheets")
+        .option("--log-jsonl <path>", "write UTF-8 JSONL run log")
+        .option("--manifest <path>", "write run artifact manifest")
+        .option("--summary <path>", "write run Markdown summary")
+        .option("--output-root <path>", "restrict run outputs to a directory")
+        .option("--deny-outside-output-root", "fail run outputs outside --output-root")
+        .option("--expected-artifacts <path>", "JSON list of expected artifacts")
+        .option("--profile <profile>", "critique or scaffold profile")
         .option("--asset <path>", "asset zip path")
         .option("--selector <selector>", "asset or object selector")
         .option("--name <name>", "template, design, plugin, or renderer name")

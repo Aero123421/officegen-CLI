@@ -121,6 +121,9 @@ describe("officegen CLI command surface", () => {
       "repair",
       "diff",
       "run",
+      "critique",
+      "improve",
+      "benchmark",
       "asset",
       "chart",
       "diagram",
@@ -139,6 +142,15 @@ describe("officegen CLI command surface", () => {
     for (const command of commands) {
       expect(envelope.availableCommands, command).toContain(command);
     }
+  });
+
+  it("accepts schema fetch as an alias for schema get", async () => {
+    const captured = await run(["schema", "fetch", "officegen.ir.document@1.2", "--agent", "--json"]);
+    const envelope = parseEnvelope(captured);
+
+    expect(envelope.ok).toBe(true);
+    expect(envelope.result.schema).toBe("officegen.schema.definition@1.2");
+    expect(envelope.result.id).toBe("officegen.ir.document@1.2");
   });
 
   it("writes scaffold IR while still returning a JSON envelope", async () => {
@@ -407,22 +419,35 @@ describe("officegen CLI command surface", () => {
     await writeFile(path.join(cwd, "plan.json"), `${JSON.stringify({
       schema: "officegen.run.plan@1.2",
       steps: [
-        { id: "rendered", command: "render", input: "deck.ir.json", target: "pptx", out: "$run/output/deck.pptx" },
+        { id: "rendered", command: "render", input: "deck.ir.json", target: "pptx", out: ".officegen/outputs/deck.pptx" },
         { id: "inspected", command: "inspect", input: "$rendered", depth: "summary" },
         { id: "viewed", command: "view", input: "$rendered", out: "$run/views/deck" }
       ]
     })}\n`, "utf8");
 
-    const captured = await run(["run", "plan.json", "--json"], cwd);
+    await writeFile(path.join(cwd, "expected.json"), `${JSON.stringify([{ path: ".officegen/outputs/deck.pptx", kind: "office-artifact" }])}\n`, "utf8");
+    const captured = await run([
+      "run", "plan.json",
+      "--output-root", ".officegen/outputs",
+      "--expected-artifacts", "expected.json",
+      "--log-jsonl", ".officegen/run-log.jsonl",
+      "--manifest", ".officegen/run-manifest.json",
+      "--summary", ".officegen/run-summary.md",
+      "--json"
+    ], cwd);
     const envelope = parseEnvelope(captured);
 
     expect(envelope.ok).toBe(true);
-    expect(envelope.result.schema).toBe("officegen.run.result@1.2");
+    expect(envelope.result.schema).toBe("officegen.run.result@2.3");
     expect(envelope.result.steps).toHaveLength(3);
+    expect(envelope.result.logJsonl).toContain("run-log.jsonl");
+    expect(envelope.result.manifestOut).toContain("run-manifest.json");
     expect(envelope.result.manifestPath).toContain("manifest.json");
+    const runManifest = JSON.parse(await readFile(path.join(cwd, ".officegen", "run-manifest.json"), "utf8"));
+    expect(runManifest.missingExpectedArtifacts).toHaveLength(0);
+    expect(await readFile(path.join(cwd, ".officegen", "outputs", "deck.pptx"))).toBeInstanceOf(Buffer);
     const runs = await readdir(path.join(cwd, ".officegen", "runs"));
     const runRoot = path.join(cwd, ".officegen", "runs", runs[0] as string);
-    expect(await readFile(path.join(runRoot, "output", "deck.pptx"))).toBeInstanceOf(Buffer);
     expect(await readFile(path.join(runRoot, "views", "deck", "object-map.json"), "utf8")).toContain("Run body");
   });
 

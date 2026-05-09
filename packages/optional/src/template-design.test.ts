@@ -223,6 +223,37 @@ describe("@officegen/optional PPTX template and design signals", () => {
     await expect(fillTemplate({ ...optional, id: "empty", values: { missing: "value" }, outputPath: outPath }))
       .rejects.toThrow(/no Office edit operations/i);
   });
+
+  it("fails validate-only when the real edit resolver cannot find the mapped selector", async () => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), "officegen-template-validate-selector-"));
+    const deckPath = path.join(cwd, "source.pptx");
+    const outPath = path.join(cwd, "filled.pptx");
+    await writeFile(deckPath, await makePptxFixture());
+    const optional = {
+      cwd,
+      capabilities: createOptionalCapabilities(["template"])
+    };
+    await createTemplate({
+      ...optional,
+      sourcePath: deckPath,
+      template: {
+        id: "bad-selector",
+        name: "Bad Selector",
+        fields: [{ name: "quarter", type: "string" }],
+        mapping: { quarter: { selector: { stableObjectId: "pptx:missing:shape:9999" } } }
+      }
+    });
+
+    await expect(fillTemplate({
+      ...optional,
+      id: "bad-selector",
+      values: { quarter: "Q4" },
+      outputPath: outPath,
+      validateOnly: true
+    })).rejects.toMatchObject({
+      details: expect.objectContaining({ validationCode: "TEMPLATE_VALIDATE_FAILED" })
+    });
+  });
 });
 
 async function makePptxFixture(): Promise<Buffer> {
