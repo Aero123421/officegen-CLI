@@ -42,6 +42,7 @@ const REQUIRED_ERROR_CODES: OfficegenErrorCode[] = [
   "VIEW_FIDELITY_LOW",
   "RENDER_FONT_UNSUPPORTED",
   "TARGET_EXTENSION_MISMATCH",
+  "UNSUPPORTED_FORMAT",
   "EXPORT_UNSUPPORTED"
 ];
 
@@ -106,6 +107,7 @@ const messages: Partial<Record<OfficegenErrorCode, string>> = {
   VIEW_FIDELITY_LOW: "The generated view has low fidelity.",
   RENDER_FONT_UNSUPPORTED: "The PDF renderer cannot encode the requested text with the active font.",
   TARGET_EXTENSION_MISMATCH: "The requested render target does not match the output file extension.",
+  UNSUPPORTED_FORMAT: "The input format is not supported by this command.",
   EXPORT_UNSUPPORTED: "The requested export conversion is unsupported."
 };
 

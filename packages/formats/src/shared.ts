@@ -44,6 +44,8 @@ export interface ObjectMapEntry {
   bounds?: ObjectBounds;
   bbox?: [number, number, number, number];
   selectorHints?: Record<string, unknown>;
+  editableOps?: string[];
+  media?: Record<string, unknown>;
   trust?: { level: "untrusted"; reason: string };
   untrusted: true;
 }

@@ -4,7 +4,7 @@ Officegen CLI is a lightweight Office/PDF runtime for humans, CI, and AI agents.
 
 It works with structured JSON, intermediate representations, and edit operations instead of asking an AI model to write raw Office files. The CLI then handles generation, inspection, preview, editing, validation, and safety checks for PPTX, DOCX, XLSX, PDF, SVG, and HTML-oriented workflows.
 
-This repository currently implements the v1.2 substrate described in [officegen_cli_spec_v1_2_hardened_ja.md](officegen_cli_spec_v1_2_hardened_ja.md).
+This repository currently implements the v2 authoring substrate that grew out of the v1.2 hardened spec in [officegen_cli_spec_v1_2_hardened_ja.md](officegen_cli_spec_v1_2_hardened_ja.md).
 
 ## Install
 
@@ -16,10 +16,10 @@ Install directly from GitHub:
 npm install -g github:Aero123421/officegen-CLI
 ```
 
-For tagged releases, GitHub Actions also publishes a checked npm tarball. This avoids git dependency preparation entirely:
+For tagged releases, GitHub Actions publishes a checked GitHub Release tarball. This project does not publish the `officegen` name to the public npm registry, because that package name is already owned separately on npm.
 
 ```bash
-npm install -g https://github.com/Aero123421/officegen-CLI/releases/download/v1.2.8/officegen-v1.2.8.tgz
+npm install -g https://github.com/Aero123421/officegen-CLI/releases/download/v2.0.0/officegen-v2.0.0.tgz
 ```
 
 Check that it works:
@@ -144,16 +144,19 @@ Core commands:
 - `diagram` - render simple diagram SVG
 - `agent` - generate agent adapter instructions
 
-Optional feature groups:
+Authoring feature groups enabled in the default profile:
 
 - `template`
 - `design`
 - `layout`
+
+Enterprise feature groups disabled unless explicitly enabled:
+
 - `mcp`
 - `renderer`
 - `plugin`
 
-These optional features are hidden or disabled in the default `substrate` profile unless enabled by configuration.
+Template/design/layout commands provide local design capture, template candidates, and layout planning without external processes. MCP, renderer, and plugin features remain disabled in the default `substrate` profile unless enabled by configuration.
 
 ## Configuration
 
@@ -215,7 +218,7 @@ Use `--json` for machine-readable output. Responses use the v1.2 envelope shape:
   "ok": true,
   "command": "capabilities",
   "runId": "...",
-  "cliVersion": "1.2.8",
+  "cliVersion": "2.0.0",
   "capabilitiesHash": "sha256:...",
   "pathsRedacted": true,
   "result": {},
@@ -246,9 +249,17 @@ Officegen is designed to be conservative by default:
 
 ## Current Capability Level
 
-The current implementation is a practical MVP of the v1.2 substrate:
+The current implementation is a practical v2 authoring substrate:
 
 - PPTX/DOCX/XLSX inspection is ZIP/XML based
+- `inspect --depth summary` keeps large workbook/deck payloads compact for agents
+- PPTX rendering supports native text boxes, lists, tables, images, callouts, and explicit design colors
+- template/design/layout commands are available in the default profile
+- embedded picture objects are included in PPTX object maps with asset references
+- asset replacement validates media type and extension compatibility before writing
+- PDF inspect includes best-effort text previews when plain text operators are available
+- command-specific `--help` and JSON help topics are supported
+- JSON path redaction is field-aware and does not rewrite SVG/XML/HTML payload strings
 - previews are approximate, not native Office rendering
 - Office editing is conservative XML-level editing
 - PDF editing is mainly additive operations such as overlays and annotations
@@ -278,7 +289,7 @@ Version bump all managed release files:
 ```bash
 npm run version:bump -- patch
 # or: npm run version:bump -- minor
-# or: npm run version:bump -- 1.2.8
+# or: npm run version:bump -- 2.0.0
 npm run version:check
 ```
 

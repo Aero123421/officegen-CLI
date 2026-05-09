@@ -51,7 +51,6 @@ jobs:
           node packages/cli/dist/main.js capabilities --json
 
       - name: Packed install smoke
-        if: runner.os != 'Windows'
         run: npm run pack:smoke
 
   dependency-review:

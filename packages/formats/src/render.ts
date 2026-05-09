@@ -5,6 +5,15 @@ import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 
 export type RenderTarget = "pptx" | "docx" | "xlsx" | "pdf";
 
+interface BlockIR {
+  type?: string;
+  text?: string;
+  title?: string;
+  items?: string[];
+  rows?: Array<Record<string, unknown> | unknown[]>;
+  path?: string;
+}
+
 export interface DocumentIR {
   title?: string;
   kind?: string;
@@ -13,11 +22,15 @@ export interface DocumentIR {
     id?: string;
     title?: string;
     body?: string | string[];
-    blocks?: Array<{ type?: string; text?: string; rows?: Array<Record<string, unknown> | unknown[]> }>;
+    blocks?: BlockIR[];
     rows?: Array<Record<string, unknown> | unknown[]>;
     items?: string[];
   }>;
-  slides?: Array<{ title?: string; body?: string | string[] }>;
+  design?: {
+    colors?: Record<string, string>;
+    typography?: Record<string, unknown>;
+  };
+  slides?: Array<{ title?: string; body?: string | string[]; blocks?: BlockIR[] }>;
   sheets?: Array<{ name?: string; rows?: Array<Record<string, unknown> | unknown[]> }>;
 }
 
@@ -33,6 +46,7 @@ export interface RenderResult {
   out?: string;
   bytes?: Uint8Array | Buffer;
   caveats: string[];
+  diagnostics?: Array<Record<string, unknown>>;
 }
 
 export async function render(ir: DocumentIR, options: RenderOptions = {}): Promise<RenderResult> {
@@ -50,13 +64,82 @@ async function renderPptx(ir: DocumentIR, options: RenderOptions): Promise<Rende
   const pptx = new mod.default();
   pptx.layout = "LAYOUT_WIDE";
   const slides = ir.slides?.length ? ir.slides : normalizedSections(ir);
-  for (const section of slides) {
+  const diagnostics: Array<Record<string, unknown>> = [];
+  const caveats = ["PPTX generation supports native text boxes, lists, images, callouts, and tables; charts are currently represented as editable labeled placeholders unless a native chart renderer is added."];
+  for (const [sectionIndex, section] of slides.entries()) {
     const slide = pptx.addSlide();
-    slide.background = { color: "FFFFFF" };
-    slide.addText(section.title ?? ir.title ?? "Untitled", { x: 0.55, y: 0.35, w: 12.2, h: 0.5, fontSize: 28, bold: true, color: "111111" });
-    const body = Array.isArray(section.body) ? section.body.join("\n") : section.body ?? "";
-    slide.addText(body, { x: 0.65, y: 1.1, w: 12, h: 5.7, fontSize: 16, color: "333333", breakLine: false, fit: "shrink" });
+    const palette = pptxPalette(ir);
+    slide.background = { color: palette.background };
+    slide.addText(section.title ?? ir.title ?? "Untitled", { x: 0.55, y: 0.32, w: 12.2, h: 0.45, fontSize: 26, bold: true, color: palette.text });
+    let y = 1.0;
+    const blocks = section.blocks?.length ? section.blocks : blocksFromBody(section.body);
+    for (const block of blocks) {
+      const type = block.type ?? "paragraph";
+      if (type === "heading") {
+        slide.addText(block.text ?? block.title ?? "", { x: 0.65, y, w: 12, h: 0.35, fontSize: 18, bold: true, color: palette.accent, fit: "shrink" });
+        y += 0.48;
+        continue;
+      }
+      if (type === "list" || block.items?.length) {
+        const items = block.items?.length ? block.items : toLines(block.text);
+        slide.addText(items.map((item: string) => ({ text: item, options: { bullet: { type: "ul" } } })), { x: 0.78, y, w: 11.6, h: Math.min(2.8, items.length * 0.28 + 0.15), fontSize: 13.5, color: palette.text, fit: "shrink" });
+        y += Math.min(2.9, items.length * 0.3 + 0.25);
+        continue;
+      }
+      if (type === "table" && block.rows?.length) {
+        const allRows = normalizeTableRows(block.rows);
+        const rows = allRows.slice(0, 18);
+        if (allRows.length > rows.length) {
+          diagnostics.push({
+            code: "RENDER_TABLE_TRUNCATED",
+            severity: "warning",
+            slide: sectionIndex + 1,
+            rows: allRows.length,
+            renderedRows: rows.length,
+            message: "Table block exceeded the per-slide row limit and was truncated."
+          });
+        }
+        slide.addTable(rows, {
+          x: 0.65,
+          y,
+          w: 12,
+          h: Math.min(3.6, rows.length * 0.32 + 0.15),
+          fontSize: 10.5,
+          color: palette.text,
+          border: { type: "solid", color: "D1D5DB", pt: 0.7 },
+          fill: { color: "FFFFFF" },
+          margin: 0.05
+        });
+        y += Math.min(3.75, rows.length * 0.34 + 0.3);
+        if (y > 7.0) diagnostics.push(renderOverflowDiagnostic(sectionIndex + 1, type, y));
+        continue;
+      }
+      if (type === "callout") {
+        slide.addText(block.text ?? "", { x: 0.65, y, w: 12, h: 0.7, fontSize: 15, bold: true, color: palette.text, fill: { color: palette.callout }, fit: "shrink", margin: 0.12 });
+        y += 0.88;
+        if (y > 7.0) diagnostics.push(renderOverflowDiagnostic(sectionIndex + 1, type, y));
+        continue;
+      }
+      if (type === "image" && block.path) {
+        slide.addImage({ path: block.path, x: 0.65, y, w: 4.2, h: 2.4 });
+        y += 2.6;
+        if (y > 7.0) diagnostics.push(renderOverflowDiagnostic(sectionIndex + 1, type, y));
+        continue;
+      }
+      if (type === "chart") {
+        slide.addText(`Chart: ${block.title ?? block.text ?? "data"}`, { x: 0.65, y, w: 12, h: 0.5, fontSize: 14, color: palette.accent, italic: true });
+        y += 0.65;
+        continue;
+      }
+      const text = block.text ?? "";
+      if (text) {
+        slide.addText(text, { x: 0.65, y, w: 12, h: Math.min(1.4, Math.max(0.35, text.length / 120 * 0.35)), fontSize: 13.5, color: palette.text, breakLine: false, fit: "shrink" });
+        y += Math.min(1.5, Math.max(0.45, text.length / 120 * 0.38));
+        if (y > 7.0) diagnostics.push(renderOverflowDiagnostic(sectionIndex + 1, type, y));
+      }
+    }
   }
+  if (diagnostics.length) caveats.push("Some PPTX blocks exceeded the simple layout budget; inspect/view/diagnose the output before using it as a final deck.");
   const bytes = await pptx.write({ outputType: "nodebuffer" });
   await writeOutput(options.out, bytes);
   return {
@@ -64,7 +147,8 @@ async function renderPptx(ir: DocumentIR, options: RenderOptions): Promise<Rende
     target: "pptx",
     out: options.out,
     bytes: options.out ? undefined : bytes,
-    caveats: ["Basic PPTX generation uses plain text boxes; advanced theme/layout support is not included."]
+    caveats,
+    diagnostics
   };
 }
 
@@ -196,7 +280,7 @@ function toLines(value?: string | string[]): string[] {
   return String(value ?? "").split(/\r?\n/).filter(Boolean);
 }
 
-function normalizedSections(ir: DocumentIR): Array<{ title?: string; body?: string | string[]; rows?: Array<Record<string, unknown> | unknown[]> }> {
+function normalizedSections(ir: DocumentIR): Array<{ title?: string; body?: string | string[]; blocks?: BlockIR[]; rows?: Array<Record<string, unknown> | unknown[]> }> {
   const sections = ir.sections?.length ? ir.sections : [{ title: ir.title ?? "Untitled", body: "" }];
   return sections.map((section) => ({
     ...section,
@@ -205,9 +289,9 @@ function normalizedSections(ir: DocumentIR): Array<{ title?: string; body?: stri
   }));
 }
 
-function bodyFromBlocks(blocks?: Array<{ type?: string; text?: string }>): string {
+function bodyFromBlocks(blocks?: Array<{ type?: string; text?: string; rows?: Array<Record<string, unknown> | unknown[]>; items?: string[] }>): string {
   return (blocks ?? [])
-    .map((block) => block.text ?? "")
+    .map((block) => block.text ?? block.items?.join("\n") ?? (block.rows ? normalizeTableRows(block.rows).map((row) => row.join("\t")).join("\n") : ""))
     .filter(Boolean)
     .join("\n");
 }
@@ -222,4 +306,44 @@ function rowsFromSections(ir: DocumentIR): Array<Record<string, unknown> | unkno
 
 function sanitizeSheetName(name: string): string {
   return name.replace(/[\[\]*?/\\:]/g, " ").slice(0, 31) || "Sheet";
+}
+
+function pptxPalette(ir: DocumentIR): { background: string; text: string; accent: string; callout: string } {
+  const colors = ir.design?.colors ?? {};
+  return {
+    background: cleanColor(colors.background ?? colors.bg ?? "FFFFFF"),
+    text: cleanColor(colors.text ?? "111827"),
+    accent: cleanColor(colors.accent ?? colors.primary ?? "2563EB"),
+    callout: cleanColor(colors.callout ?? colors.muted ?? "EEF2FF")
+  };
+}
+
+function cleanColor(value: unknown): string {
+  const text = String(value ?? "").replace(/^#/, "").toUpperCase();
+  return /^[0-9A-F]{6}$/.test(text) ? text : "111827";
+}
+
+function blocksFromBody(body: string | string[] | undefined): BlockIR[] {
+  const lines = toLines(body);
+  return lines.length ? [{ type: "paragraph", text: lines.join("\n") }] : [];
+}
+
+function normalizeTableRows(rows: Array<Record<string, unknown> | unknown[]>): unknown[][] {
+  if (!rows.length) return [];
+  if (!Array.isArray(rows[0])) {
+    const keys = Object.keys(rows[0] as Record<string, unknown>);
+    return [keys, ...(rows as Array<Record<string, unknown>>).map((row) => keys.map((key) => row[key]))];
+  }
+  return rows as unknown[][];
+}
+
+function renderOverflowDiagnostic(slide: number, blockType: string, y: number): Record<string, unknown> {
+  return {
+    code: "TEXT_OVERFLOW",
+    severity: "warning",
+    slide,
+    blockType,
+    y: Number(y.toFixed(2)),
+    message: "Block layout passed the nominal slide height; run diagnose/view and split content if needed."
+  };
 }

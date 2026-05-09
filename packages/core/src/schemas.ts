@@ -209,6 +209,8 @@ const documentIrSchema: JsonObject = {
     targets: { type: "array", minItems: 1, items: { enum: ["pptx", "docx", "xlsx", "pdf"] } },
     design: { type: "object", additionalProperties: true },
     assets: { type: "array", items: { type: "object", additionalProperties: true } },
+    slides: { type: "array", items: { type: "object", additionalProperties: true } },
+    sheets: { type: "array", items: { type: "object", additionalProperties: true } },
     sections: {
       type: "array",
       minItems: 1,
@@ -219,6 +221,9 @@ const documentIrSchema: JsonObject = {
         properties: {
           id: { type: "string" },
           title: { type: "string" },
+          body: { anyOf: [{ type: "string" }, { type: "array", items: { type: "string" } }] },
+          rows: { type: "array", items: { anyOf: [{ type: "array" }, { type: "object", additionalProperties: true }] } },
+          items: { type: "array", items: { type: "string" } },
           blocks: {
             type: "array",
             items: {
@@ -228,8 +233,12 @@ const documentIrSchema: JsonObject = {
               properties: {
                 type: { type: "string" },
                 text: { type: "string" },
+                title: { type: "string" },
                 role: { type: "string" },
-                specRef: { type: "string" }
+                specRef: { type: "string" },
+                items: { type: "array", items: { type: "string" } },
+                rows: { type: "array", items: { anyOf: [{ type: "array" }, { type: "object", additionalProperties: true }] } },
+                path: { type: "string" }
               }
             }
           }

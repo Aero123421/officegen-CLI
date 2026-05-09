@@ -17,6 +17,18 @@ export interface PptxShape {
   sourcePath: string;
 }
 
+interface PptxPicture {
+  stableObjectId: string;
+  slideIndex: number;
+  pictureIndex: number;
+  shapeId?: string;
+  name?: string;
+  relationshipId?: string;
+  assetPath?: string;
+  bounds?: ObjectBounds;
+  sourcePath: string;
+}
+
 export interface PptxSlide {
   stableObjectId: string;
   index: number;
@@ -52,9 +64,12 @@ export async function inspectSlides(zip: JSZip): Promise<{ slides: PptxSlide[]; 
   const slides: PptxSlide[] = [];
   for (const [slideIndex, slidePath] of slidePaths.entries()) {
     const xml = (await readZipText(zip, slidePath)) ?? "";
+    const relsPath = slidePath.replace(/^ppt\/slides\//, "ppt/slides/_rels/") + ".rels";
+    const rels = parseRelationships((await readZipText(zip, relsPath)) ?? "");
     const slideNo = slideIndex + 1;
     const slideStableObjectId = stableHashId("pptx", "deck", "slide", slidePath);
     const shapes = extractShapes(xml, slideNo, slideStableObjectId, slidePath);
+    const pictures = extractPictures(xml, slideNo, slidePath, rels);
     const tableCells = extractTableCells(xml, slideNo, slidePath);
     const textObjects = shapes
       .filter((shape) => shape.text)
@@ -81,6 +96,33 @@ export async function inspectSlides(zip: JSZip): Promise<{ slides: PptxSlide[]; 
         objectMap.push(entry);
         return entry;
       })
+      .concat(pictures.map((picture) => {
+        const entry: ObjectMapEntry = {
+          stableObjectId: picture.stableObjectId,
+          kind: "picture",
+          label: picture.name,
+          sourcePath: slidePath,
+          xmlPath: slidePath,
+          bounds: picture.bounds,
+          bbox: picture.bounds ? [picture.bounds.x, picture.bounds.y, picture.bounds.width, picture.bounds.height] : undefined,
+          selectorHints: {
+            slide: slideNo,
+            shapeId: picture.shapeId,
+            name: picture.name,
+            relationshipId: picture.relationshipId,
+            assetPath: picture.assetPath
+          },
+          editableOps: ["asset.replace", "pptx.replaceImageByShape"],
+          media: {
+            relationshipId: picture.relationshipId,
+            assetPath: picture.assetPath
+          },
+          trust: { level: "untrusted", reason: "document-content" },
+          untrusted: true
+        };
+        objectMap.push(entry);
+        return entry;
+      }))
       .concat(tableCells.map((cell) => {
         const entry: ObjectMapEntry = {
           stableObjectId: cell.stableObjectId,
@@ -103,11 +145,38 @@ export async function inspectSlides(zip: JSZip): Promise<{ slides: PptxSlide[]; 
       text: textObjects.map((entry) => entry.text).filter(Boolean).join("\n"),
       textObjects,
       shapeCount: shapes.length,
-      pictureCount: (xml.match(/<p:pic[\s>]/g) ?? []).length,
+      pictureCount: pictures.length,
       untrusted: true
     });
   }
   return { slides, objectMap };
+}
+
+function extractPictures(xml: string, slideNo: number, sourcePath: string, rels: ReturnType<typeof parseRelationships>): PptxPicture[] {
+  let pictureIndex = 0;
+  return [...xml.matchAll(/<p:pic\b[\s\S]*?<\/p:pic>/g)].map((match) => {
+    pictureIndex += 1;
+    const block = match[0];
+    const cNvPr = /<p:cNvPr\b([^>]*)\/>/.exec(block)?.[1] ?? "";
+    const shapeId = xmlAttr(cNvPr, "id");
+    const name = xmlAttr(cNvPr, "name");
+    const relationshipId = /<a:blip\b[^>]*(?:r:embed|r:link)="([^"]+)"/.exec(block)?.[1];
+    const rel = relationshipId ? rels.find((item) => item.id === relationshipId) : undefined;
+    const assetPath = rel ? relationshipTarget("ppt/slides", rel.target) : undefined;
+    return {
+      stableObjectId: shapeId
+        ? stableHashId("pptx", slideScope(sourcePath), "picture", `${sourcePath}#${shapeId}`)
+        : makeStableObjectId("pptx", slideScope(sourcePath), "picture", pictureIndex),
+      slideIndex: slideNo,
+      pictureIndex,
+      shapeId,
+      name,
+      relationshipId,
+      assetPath,
+      bounds: extractBounds(block),
+      sourcePath
+    };
+  });
 }
 
 function extractTableCells(xml: string, slideNo: number, sourcePath: string): Array<{ stableObjectId: string; cellIndex: number; text: string; textPreview?: string }> {

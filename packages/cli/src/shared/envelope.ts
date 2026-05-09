@@ -41,7 +41,7 @@ export function makeErrorEnvelope(
     diagnostics: [],
     artifacts: [],
     availableCommands: availableCommands(context),
-    nextSuggestedCommands: nextSuggestedCommands(context)
+    nextSuggestedCommands: errorSuggestedCommands(context, error)
   };
 }
 
@@ -131,4 +131,34 @@ function applyAgentBudget(context: RuntimeContext, envelope: Envelope): Envelope
   };
 
   return compact;
+}
+
+function errorSuggestedCommands(context: RuntimeContext, error: CliErrorPayload): string[] {
+  const agent = context.agent ? " --agent" : "";
+  const command = error.command ?? context.argv.slice(2).join(" ");
+  const suggestions: string[] = [];
+  if (error.code === "INPUT_PARSE_ERROR") {
+    suggestions.push(`officegen schema validate <input.json> --schema officegen.ir.document@1.2${agent} --json`);
+  } else if (error.code === "INPUT_NOT_FOUND") {
+    suggestions.push(`officegen inspect <existing-file> --depth summary${agent} --json`);
+  } else if (error.code === "SELECTOR_NOT_FOUND" || error.code === "SELECTOR_AMBIGUOUS") {
+    suggestions.push(`officegen inspect <input> --depth summary${agent} --json`);
+    suggestions.push("officegen view <input> --out .officegen/runs/view --json");
+    suggestions.push("officegen edit <input> --ops ops.json --dry-run --resolve-selectors --agent --json");
+  } else if (error.code === "FEATURE_DISABLED") {
+    suggestions.push("officegen config show --json");
+    suggestions.push(`OFFICEGEN_PROFILE=authoring officegen ${command}${agent} --json`);
+  } else if (error.code === "ASSET_UNSUPPORTED_FORMAT") {
+    suggestions.push("officegen asset inspect <replacement> --json");
+    suggestions.push("officegen asset extract <input> --images --out .officegen/runs/assets --json");
+  } else if (error.code === "EXPORT_UNSUPPORTED" || error.code === "TARGET_EXTENSION_MISMATCH") {
+    suggestions.push("officegen export <input> --to pdf --mode fast --out output.pdf --json");
+  } else if (error.code === "UNSUPPORTED_FORMAT") {
+    suggestions.push("officegen inspect <input.pptx|input.docx|input.xlsx|input.pdf> --depth summary --agent --json");
+    suggestions.push("officegen asset inspect <image-or-media-file> --json");
+  } else if (error.code === "SCHEMA_INVALID") {
+    suggestions.push("officegen schema get officegen.ir.document@1.2 --json");
+    suggestions.push("officegen scaffold --kind pptx --title \"Draft\" --out draft.ir.json --json");
+  }
+  return [...new Set([...suggestions, ...nextSuggestedCommands(context)])];
 }

@@ -68,4 +68,28 @@ describe("redaction", () => {
     expect(result.value).not.toContain("C:\\Users\\someone");
     expect(result.redactions.length).toBeGreaterThanOrEqual(5);
   });
+
+  it("does not redact paths inside SVG/XML payload strings", () => {
+    const config = getBuiltinConfig("substrate");
+    config.paths.projectRoot = "D:\\codebase\\tool\\Officegen-CLI";
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg"><path d="M10/20 L30/40"/><text>D:/codebase/tool/Officegen-CLI</text></svg>';
+
+    const result = redactJson({ svg, outPath: "D:\\codebase\\tool\\Officegen-CLI\\out.svg" }, config);
+
+    expect(result.value.svg).toBe(svg);
+    expect(result.value.outPath).toBe("<project>/out.svg");
+  });
+
+  it("still redacts ordinary content and generic markup strings", () => {
+    const config = getBuiltinConfig("substrate");
+    config.paths.projectRoot = "D:\\codebase\\tool\\Officegen-CLI";
+
+    const result = redactJson({
+      content: "D:\\codebase\\tool\\Officegen-CLI\\secret.txt",
+      htmlSnippet: "<div>D:\\codebase\\tool\\Officegen-CLI\\secret.txt</div>"
+    }, config);
+
+    expect(result.value.content).toBe("<project>/secret.txt");
+    expect(result.value.htmlSnippet).toContain("<project>/secret.txt");
+  });
 });

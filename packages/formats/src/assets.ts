@@ -42,6 +42,8 @@ export interface ReplaceAssetOptions {
   out?: string;
   assetPath: string;
   replacement: Uint8Array | Buffer;
+  replacementPath?: string;
+  allowMediaTypeChange?: boolean;
   config?: OfficegenConfig;
 }
 
@@ -94,11 +96,25 @@ export async function extractAssets(input: InputLike, options: ExtractAssetsOpti
   };
 }
 
-export async function replaceAsset(input: InputLike, options: ReplaceAssetOptions): Promise<{ schema: "officegen.asset.replace.result@1.2"; changed: boolean; out?: string; bytes?: Uint8Array; caveats: string[] }> {
+export async function replaceAsset(input: InputLike, options: ReplaceAssetOptions): Promise<{ schema: "officegen.asset.replace.result@1.2"; changed: boolean; out?: string; bytes?: Uint8Array; media: Record<string, unknown>; caveats: string[] }> {
   const normalized = await normalizeInput(input, "unknown");
   const zip = await loadZip(normalized, { zipSafety: { config: options.config } });
   const target = zip.file(options.assetPath);
   if (!target) throw new Error(`Asset path not found: ${options.assetPath}`);
+  const currentBytes = (await readZipBytes(zip, options.assetPath)) ?? new Uint8Array();
+  const currentMediaType = detectMediaType(currentBytes, options.assetPath);
+  const replacementMediaType = detectMediaType(options.replacement, options.replacementPath ?? options.assetPath);
+  const expectedMediaType = mediaTypeFromExtension(options.assetPath);
+  const caveats = [];
+  if (expectedMediaType && currentMediaType !== "application/octet-stream" && currentMediaType !== expectedMediaType) {
+    caveats.push(`Existing asset extension does not match content: ${options.assetPath} is ${currentMediaType}, expected ${expectedMediaType}.`);
+  }
+  if (expectedMediaType && replacementMediaType !== expectedMediaType && !options.allowMediaTypeChange) {
+    throw new Error(`ASSET_UNSUPPORTED_FORMAT: replacement media type ${replacementMediaType} does not match ${options.assetPath} (${expectedMediaType}).`);
+  }
+  if (currentMediaType !== "application/octet-stream" && replacementMediaType !== currentMediaType && !options.allowMediaTypeChange) {
+    throw new Error(`ASSET_UNSUPPORTED_FORMAT: replacement media type ${replacementMediaType} does not match existing asset type ${currentMediaType}.`);
+  }
   zip.file(options.assetPath, options.replacement);
   const bytes = await zipToBytes(zip);
   await writeOutput(options.out, bytes);
@@ -107,7 +123,18 @@ export async function replaceAsset(input: InputLike, options: ReplaceAssetOption
     changed: true,
     out: options.out,
     bytes: options.out ? undefined : bytes,
-    caveats: ["Replaced asset bytes are written verbatim.", ...zipSafetyCaveats(getLoadedZipSafetyReport(zip))]
+    media: {
+      assetPath: options.assetPath,
+      existingMediaType: currentMediaType,
+      replacementMediaType,
+      expectedMediaType,
+      replacementPath: options.replacementPath
+    },
+    caveats: [
+      ...caveats,
+      "Replaced asset bytes after media type validation; relationships and shape crop are preserved.",
+      ...zipSafetyCaveats(getLoadedZipSafetyReport(zip))
+    ]
   };
 }
 
@@ -120,9 +147,8 @@ function detectMediaType(bytes: Uint8Array, path?: string): string {
   if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return "image/png";
   if (bytes[0] === 0xff && bytes[1] === 0xd8) return "image/jpeg";
   if (String.fromCharCode(...bytes.slice(0, 120)).includes("<svg")) return "image/svg+xml";
-  if (ext === "gif") return "image/gif";
-  if (ext === "emf") return "image/x-emf";
-  if (ext === "wmf") return "image/x-wmf";
+  if (bytes.length >= 6 && (Buffer.from(bytes.slice(0, 6)).toString("ascii") === "GIF87a" || Buffer.from(bytes.slice(0, 6)).toString("ascii") === "GIF89a")) return "image/gif";
+  if (ext === "emf" || ext === "wmf" || ext === "gif") return "application/octet-stream";
   return "application/octet-stream";
 }
 
@@ -144,4 +170,15 @@ function detectDimensions(bytes: Uint8Array, mediaType: string): { width?: numbe
     }
   }
   return {};
+}
+
+function mediaTypeFromExtension(path: string): string | undefined {
+  const ext = path.split(".").pop()?.toLowerCase();
+  if (ext === "png") return "image/png";
+  if (ext === "jpg" || ext === "jpeg") return "image/jpeg";
+  if (ext === "svg") return "image/svg+xml";
+  if (ext === "gif") return "image/gif";
+  if (ext === "emf") return "image/x-emf";
+  if (ext === "wmf") return "image/x-wmf";
+  return undefined;
 }

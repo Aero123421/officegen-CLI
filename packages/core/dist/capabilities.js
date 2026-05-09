@@ -83,7 +83,7 @@ export function getCapabilities(config, options = {}) {
         disabled: registry.filter((feature) => !feature.enabled).map((feature) => feature.name),
         agentInstructionsPath: options.runInstructionsPath ?? ".officegen/runs/current/agent-instructions.md",
         jsonBudgetBytes: config.agent.defaultJsonBudgetBytes,
-        nextSuggestedCommands: visibleCommands.includes("schema")
+        nextSuggestedCommands: visibleCommands.some((command) => command === "schema" || command.startsWith("schema "))
             ? ["officegen help workflow edit-existing --agent --json", "officegen schema list --agent --json"]
             : ["officegen capabilities --agent --json"]
     };

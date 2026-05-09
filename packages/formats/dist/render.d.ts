@@ -1,5 +1,13 @@
 import { type OfficegenConfig } from "@officegen/core";
 export type RenderTarget = "pptx" | "docx" | "xlsx" | "pdf";
+interface BlockIR {
+    type?: string;
+    text?: string;
+    title?: string;
+    items?: string[];
+    rows?: Array<Record<string, unknown> | unknown[]>;
+    path?: string;
+}
 export interface DocumentIR {
     title?: string;
     kind?: string;
@@ -8,17 +16,18 @@ export interface DocumentIR {
         id?: string;
         title?: string;
         body?: string | string[];
-        blocks?: Array<{
-            type?: string;
-            text?: string;
-            rows?: Array<Record<string, unknown> | unknown[]>;
-        }>;
+        blocks?: BlockIR[];
         rows?: Array<Record<string, unknown> | unknown[]>;
         items?: string[];
     }>;
+    design?: {
+        colors?: Record<string, string>;
+        typography?: Record<string, unknown>;
+    };
     slides?: Array<{
         title?: string;
         body?: string | string[];
+        blocks?: BlockIR[];
     }>;
     sheets?: Array<{
         name?: string;
@@ -36,6 +45,8 @@ export interface RenderResult {
     out?: string;
     bytes?: Uint8Array | Buffer;
     caveats: string[];
+    diagnostics?: Array<Record<string, unknown>>;
 }
 export declare function render(ir: DocumentIR, options?: RenderOptions): Promise<RenderResult>;
 export declare const renderDocument: typeof render;
+export {};

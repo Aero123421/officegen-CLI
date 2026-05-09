@@ -119,8 +119,8 @@ describe("schema registry", () => {
         "officegen.diagnostics@1.2"
       ])
     );
-    expect(agentIds).not.toContain("officegen.design.pack@1.2");
-    expect(agentIds).not.toContain("officegen.template.map@1.2");
+    expect(agentIds).toContain("officegen.design.pack@1.2");
+    expect(agentIds).toContain("officegen.template.map@1.2");
   });
 
   it("validates document IR and view object maps", () => {

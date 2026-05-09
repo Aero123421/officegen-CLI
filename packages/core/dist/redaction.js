@@ -102,7 +102,7 @@ function redactValue(value, config, location, run) {
     if (typeof value === "string") {
         let text = value;
         const redactions = [];
-        if (config.security.redactAbsolutePathsInJson) {
+        if (config.security.redactAbsolutePathsInJson && !isMarkupPayload(text, location)) {
             const pathResult = redactPathsInText(text, config, location, run);
             text = pathResult.value;
             redactions.push(...pathResult.redactions);
@@ -141,5 +141,15 @@ export function redactJson(value, config, run) {
 }
 export function isAbsolutePathRedactionNeeded(text) {
     return path.isAbsolute(text) || /^[A-Za-z]:[\\/]/.test(text) || /^\\\\[^\\/]+[\\/][^\\/]+/.test(text) || /^~[\\/]/.test(text);
+}
+function isMarkupPayload(text, location) {
+    const trimmed = text.trimStart();
+    if (/\.svg$/i.test(location) && /^<svg\b/i.test(trimmed))
+        return true;
+    if (/\.html?$/i.test(location) && /^(?:<!doctype\s+html|<html\b)/i.test(trimmed))
+        return true;
+    if (/\.xml$/i.test(location) && /^<\?xml\b/i.test(trimmed))
+        return true;
+    return false;
 }
 //# sourceMappingURL=redaction.js.map

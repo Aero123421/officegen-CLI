@@ -33,8 +33,18 @@ export function capabilitiesPayload(context) {
             commands: entry.commands,
             moduleId: entry.moduleId,
             stability: entry.stability,
-            security: entry.security
+            security: entry.security,
+            dryRun: ["edit", "repair"].includes(entry.feature),
+            outputPolicy: ["render", "export", "edit", "repair", "asset", "template", "design", "layout"].includes(entry.feature) ? "fail-by-default; use --overwrite explicitly where supported" : undefined,
+            planOnly: ["template", "design", "layout"].includes(entry.feature),
+            sideEffects: ["template", "design", "layout"].includes(entry.feature) ? "writes JSON plans/captures under .officegen unless --out selects another project-local path; does not directly edit Office files" : undefined
         })),
+        unsupportedNow: [
+            "native PowerPoint editable charts from IR",
+            "lossless Office-to-PDF conversion without native renderer availability",
+            "OCR for scanned PDF pages",
+            "automatic image crop rewriting during asset replace"
+        ],
         progressiveDisclosure: {
             jsonBudgetBytes: context.jsonBudgetBytes ?? context.config.agent.defaultJsonBudgetBytes,
             useJsonBudgetFlag: "--json-budget-bytes <bytes>",
@@ -367,10 +377,28 @@ export async function renderPayload(context) {
             details: { errors: validation.errors }
         }, 3);
     }
-    return render(ir, withFormatConfig(context, {
+    const sanitizedIr = await sanitizeRenderAssetPaths(context, ir);
+    return render(sanitizedIr, withFormatConfig(context, {
         out: await validatedOutOption(context),
         target: optionValue(context.argv, "--target")
     }));
+}
+async function sanitizeRenderAssetPaths(context, ir) {
+    const clone = structuredClone(ir);
+    const blocks = [
+        ...asArray(asRecord(clone).sections).flatMap((section) => asArray(asRecord(section).blocks)),
+        ...asArray(asRecord(clone).slides).flatMap((slide) => asArray(asRecord(slide).blocks))
+    ];
+    for (const block of blocks) {
+        const record = asRecord(block);
+        if (record.type === "image" && typeof record.path === "string") {
+            record.path = await validateInputPath(context, record.path);
+        }
+    }
+    return clone;
+}
+function asArray(value) {
+    return Array.isArray(value) ? value : [];
 }
 export async function exportPayload(context) {
     const input = requireInput(context, 3, "export");
@@ -414,6 +442,7 @@ export async function assetPayload(context, subcommand) {
         return replaceAsset(await validateInputPath(context, input), withFormatConfig(context, {
             assetPath,
             replacement: await readInputFile(context, replacementPath),
+            replacementPath,
             out: await validatedOutOption(context)
         }));
     }

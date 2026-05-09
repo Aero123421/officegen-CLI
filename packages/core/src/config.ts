@@ -74,9 +74,9 @@ const substrateBooleans: Record<FeatureName, boolean> = {
   diagram: true,
   schema: true,
   errors: true,
-  template: false,
-  design: false,
-  layout: false,
+  template: true,
+  design: true,
+  layout: true,
   agent: true,
   mcp: false,
   renderer: false,
@@ -138,7 +138,7 @@ function baseConfig(profile: OfficegenProfile, features: FeatureMap): OfficegenC
       }
     },
     agent: {
-      defaultJsonBudgetBytes: 8192,
+      defaultJsonBudgetBytes: 32768,
       inspectDefaultDepth: "summary",
       largeOutputMode: "path-only",
       requireCapabilitiesCheck: true

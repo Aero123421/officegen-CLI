@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import JSZip from "jszip";
 import { getBuiltinConfig } from "@officegen/core";
-import { edit, exportDocument, inspect, inspectInputZipSafety, render, renderChart, renderDiagram, resolveEditSelectors, view } from "../src/index.js";
+import { edit, exportDocument, inspect, inspectInputZipSafety, render, renderChart, renderDiagram, replaceAsset, resolveEditSelectors, view } from "../src/index.js";
 
 describe("@officegen/formats MVP", () => {
   it("renders and inspects a basic PPTX with untrusted text separation", async () => {
@@ -22,6 +22,30 @@ describe("@officegen/formats MVP", () => {
     expect(inspected.objectMap[0]?.bbox?.length).toBe(4);
     expect(inspected.objectMap[0]?.textPreview).toBe("Revenue");
     expect(inspected.agentInstruction).toContain("not instructions");
+  });
+
+  it("renders rich PPTX blocks as separate text and table objects", async () => {
+    const rendered = await render(
+      {
+        title: "Board KPI",
+        targets: ["pptx"],
+        sections: [{
+          title: "Executive Summary",
+          blocks: [
+            { type: "heading", text: "Highlights" },
+            { type: "list", items: ["Revenue up", "Margin stable"] },
+            { type: "table", rows: [{ metric: "Revenue", value: "$10M" }, { metric: "Margin", value: "42%" }] },
+            { type: "callout", text: "Board-reviewed summary" }
+          ]
+        }]
+      },
+      { target: "pptx" }
+    );
+    const inspected = await inspect({ data: rendered.bytes, format: "pptx" });
+
+    expect(inspected.objectMap.map((entry) => entry.text).join("\n")).toContain("Highlights");
+    expect(inspected.objectMap.some((entry) => entry.kind === "tableCell" && entry.text === "Revenue")).toBe(true);
+    expect(rendered.caveats[0]).toContain("tables");
   });
 
   it("returns approximate view pages with objectMap", async () => {
@@ -113,6 +137,63 @@ describe("@officegen/formats MVP", () => {
       ["C1", ""]
     ]);
     expect(inspected.objectMap.map((entry) => entry.label)).toEqual(["A1", "B1", "C1"]);
+  });
+
+  it("keeps XLSX summary inspect compact while full inspect keeps cells", async () => {
+    const zip = new JSZip();
+    const cells = Array.from({ length: 150 }, (_item, index) => `<c r="A${index + 1}" t="inlineStr"><is><t>${"Value ".repeat(index === 0 ? 1000 : 1)}${index + 1}</t></is></c>`).join("");
+    zip.file("xl/worksheets/sheet1.xml", `<worksheet><sheetData><row r="1">${cells}</row></sheetData></worksheet>`);
+    const bytes = await zip.generateAsync({ type: "uint8array" });
+
+    const summary = await inspect({ data: bytes, format: "xlsx" }, { depth: "summary" });
+    const full = await inspect({ data: bytes, format: "xlsx" }, { depth: "full" });
+
+    expect(summary.untrusted.sheets[0]?.cellCount).toBe(150);
+    expect(summary.untrusted.sheets[0]?.cells).toBeUndefined();
+    expect(summary.untrusted.sheets[0]?.previewCells[0]?.valuePreview.length).toBeLessThanOrEqual(120);
+    expect(summary.objectMap.length).toBeLessThanOrEqual(50);
+    expect(full.untrusted.sheets[0]?.cells).toHaveLength(150);
+  });
+
+  it("rejects asset replacement when bytes do not match the target media type", async () => {
+    const zip = new JSZip();
+    zip.file("ppt/media/image1.png", new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1]));
+    const bytes = await zip.generateAsync({ type: "uint8array" });
+    const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"></svg>');
+
+    await expect(replaceAsset({ data: bytes, format: "pptx" }, { assetPath: "ppt/media/image1.png", replacement: svg, replacementPath: "logo.svg" }))
+      .rejects.toThrow(/ASSET_UNSUPPORTED_FORMAT/);
+  });
+
+  it("does not trust GIF media type from extension alone during asset replacement", async () => {
+    const zip = new JSZip();
+    zip.file("ppt/media/image1.gif", Buffer.from("GIF89a"));
+    const bytes = await zip.generateAsync({ type: "uint8array" });
+
+    await expect(replaceAsset({ data: bytes, format: "pptx" }, { assetPath: "ppt/media/image1.gif", replacement: Buffer.from("not-a-gif"), replacementPath: "logo.gif" }))
+      .rejects.toThrow(/ASSET_UNSUPPORTED_FORMAT/);
+  });
+
+  it("returns best-effort PDF text previews when plain text operators are present", async () => {
+    const rendered = await render({ title: "PDF", sections: [{ title: "Page", body: "Body" }] }, { target: "pdf" });
+    const pdfBytes = Buffer.concat([Buffer.from(rendered.bytes as Uint8Array), Buffer.from("\nBT (Hello PDF) Tj ET\n", "latin1")]);
+    const inspected = await inspect({ data: pdfBytes, format: "pdf" });
+
+    expect(inspected.trusted.summary.textBlocks).toBeGreaterThan(0);
+    expect(inspected.objectMap[0]?.text).toContain("Hello PDF");
+  });
+
+  it("keeps PDF summary inspect to previews and exposes full text only in full depth", async () => {
+    const rendered = await render({ title: "PDF", sections: [{ title: "Page", body: "Body" }] }, { target: "pdf" });
+    const pdfBytes = Buffer.concat([Buffer.from(rendered.bytes as Uint8Array), Buffer.from(`\nBT (${"Long PDF text ".repeat(800)}) Tj ET\n`, "latin1")]);
+
+    const summary = await inspect({ data: pdfBytes, format: "pdf" }, { depth: "summary" });
+    const full = await inspect({ data: pdfBytes, format: "pdf" }, { depth: "full" });
+
+    expect(summary.untrusted.text).toBeUndefined();
+    expect(summary.objectMap[0]?.text).toBeUndefined();
+    expect(summary.untrusted.pages[0]?.textPreview.length).toBeLessThanOrEqual(300);
+    expect(full.objectMap[0]?.text).toContain("Long PDF text");
   });
 
   it("renders empty sections with at least one PPTX slide, XLSX sheet, and DOCX document body", async () => {

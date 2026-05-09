@@ -1,6 +1,6 @@
 import { OFFICEGEN_CLI_VERSION, OfficegenError } from "../../core/dist/index.js";
-import { createProgram, writeNativeHelp } from "./commands/register.js";
-import { commandFromArgv, getTopCommand, hasFlag } from "./shared/argv.js";
+import { createProgram, writeCommandHelp, writeNativeHelp } from "./commands/register.js";
+import { commandFromArgv, getTopCommand, hasFlag, secondCommandToken } from "./shared/argv.js";
 import { createRuntimeContext, gateTopLevelCommand } from "./shared/context.js";
 import { makeEnvelope, makeErrorEnvelope, writeResult } from "./shared/envelope.js";
 import { helpPayload } from "./commands/payloads.js";
@@ -38,6 +38,15 @@ export async function runCli(argv, options = {}) {
     if (gateError) {
         process.exitCode = gateError.code === "UNKNOWN_COMMAND" ? 2 : 5;
         writeResult(context, makeErrorEnvelope(context, commandText, gateError, now), context.json ? stdout : stderr);
+        return;
+    }
+    if (hasFlag(argv, "--help") || hasFlag(argv, "-h")) {
+        if (context.json) {
+            writeResult(context, makeEnvelope(context, commandText, helpPayload(context, [topCommand, secondCommandToken(argv)].filter(Boolean)), now), stdout);
+        }
+        else {
+            writeCommandHelp(context, topCommand, secondCommandToken(argv), stdout);
+        }
         return;
     }
     try {
@@ -102,6 +111,13 @@ function toCliFailure(error, commandText) {
         if (/WinAnsi cannot encode|cannot encode .* with WinAnsi/i.test(error.message)) {
             return new CliFailure({
                 code: "RENDER_FONT_UNSUPPORTED",
+                command: commandText,
+                message: error.message
+            }, 3);
+        }
+        if (/Unsupported inspect format/i.test(error.message)) {
+            return new CliFailure({
+                code: "UNSUPPORTED_FORMAT",
                 command: commandText,
                 message: error.message
             }, 3);

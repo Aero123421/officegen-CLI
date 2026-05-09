@@ -54,6 +54,20 @@ export async function replaceAsset(input, options) {
     const target = zip.file(options.assetPath);
     if (!target)
         throw new Error(`Asset path not found: ${options.assetPath}`);
+    const currentBytes = (await readZipBytes(zip, options.assetPath)) ?? new Uint8Array();
+    const currentMediaType = detectMediaType(currentBytes, options.assetPath);
+    const replacementMediaType = detectMediaType(options.replacement, options.replacementPath ?? options.assetPath);
+    const expectedMediaType = mediaTypeFromExtension(options.assetPath);
+    const caveats = [];
+    if (expectedMediaType && currentMediaType !== "application/octet-stream" && currentMediaType !== expectedMediaType) {
+        caveats.push(`Existing asset extension does not match content: ${options.assetPath} is ${currentMediaType}, expected ${expectedMediaType}.`);
+    }
+    if (expectedMediaType && replacementMediaType !== expectedMediaType && !options.allowMediaTypeChange) {
+        throw new Error(`ASSET_UNSUPPORTED_FORMAT: replacement media type ${replacementMediaType} does not match ${options.assetPath} (${expectedMediaType}).`);
+    }
+    if (currentMediaType !== "application/octet-stream" && replacementMediaType !== currentMediaType && !options.allowMediaTypeChange) {
+        throw new Error(`ASSET_UNSUPPORTED_FORMAT: replacement media type ${replacementMediaType} does not match existing asset type ${currentMediaType}.`);
+    }
     zip.file(options.assetPath, options.replacement);
     const bytes = await zipToBytes(zip);
     await writeOutput(options.out, bytes);
@@ -62,7 +76,18 @@ export async function replaceAsset(input, options) {
         changed: true,
         out: options.out,
         bytes: options.out ? undefined : bytes,
-        caveats: ["Replaced asset bytes are written verbatim.", ...zipSafetyCaveats(getLoadedZipSafetyReport(zip))]
+        media: {
+            assetPath: options.assetPath,
+            existingMediaType: currentMediaType,
+            replacementMediaType,
+            expectedMediaType,
+            replacementPath: options.replacementPath
+        },
+        caveats: [
+            ...caveats,
+            "Replaced asset bytes after media type validation; relationships and shape crop are preserved.",
+            ...zipSafetyCaveats(getLoadedZipSafetyReport(zip))
+        ]
     };
 }
 export const assetInspect = inspectAsset;
@@ -76,12 +101,10 @@ function detectMediaType(bytes, path) {
         return "image/jpeg";
     if (String.fromCharCode(...bytes.slice(0, 120)).includes("<svg"))
         return "image/svg+xml";
-    if (ext === "gif")
+    if (bytes.length >= 6 && (Buffer.from(bytes.slice(0, 6)).toString("ascii") === "GIF87a" || Buffer.from(bytes.slice(0, 6)).toString("ascii") === "GIF89a"))
         return "image/gif";
-    if (ext === "emf")
-        return "image/x-emf";
-    if (ext === "wmf")
-        return "image/x-wmf";
+    if (ext === "emf" || ext === "wmf" || ext === "gif")
+        return "application/octet-stream";
     return "application/octet-stream";
 }
 function detectDimensions(bytes, mediaType) {
@@ -103,5 +126,21 @@ function detectDimensions(bytes, mediaType) {
         }
     }
     return {};
+}
+function mediaTypeFromExtension(path) {
+    const ext = path.split(".").pop()?.toLowerCase();
+    if (ext === "png")
+        return "image/png";
+    if (ext === "jpg" || ext === "jpeg")
+        return "image/jpeg";
+    if (ext === "svg")
+        return "image/svg+xml";
+    if (ext === "gif")
+        return "image/gif";
+    if (ext === "emf")
+        return "image/x-emf";
+    if (ext === "wmf")
+        return "image/x-wmf";
+    return undefined;
 }
 //# sourceMappingURL=assets.js.map

@@ -26,6 +26,8 @@ export interface ReplaceAssetOptions {
     out?: string;
     assetPath: string;
     replacement: Uint8Array | Buffer;
+    replacementPath?: string;
+    allowMediaTypeChange?: boolean;
     config?: OfficegenConfig;
 }
 export declare function inspectAsset(input: InputLike): Promise<AssetInfo>;
@@ -35,6 +37,7 @@ export declare function replaceAsset(input: InputLike, options: ReplaceAssetOpti
     changed: boolean;
     out?: string;
     bytes?: Uint8Array;
+    media: Record<string, unknown>;
     caveats: string[];
 }>;
 export declare const assetInspect: typeof inspectAsset;

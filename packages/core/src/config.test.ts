@@ -7,16 +7,16 @@ import { computeCapabilitiesHash, getCapabilities } from "./capabilities.js";
 import { getBuiltinConfig, loadConfig } from "./config.js";
 
 describe("config and capabilities", () => {
-  it("uses substrate defaults that hide authoring features from agents", () => {
+  it("uses substrate defaults with authoring features enabled and plugins disabled", () => {
     const config = getBuiltinConfig("substrate");
     const capabilities = getCapabilities(config, { agent: true });
 
     expect(config.features.inspect.enabled).toBe(true);
-    expect(config.features.template.enabled).toBe(false);
-    expect(config.features.design.visibleToAgents).toBe(false);
+    expect(config.features.template.enabled).toBe(true);
+    expect(config.features.design.visibleToAgents).toBe(true);
     expect(capabilities.visibleCommands).toContain("inspect");
-    expect(capabilities.visibleCommands).not.toContain("template");
-    expect(capabilities.disabled).toEqual(expect.arrayContaining(["template", "design", "layout", "plugin", "renderer"]));
+    expect(capabilities.visibleCommands).toContain("template candidates");
+    expect(capabilities.disabled).toEqual(expect.arrayContaining(["plugin", "renderer"]));
   });
 
   it("provides authoring and enterprise built-in profiles", () => {

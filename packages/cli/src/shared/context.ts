@@ -78,6 +78,7 @@ export function gateTopLevelCommand(command: string, context: RuntimeContext): C
       message: `Unknown command: ${command} ${second}`
     };
   }
+  if (entry.commandGroup === "help") return undefined;
   if (second && entry.commands.length > 1) {
     const allowed = new Set(entry.commands.map((registered) => registered.split(" ")[1]).filter(Boolean));
     if (allowed.size > 0 && !allowed.has(second)) {

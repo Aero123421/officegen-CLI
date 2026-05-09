@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
@@ -39,6 +39,16 @@ try {
   const version = run(npxOfficegen(prefix), ["--version"], { capture: true }).trim();
   const manifest = JSON.parse(await readFile(path.join(prefix, "node_modules", "officegen", "package.json"), "utf8"));
   const capabilityEnvelope = JSON.parse(run(npxOfficegen(prefix), ["capabilities", "--json"], { capture: true }));
+  const smokeDir = path.join(prefix, "smoke-work");
+  await mkdir(smokeDir, { recursive: true });
+  await writeFile(path.join(smokeDir, "deck.ir.json"), `${JSON.stringify({
+    schema: "officegen.ir.document@1.2",
+    title: "Pack smoke",
+    targets: ["pptx"],
+    sections: [{ title: "Pack smoke", blocks: [{ type: "table", rows: [{ metric: "ok", value: "true" }] }] }]
+  })}\n`, "utf8");
+  const renderEnvelope = JSON.parse(run(npxOfficegen(prefix), ["render", "deck.ir.json", "--target", "pptx", "--out", "deck.pptx", "--json"], { cwd: smokeDir, capture: true }));
+  const inspectEnvelope = JSON.parse(run(npxOfficegen(prefix), ["inspect", "deck.pptx", "--depth", "summary", "--agent", "--json"], { cwd: smokeDir, capture: true }));
 
   if (version !== manifest.version) {
     throw new Error(`officegen --version (${version}) did not match package version (${manifest.version}).`);
@@ -49,13 +59,19 @@ try {
   if (!capabilityEnvelope.ok || capabilityEnvelope.result?.schema !== "officegen.capabilities@1.2") {
     throw new Error("installed CLI did not return a valid capabilities envelope.");
   }
+  if (!renderEnvelope.ok || renderEnvelope.result?.target !== "pptx") {
+    throw new Error("installed CLI could not render a PPTX smoke artifact.");
+  }
+  if (!inspectEnvelope.ok || inspectEnvelope.result?.trusted?.summary?.slides !== 1) {
+    throw new Error("installed CLI could not inspect the PPTX smoke artifact.");
+  }
 
   console.log(JSON.stringify({
     ok: true,
     tarball,
     packageName: manifest.name,
     version,
-    command: "officegen capabilities --json"
+    command: "officegen capabilities/render/inspect smoke"
   }, null, 2));
 } finally {
   if (process.platform === "win32" && process.env.CI) {

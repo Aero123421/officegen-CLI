@@ -60,9 +60,9 @@ const substrateBooleans = {
     diagram: true,
     schema: true,
     errors: true,
-    template: false,
-    design: false,
-    layout: false,
+    template: true,
+    design: true,
+    layout: true,
     agent: true,
     mcp: false,
     renderer: false,
@@ -121,7 +121,7 @@ function baseConfig(profile, features) {
             }
         },
         agent: {
-            defaultJsonBudgetBytes: 8192,
+            defaultJsonBudgetBytes: 32768,
             inspectDefaultDepth: "summary",
             largeOutputMode: "path-only",
             requireCapabilitiesCheck: true
