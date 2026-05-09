@@ -1,24 +1,24 @@
 export const COMMAND_METADATA = [
-    meta("capabilities", "有効機能とAgent可視機能", ["capabilities"]),
-    meta("help", "動的help", ["help", "help workflow", "help error"]),
-    meta("config", "config確認・設定", ["config show", "config set"]),
-    meta("doctor", "環境確認", ["doctor"]),
-    meta("schema", "schema取得・検証・migration", ["schema list", "schema get", "schema validate", "schema migrate"]),
-    meta("errors", "エラーカタログ", ["errors list", "errors inspect"]),
-    core("inspect", "既存ファイル解析", ["inspect"]),
-    core("view", "SVG/HTMLプレビューとobject map", ["view"]),
-    core("edit", "EditOpsで既存ファイル編集", ["edit"]),
-    core("render", "IR/Specから新規ファイル生成", ["render"]),
-    core("scaffold", "LLMなしの雛形IR/ops/data生成", ["scaffold"]),
-    core("export", "形式変換", ["export"]),
-    core("validate", "スキーマ・構造・品質検証", ["validate"]),
-    core("diagnose", "問題検出", ["diagnose"]),
-    core("repair", "修復または修復案生成", ["repair"]),
-    core("run", "複合workflow実行", ["run"]),
-    core("asset", "画像・添付物・メディア", ["asset add", "asset inspect", "asset extract", "asset replace"]),
-    core("chart", "グラフ", ["chart render"]),
-    core("diagram", "図解", ["diagram render"]),
-    optional("template", "テンプレート作成・充填", [
+    meta("capabilities", "Show enabled features and agent-visible commands", ["capabilities"]),
+    meta("help", "Show human and agent workflow help", ["help", "help workflow", "help error"]),
+    meta("config", "Inspect or update effective configuration", ["config show", "config set"]),
+    meta("doctor", "Check the local runtime and project setup", ["doctor"]),
+    meta("schema", "List, fetch, validate, and migrate schemas", ["schema list", "schema get", "schema validate", "schema migrate"]),
+    meta("errors", "List and inspect machine-readable error codes", ["errors list", "errors inspect"]),
+    core("inspect", "Inspect Office/PDF files and produce trusted metadata", ["inspect"]),
+    core("view", "Create SVG/HTML previews and object maps", ["view"]),
+    core("edit", "Apply declarative EditOps to existing files", ["edit"]),
+    core("render", "Render document IR/specs into Office/PDF files", ["render"]),
+    core("scaffold", "Create valid starter IR without an LLM", ["scaffold"]),
+    core("export", "Export supported formats with explicit fidelity", ["export"]),
+    core("validate", "Validate schemas, structure, and quality gates", ["validate"]),
+    core("diagnose", "Detect problems in generated or existing files", ["diagnose"]),
+    core("repair", "Repair files or produce a repair plan", ["repair"]),
+    core("run", "Execute a multi-step workflow with run artifacts", ["run"]),
+    core("asset", "Inspect, extract, and replace embedded media", ["asset add", "asset inspect", "asset extract", "asset replace"]),
+    core("chart", "Render safe chart SVG assets", ["chart render"]),
+    core("diagram", "Render safe diagram SVG assets", ["diagram render"]),
+    optional("template", "Create, inspect, map, validate, and fill templates", [
         "template list",
         "template inspect",
         "template candidates",
@@ -27,7 +27,7 @@ export const COMMAND_METADATA = [
         "template validate",
         "template fill"
     ]),
-    optional("design", "デザイン知識抽出・保存・適用", [
+    optional("design", "Capture, inspect, validate, and apply design knowledge", [
         "design list",
         "design inspect",
         "design init",
@@ -37,11 +37,11 @@ export const COMMAND_METADATA = [
         "design capture",
         "design apply"
     ]),
-    optional("layout", "自動レイアウト", ["layout apply"]),
-    optional("agent", "Agent adapter生成", ["agent install", "agent refresh"]),
+    optional("layout", "Apply layout constraints", ["layout apply"]),
+    optional("agent", "Install or refresh agent adapters", ["agent install", "agent refresh"]),
     optional("mcp", "MCP server", ["mcp serve"], true),
-    optional("renderer", "外部レンダラー管理", ["renderer list", "renderer inspect", "renderer trust"], true),
-    optional("plugin", "plugin管理", ["plugin list", "plugin inspect", "plugin install", "plugin trust"], true)
+    optional("renderer", "Manage trusted external renderers", ["renderer list", "renderer inspect", "renderer trust"], true),
+    optional("plugin", "Manage trusted plugins", ["plugin list", "plugin inspect", "plugin install", "plugin trust"], true)
 ];
 export function metadataFor(feature) {
     return COMMAND_METADATA.find((entry) => entry.feature === feature);
