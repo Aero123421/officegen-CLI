@@ -1,5 +1,6 @@
 node_modules/
 .officegen/
+.github/
 packages/*/tsconfig.tsbuildinfo
 npm-debug.log*
 officegen_cli_spec_v1_2_hardened_ja.md

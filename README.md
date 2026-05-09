@@ -16,6 +16,12 @@ Install directly from GitHub:
 npm install -g github:Aero123421/officegen-CLI
 ```
 
+For tagged releases, GitHub Actions also publishes a checked npm tarball. This avoids git dependency preparation entirely:
+
+```bash
+npm install -g https://github.com/Aero123421/officegen-CLI/releases/download/v1.2.2/officegen-v1.2.2.tgz
+```
+
 Check that it works:
 
 ```bash
@@ -262,7 +268,10 @@ Package dry run:
 
 ```bash
 npm pack --dry-run
+npm run pack:smoke
 ```
+
+GitHub Actions run CI on Linux and Windows, CodeQL analysis, and tagged release packaging. A release is created from a `vX.Y.Z` tag or the manual Release workflow; the workflow uploads `officegen-vX.Y.Z.tgz` and its `.sha256`.
 
 Clean generated build output:
 
