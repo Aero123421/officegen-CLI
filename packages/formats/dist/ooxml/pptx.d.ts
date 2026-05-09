@@ -7,6 +7,7 @@ export interface PptxShape {
     shapeIndex: number;
     shapeId?: string;
     name?: string;
+    placeholderType?: string;
     text: string;
     textPreview?: string;
     bounds?: ObjectBounds;
@@ -21,6 +22,7 @@ export interface PptxSlide {
     textObjects: ObjectMapEntry[];
     shapeCount: number;
     pictureCount: number;
+    chartCount: number;
     untrusted: true;
 }
 export declare function getSlidePaths(zip: JSZip): Promise<string[]>;

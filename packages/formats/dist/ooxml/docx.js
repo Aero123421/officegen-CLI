@@ -1,14 +1,28 @@
-import { makeStableObjectId, readZipText } from "../shared.js";
+import { readZipText, sortedZipFiles, stableHashId } from "../shared.js";
 import { localText, paragraphXml, preview, replaceNthBlock, setFirstTextInBlock } from "./xml.js";
 export async function inspectParagraphs(zip) {
-    const documentXml = (await readZipText(zip, "word/document.xml")) ?? "";
-    const paragraphs = [...documentXml.matchAll(/<w:p\b[\s\S]*?<\/w:p>/g)].map((match, index) => ({
-        stableObjectId: makeStableObjectId("docx", "body", "paragraph", index + 1),
-        index: index + 1,
-        text: localText(match[0], "t").join(""),
-        sourcePath: "word/document.xml",
-        untrusted: true
-    }));
+    const paths = sortedZipFiles(zip);
+    const docxParts = [
+        "word/document.xml",
+        ...paths.filter((path) => /^word\/header\d+\.xml$/i.test(path)).sort(),
+        ...paths.filter((path) => /^word\/footer\d+\.xml$/i.test(path)).sort(),
+        ...paths.filter((path) => /^word\/comments\.xml$/i.test(path)).sort()
+    ];
+    const paragraphs = [];
+    for (const partPath of docxParts) {
+        const xml = (await readZipText(zip, partPath)) ?? "";
+        const partKind = docxPartKind(partPath);
+        for (const [index, match] of [...xml.matchAll(/<w:p\b[\s\S]*?<\/w:p>/g)].entries()) {
+            paragraphs.push({
+                stableObjectId: stableHashId("docx", partKind, "paragraph", `${partPath}#${index + 1}`),
+                index: index + 1,
+                text: localText(match[0], "t").join(""),
+                sourcePath: partPath,
+                partKind,
+                untrusted: true
+            });
+        }
+    }
     const objectMap = paragraphs
         .filter((paragraph) => paragraph.text)
         .map((paragraph) => ({
@@ -20,7 +34,8 @@ export async function inspectParagraphs(zip) {
         xmlPath: paragraph.sourcePath,
         bounds: { x: 72, y: 72 + (paragraph.index - 1) * 28, width: 468, height: 24 },
         bbox: [72, 72 + (paragraph.index - 1) * 28, 468, 24],
-        selectorHints: { paragraph: paragraph.index, textPreview: preview(paragraph.text) },
+        selectorHints: { paragraph: paragraph.index, partKind: paragraph.partKind, sourcePath: paragraph.sourcePath, textPreview: preview(paragraph.text) },
+        editableOps: ["setText", "docx.insertParagraphAfter", "docx.addComment", "docx.addRedline"],
         trust: { level: "untrusted", reason: "document-content" },
         untrusted: true
     }));
@@ -31,5 +46,37 @@ export function setParagraphText(xml, ordinal, text) {
 }
 export function insertParagraphAfter(xml, ordinal, text) {
     return replaceNthBlock(xml, /<w:p\b[\s\S]*?<\/w:p>/g, ordinal, (paragraph) => `${paragraph}${paragraphXml(text, "w")}`);
+}
+export function replaceOrCreateHeaderFooter(xml, kind, text) {
+    const root = kind === "header" ? "w:hdr" : "w:ftr";
+    const ns = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
+    const content = `${paragraphXml(text, "w")}`;
+    if (!xml)
+        return `<${root} ${ns}>${content}</${root}>`;
+    if (new RegExp(`<${root}\\b[\\s\\S]*?<\\/${root}>`).test(xml)) {
+        return xml.replace(new RegExp(`(<${root}\\b[^>]*>)[\\s\\S]*?(<\\/${root}>)`), `$1${content}$2`);
+    }
+    return `<${root} ${ns}>${content}</${root}>`;
+}
+export function commentXml(id, author, text, date = new Date()) {
+    return `<w:comment w:id="${id}" w:author="${escapeXmlAttr(author)}" w:date="${date.toISOString()}">${paragraphXml(text, "w")}</w:comment>`;
+}
+export function insertedParagraphXml(text, author = "officegen", date = new Date()) {
+    return `<w:p><w:ins w:author="${escapeXmlAttr(author)}" w:date="${date.toISOString()}" w:id="1"><w:r><w:t>${escapeXmlTextLocal(text)}</w:t></w:r></w:ins></w:p>`;
+}
+function docxPartKind(path) {
+    if (/^word\/header/i.test(path))
+        return "header";
+    if (/^word\/footer/i.test(path))
+        return "footer";
+    if (/^word\/comments/i.test(path))
+        return "comment";
+    return "body";
+}
+function escapeXmlAttr(value) {
+    return escapeXmlTextLocal(value).replace(/"/g, "&quot;").replace(/'/g, "&apos;");
+}
+function escapeXmlTextLocal(value) {
+    return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 //# sourceMappingURL=docx.js.map

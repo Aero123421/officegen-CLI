@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import JSZip from "jszip";
 import { getBuiltinConfig } from "@officegen/core";
-import { edit, exportDocument, inspect, inspectInputZipSafety, render, renderChart, renderDiagram, replaceAsset, resolveEditSelectors, view } from "../src/index.js";
+import { diffDocuments, diagnose, edit, exportDocument, inspect, inspectInputZipSafety, render, renderChart, renderDiagram, replaceAsset, resolveEditSelectors, view } from "../src/index.js";
 
 describe("@officegen/formats MVP", () => {
   it("renders and inspects a basic PPTX with untrusted text separation", async () => {
@@ -46,6 +46,87 @@ describe("@officegen/formats MVP", () => {
     expect(inspected.objectMap.map((entry) => entry.text).join("\n")).toContain("Highlights");
     expect(inspected.objectMap.some((entry) => entry.kind === "tableCell" && entry.text === "Revenue")).toBe(true);
     expect(rendered.caveats[0]).toContain("tables");
+  });
+
+  it("renders native editable PPTX charts and exposes them in the object map", async () => {
+    const rendered = await render(
+      {
+        title: "Chart Deck",
+        targets: ["pptx"],
+        sections: [{
+          title: "Revenue",
+          blocks: [
+            { type: "chart", title: "Revenue", chartType: "bar", categories: ["Q1", "Q2"], values: [10, 15] }
+          ]
+        }]
+      },
+      { target: "pptx" }
+    );
+    const inspected = await inspect({ data: rendered.bytes, format: "pptx" }, { depth: "full" });
+
+    expect(inspected.trusted.summary.charts).toBeGreaterThan(0);
+    expect(inspected.objectMap.some((entry) => entry.kind === "chart" && entry.editableOps?.includes("pptx.updateChartData"))).toBe(true);
+    expect(rendered.caveats[0]).toContain("Office charts");
+  });
+
+  it("updates PPTX chart caches and the embedded chart workbook together", async () => {
+    const rendered = await render(
+      {
+        title: "Chart Deck",
+        targets: ["pptx"],
+        sections: [{ title: "Revenue", blocks: [{ type: "chart", title: "Revenue", categories: ["Q1", "Q2"], values: [10, 15] }] }]
+      },
+      { target: "pptx" }
+    );
+    const inspected = await inspect({ data: rendered.bytes, format: "pptx" }, { depth: "full" });
+    const chartId = inspected.objectMap.find((entry) => entry.kind === "chart")?.stableObjectId;
+    const edited = await edit(
+      { data: rendered.bytes, format: "pptx" },
+      [{ op: "pptx.updateChartData", selector: { stableObjectId: chartId }, seriesName: "Bookings", categories: ["H1", "H2", "H3"], values: [11, 22, 33] }]
+    );
+    const editedZip = await JSZip.loadAsync(edited.bytes as Uint8Array);
+    const chartPath = Object.keys(editedZip.files).find((path) => /^ppt\/charts\/chart\d+\.xml$/i.test(path));
+    const chartXml = chartPath ? await editedZip.file(chartPath)?.async("string") : undefined;
+    const embeddedPath = Object.keys(editedZip.files).find((path) => /^ppt\/embeddings\/.*\.xlsx$/i.test(path));
+    const embedded = embeddedPath ? await editedZip.file(embeddedPath)?.async("uint8array") : undefined;
+    expect(embedded).toBeDefined();
+    const workbookZip = await JSZip.loadAsync(embedded as Uint8Array);
+    const sheetXml = await workbookZip.file("xl/worksheets/sheet1.xml")?.async("string");
+
+    expect(chartXml).toContain("Bookings");
+    expect(chartXml).toContain("Sheet1!$A$2:$A$4");
+    expect(chartXml).toContain("<c:v>H3</c:v>");
+    expect(chartXml).toContain("<c:v>33</c:v>");
+    expect(sheetXml).toContain("<t>Bookings</t>");
+    expect(sheetXml).toContain("<t>H3</t>");
+    expect(sheetXml).toContain("<t>33</t>");
+  });
+
+  it("replaces PPTX images by shape selector and writes crop metadata", async () => {
+    const zip = new JSZip();
+    zip.file("ppt/slides/slide1.xml", [
+      "<p:sld><p:pic><p:nvPicPr><p:cNvPr id=\"10\" name=\"Logo\"/></p:nvPicPr>",
+      "<p:blipFill><a:blip r:embed=\"rId1\"/></p:blipFill>",
+      "<p:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"914400\" cy=\"914400\"/></a:xfrm></p:spPr>",
+      "</p:pic></p:sld>"
+    ].join(""));
+    zip.file("ppt/slides/_rels/slide1.xml.rels", "<Relationships><Relationship Id=\"rId1\" Target=\"../media/image1.png\"/></Relationships>");
+    zip.file("ppt/media/image1.png", pngBytes(1, 1));
+    const bytes = await zip.generateAsync({ type: "uint8array" });
+    const inspected = await inspect({ data: bytes, format: "pptx" });
+    const pictureId = inspected.objectMap.find((entry) => entry.kind === "picture")?.stableObjectId;
+
+    const edited = await edit(
+      { data: bytes, format: "pptx" },
+      [{ op: "pptx.replaceImageByShape", selector: { stableObjectId: pictureId }, replacementBase64: Buffer.from(pngBytes(2, 1)).toString("base64"), fit: "cover" }]
+    );
+    const editedZip = await JSZip.loadAsync(edited.bytes as Uint8Array);
+    const slideXml = await editedZip.file("ppt/slides/slide1.xml")?.async("string");
+    const imageBytes = await editedZip.file("ppt/media/image1.png")?.async("uint8array");
+
+    expect(edited.changed).toBe(true);
+    expect(slideXml).toContain("<a:srcRect");
+    expect(imageBytes?.byteLength).toBe(pngBytes(2, 1).byteLength);
   });
 
   it("returns approximate view pages with objectMap", async () => {
@@ -137,6 +218,99 @@ describe("@officegen/formats MVP", () => {
       ["C1", ""]
     ]);
     expect(inspected.objectMap.map((entry) => entry.label)).toEqual(["A1", "B1", "C1"]);
+  });
+
+  it("renders native Excel table objects and inspects workbook objects compactly", async () => {
+    const rendered = await render(
+      { title: "Book", targets: ["xlsx"], sheets: [{ name: "Data", tableName: "RevenueTable", rows: [{ quarter: "Q1", revenue: 10 }, { quarter: "Q2", revenue: 15 }] }] },
+      { target: "xlsx" }
+    );
+    const inspected = await inspect({ data: rendered.bytes, format: "xlsx" }, { depth: "summary" });
+
+    expect(inspected.trusted.summary.tables).toBeGreaterThan(0);
+    expect(inspected.untrusted.workbookObjects?.tables.length).toBeGreaterThan(0);
+    expect(inspected.objectMap.some((entry) => entry.kind === "table")).toBe(true);
+  });
+
+  it("writes and updates XLSX table parts, relationships, and worksheet table references", async () => {
+    const rendered = await render({ title: "Book", sheets: [{ name: "Data", rows: [["A", "B"], ["old", "value"]] }] }, { target: "xlsx" });
+    const edited = await edit(
+      { data: rendered.bytes, format: "xlsx" },
+      [{ op: "xlsx.writeTable", sheet: 1, startCell: "D4", tableName: "ManualTable", rows: [["Name", "Value"], ["A", 1], ["B", 2]] }]
+    );
+    const editedZip = await JSZip.loadAsync(edited.bytes as Uint8Array);
+    const tableXml = await editedZip.file("xl/tables/table2.xml")?.async("string") ?? await editedZip.file("xl/tables/table1.xml")?.async("string");
+    const worksheetXml = await editedZip.file("xl/worksheets/sheet1.xml")?.async("string");
+    const relsXml = await editedZip.file("xl/worksheets/_rels/sheet1.xml.rels")?.async("string");
+    const contentTypes = await editedZip.file("[Content_Types].xml")?.async("string");
+
+    expect(tableXml).toContain('displayName="ManualTable"');
+    expect(tableXml).toContain('ref="D4:E6"');
+    expect(worksheetXml).toContain("<tableParts");
+    expect(relsXml).toContain("relationships/table");
+    expect(contentTypes).toContain("spreadsheetml.table+xml");
+  });
+
+  it("edits DOCX headers, comments, and tracked insertions without native Office", async () => {
+    const rendered = await render({ title: "Doc", sections: [{ title: "Body", body: "Paragraph" }] }, { target: "docx" });
+    const inspected = await inspect({ data: rendered.bytes, format: "docx" });
+    const paragraphId = inspected.objectMap.find((entry) => entry.text === "Paragraph")?.stableObjectId;
+    const edited = await edit(
+      { data: rendered.bytes, format: "docx" },
+      [
+        { op: "docx.setHeader", text: "Confidential" },
+        { op: "docx.setFooter", text: "Page footer" },
+        { op: "docx.addComment", selector: { stableObjectId: paragraphId }, text: "Review this", author: "QA" },
+        { op: "docx.addRedline", selector: { stableObjectId: paragraphId }, text: "Inserted with tracking", author: "QA" }
+      ]
+    );
+    const reinspected = await inspect({ data: edited.bytes, format: "docx" }, { depth: "full" });
+    const text = reinspected.objectMap.map((entry) => entry.text).join("\n");
+
+    expect(reinspected.trusted.summary.headers).toBe(1);
+    expect(reinspected.trusted.summary.footers).toBe(1);
+    expect(reinspected.trusted.summary.comments).toBe(1);
+    expect(text).toContain("Confidential");
+    expect(text).toContain("Review this");
+    expect(text).toContain("Inserted with tracking");
+  });
+
+  it("keeps DOCX stableObjectIds unique across repeated header/footer parts", async () => {
+    const zip = new JSZip();
+    zip.file("word/document.xml", "<w:document><w:body><w:p><w:r><w:t>Body</w:t></w:r></w:p></w:body></w:document>");
+    zip.file("word/header1.xml", "<w:hdr><w:p><w:r><w:t>Header A</w:t></w:r></w:p></w:hdr>");
+    zip.file("word/header2.xml", "<w:hdr><w:p><w:r><w:t>Header B</w:t></w:r></w:p></w:hdr>");
+    const inspected = await inspect({ data: await zip.generateAsync({ type: "uint8array" }), format: "docx" }, { depth: "full" });
+    const ids = inspected.objectMap.map((entry) => entry.stableObjectId);
+
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(inspected.objectMap.find((entry) => entry.text === "Header A")?.stableObjectId).not.toBe(inspected.objectMap.find((entry) => entry.text === "Header B")?.stableObjectId);
+  });
+
+  it("reports semantic and approximate visual differences", async () => {
+    const before = await render({ title: "Before", slides: [{ title: "Slide", body: "Alpha" }] }, { target: "pptx" });
+    const after = await edit(
+      { data: before.bytes, format: "pptx" },
+      [{ op: "setText", selector: { contains: "Alpha" }, text: "Beta" }]
+    );
+    const diff = await diffDocuments({ data: before.bytes, format: "pptx" }, { data: after.bytes, format: "pptx" }, { visual: true });
+
+    expect(diff.changed).toBe(true);
+    expect(diff.summary.changedTextObjects).toBe(1);
+    expect(diff.summary.visualRegressionScore).toBeGreaterThan(0);
+  });
+
+  it("flags OOXML relationship repair risks without launching Office", async () => {
+    const zip = new JSZip();
+    zip.file("[Content_Types].xml", "<Types/>");
+    zip.file("_rels/.rels", "<Relationships/>");
+    zip.file("ppt/presentation.xml", "<p:presentation/>");
+    zip.file("ppt/slides/slide1.xml", "<p:sld/>");
+    zip.file("ppt/slides/_rels/slide1.xml.rels", "<Relationships><Relationship Id=\"rId1\" Target=\"../media/missing.png\"/></Relationships>");
+    const bytes = await zip.generateAsync({ type: "uint8array" });
+    const result = await diagnose({ data: bytes, format: "pptx" });
+
+    expect(result.issues.map((issue) => issue.code)).toContain("OFFICE_REPAIR_RISK_BROKEN_RELATIONSHIP");
   });
 
   it("keeps XLSX summary inspect compact while full inspect keeps cells", async () => {
@@ -441,3 +615,12 @@ describe("@officegen/formats MVP", () => {
     expect(edited.skipped).toBe(1);
   });
 });
+
+function pngBytes(width: number, height: number): Uint8Array {
+  const bytes = new Uint8Array(24);
+  bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+  const view = new DataView(bytes.buffer);
+  view.setUint32(16, width);
+  view.setUint32(20, height);
+  return bytes;
+}

@@ -15,6 +15,7 @@ const commandMap = {
     validate: ["validate"],
     diagnose: ["diagnose"],
     repair: ["repair"],
+    diff: ["diff"],
     run: ["run"],
     asset: ["asset add", "asset inspect", "asset extract", "asset replace"],
     chart: ["chart render"],

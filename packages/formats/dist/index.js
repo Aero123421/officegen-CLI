@@ -8,5 +8,6 @@ export * from "./charts.js";
 export * from "./diagrams.js";
 export * from "./diagnose.js";
 export * from "./repair.js";
+export * from "./diff.js";
 export { getLoadedZipSafetyReport, inspectInputZipSafety, loadZip, stableHashId } from "./shared.js";
 //# sourceMappingURL=index.js.map

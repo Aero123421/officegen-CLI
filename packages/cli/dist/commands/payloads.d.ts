@@ -17,6 +17,8 @@ export declare function renderPayload(context: RuntimeContext): Promise<unknown>
 export declare function exportPayload(context: RuntimeContext): Promise<unknown>;
 export declare function diagnosePayload(context: RuntimeContext): Promise<unknown>;
 export declare function repairPayload(context: RuntimeContext): Promise<unknown>;
+export declare function diffPayload(context: RuntimeContext): Promise<unknown>;
+export declare function runPayload(context: RuntimeContext): Promise<unknown>;
 export declare function assetPayload(context: RuntimeContext, subcommand?: string): Promise<unknown>;
 export declare function chartPayload(context: RuntimeContext): Promise<unknown>;
 export declare function diagramPayload(context: RuntimeContext): Promise<unknown>;

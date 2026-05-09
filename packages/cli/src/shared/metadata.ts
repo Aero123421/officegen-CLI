@@ -16,6 +16,7 @@ export const COMMAND_METADATA: CapabilityEntry[] = [
   core("validate", "Validate schemas, structure, and quality gates", ["validate"]),
   core("diagnose", "Detect problems in generated or existing files", ["diagnose"]),
   core("repair", "Repair files or produce a repair plan", ["repair"]),
+  core("diff", "Compare Office/PDF files semantically and with approximate visual regression scores", ["diff"]),
   core("run", "Execute a multi-step workflow with run artifacts", ["run"]),
   core("asset", "Inspect, extract, and replace embedded media", ["asset add", "asset inspect", "asset extract", "asset replace"]),
   core("chart", "Render safe chart SVG assets", ["chart render"]),

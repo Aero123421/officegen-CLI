@@ -1,15 +1,20 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import {
+  appendTrace,
+  createRunFolder,
   getCapabilities,
   getSchema,
   listErrors,
   listSchemas,
   OFFICEGEN_CLI_VERSION,
+  sha256File,
+  updateManifest,
   validateSchema
 } from "@officegen/core";
 import {
   diagnose,
+  diffDocuments,
   edit,
   exportDocument,
   extractAssets,
@@ -102,10 +107,9 @@ export function capabilitiesPayload(context: RuntimeContext): unknown {
         sideEffects: ["template", "design", "layout"].includes(entry.feature) ? "writes JSON plans/captures under .officegen unless --out selects another project-local path; does not directly edit Office files" : undefined
       })),
     unsupportedNow: [
-      "native PowerPoint editable charts from IR",
       "lossless Office-to-PDF conversion without native renderer availability",
       "OCR for scanned PDF pages",
-      "automatic image crop rewriting during asset replace"
+      "native Office repair-dialog detection without launching Office"
     ],
     progressiveDisclosure: {
       jsonBudgetBytes: context.jsonBudgetBytes ?? context.config.agent.defaultJsonBudgetBytes,
@@ -397,7 +401,7 @@ export async function editPayload(context: RuntimeContext): Promise<unknown> {
   }
   const raw = await readInputJson(context, opsPath);
   const editOptions = asRecord(asRecord(raw).options);
-  const operations = normalizeEditOperations(raw);
+  const operations = await hydrateEditOperationAssets(context, normalizeEditOperations(raw));
   const editOpsValidation = validateSchema("officegen.edit.ops@1.2", editOpsValidationPayload(raw, operations, input));
   if (!editOpsValidation.ok) {
     throw new CliFailure({
@@ -416,6 +420,21 @@ export async function editPayload(context: RuntimeContext): Promise<unknown> {
     continueOnError: booleanOption(editOptions, "continueOnError"),
     idempotencyKey: typeof editOptions.idempotencyKey === "string" ? editOptions.idempotencyKey : undefined
   }));
+}
+
+async function hydrateEditOperationAssets(context: RuntimeContext, operations: ReturnType<typeof normalizeEditOperations>): Promise<ReturnType<typeof normalizeEditOperations>> {
+  const hydrated = [];
+  for (const operation of operations) {
+    const record = asRecord(operation);
+    if (record.op === "pptx.replaceImageByShape" && typeof record.replacementPath === "string" && typeof record.replacementBase64 !== "string") {
+      const validated = await validateInputPath(context, record.replacementPath);
+      const bytes = await fs.readFile(validated);
+      hydrated.push({ ...operation, replacementPath: validated, replacementBase64: bytes.toString("base64") });
+      continue;
+    }
+    hydrated.push(operation);
+  }
+  return hydrated as ReturnType<typeof normalizeEditOperations>;
 }
 
 function editOpsValidationPayload(raw: unknown, operations: ReturnType<typeof normalizeEditOperations>, input: string): unknown {
@@ -510,6 +529,181 @@ export async function repairPayload(context: RuntimeContext): Promise<unknown> {
     dryRun: hasFlag(context.argv, "--dry-run"),
     issues: issues as never
   }));
+}
+
+export async function diffPayload(context: RuntimeContext): Promise<unknown> {
+  const args = positionalArgs(context.argv, 3);
+  const before = args[0];
+  const after = args[1];
+  if (!before || !after) {
+    throw new CliFailure({
+      code: "SCHEMA_INVALID",
+      command: "diff",
+      message: "diff requires before and after input files."
+    }, 2);
+  }
+  return diffDocuments(
+    await validateInputPath(context, before),
+    await validateInputPath(context, after),
+    withFormatConfig(context, {
+      visual: hasFlag(context.argv, "--visual"),
+      maxPages: numberOption(context, "--max-pages")
+    })
+  );
+}
+
+export async function runPayload(context: RuntimeContext): Promise<unknown> {
+  const planPath = positionalArgs(context.argv, 3)[0];
+  if (!planPath) {
+    throw new CliFailure({
+      code: "SCHEMA_INVALID",
+      command: "run",
+      message: "run requires a workflow plan JSON file."
+    }, 2);
+  }
+  const plan = asRecord(await readInputJson(context, planPath));
+  const steps = Array.isArray(plan.steps) ? plan.steps.map(asRecord) : [];
+  if (!steps.length) {
+    throw new CliFailure({
+      code: "SCHEMA_INVALID",
+      command: "run",
+      message: "run plan requires a non-empty steps array."
+    }, 2);
+  }
+  const folder = await createRunFolder(context.config);
+  const stepOutputs = new Map<string, string>();
+  const results = [];
+  const validatedPlanPath = await validateInputPath(context, planPath);
+  await fs.copyFile(validatedPlanPath, path.join(folder.irDir, "plan.json"));
+  await updateManifest(folder, (manifest) => {
+    manifest.inputs.push({ path: validatedPlanPath });
+  });
+
+  for (const [index, step] of steps.entries()) {
+    const id = String(step.id ?? `step-${index + 1}`);
+    const command = String(step.command ?? step.type ?? "");
+    const startedAt = new Date().toISOString();
+    await appendTrace(folder, { event: "step.start", id, command, startedAt });
+    const result = await executeRunStep(context, folder, step, stepOutputs, index);
+    const resultPath = path.join(folder.logsDir, `${String(index + 1).padStart(2, "0")}-${safeFileToken(id)}.result.json`);
+    await fs.writeFile(resultPath, `${JSON.stringify(result, null, 2)}\n`, "utf8");
+    const resultOut = typeof (result as Record<string, unknown>).out === "string" ? String((result as Record<string, unknown>).out) : undefined;
+    if (resultOut) stepOutputs.set(id, resultOut);
+    results.push({ id, command, resultPath, ok: true, ...(resultOut ? { out: resultOut } : {}) });
+    await appendTrace(folder, { event: "step.end", id, command, ok: true, resultPath, ...(resultOut ? { out: resultOut } : {}), finishedAt: new Date().toISOString() });
+  }
+
+  const outputRecords: Array<{ path: string; sha256?: string }> = [];
+  for (const output of stepOutputs.values()) {
+    outputRecords.push({ path: output, sha256: await sha256File(output).catch(() => undefined) });
+  }
+  await updateManifest(folder, (manifest) => {
+    manifest.outputs.push(...outputRecords);
+  });
+
+  return {
+    schema: "officegen.run.result@1.2",
+    runId: folder.runId,
+    root: folder.root,
+    manifestPath: folder.manifestPath,
+    tracePath: folder.tracePath,
+    steps: results,
+    caveats: ["Run executes deterministic built-in steps only; external native renderers and OCR are not invoked by the workflow engine."]
+  };
+}
+
+async function executeRunStep(
+  context: RuntimeContext,
+  folder: Awaited<ReturnType<typeof createRunFolder>>,
+  step: Record<string, unknown>,
+  stepOutputs: Map<string, string>,
+  index: number
+): Promise<unknown> {
+  const command = String(step.command ?? step.type ?? "");
+  const input = await resolveRunInput(context, step.input, stepOutputs);
+  const out = await resolveRunOutput(context, folder, step, index);
+  if (command === "inspect") return inspect(requireRunInput(command, input), withFormatConfig(context, { depth: (step.depth as "summary" | "shallow" | "full" | undefined) ?? "summary" }));
+  if (command === "diagnose") return diagnose(requireRunInput(command, input), withFormatConfig(context, {}));
+  if (command === "view") {
+    const result = await view(requireRunInput(command, input), withFormatConfig(context, { format: "svg" as const, maxPages: typeof step.maxPages === "number" ? step.maxPages : undefined }));
+    const viewDir = out ?? path.join(folder.viewsDir, `${String(index + 1).padStart(2, "0")}-view`);
+    await fs.mkdir(viewDir, { recursive: true });
+    await Promise.all(result.pages.map((page) => fs.writeFile(path.join(viewDir, `page-${String(page.page).padStart(3, "0")}.svg`), page.content, "utf8")));
+    await fs.writeFile(path.join(viewDir, "object-map.json"), `${JSON.stringify(result.objectMap, null, 2)}\n`, "utf8");
+    return { ...result, out: viewDir, pages: result.pages.map((page) => ({ ...page, content: undefined })) };
+  }
+  if (command === "render") {
+    const ir = await readInputJson(context, requireRunInput(command, input));
+    return render(ir as Parameters<typeof render>[0], withFormatConfig(context, { out: out ?? path.join(folder.outputDir, `${String(index + 1).padStart(2, "0")}-render.${String(step.target ?? "pptx")}`), target: step.target as RenderTarget | undefined }));
+  }
+  if (command === "edit") {
+    const opsInput = await resolveRunInput(context, step.ops, stepOutputs);
+    const rawOps = await readInputJson(context, requireRunInput(command, opsInput));
+    const operations = await hydrateEditOperationAssets(context, normalizeEditOperations(rawOps));
+    return edit(requireRunInput(command, input), operations, withFormatConfig(context, {
+      out: out ?? path.join(folder.outputDir, `${String(index + 1).padStart(2, "0")}-edited.${path.extname(requireRunInput(command, input)).replace(".", "") || "pptx"}`),
+      dryRun: step.dryRun === true,
+      resolveSelectors: step.resolveSelectors === true
+    }));
+  }
+  if (command === "export") {
+    return exportDocument(requireRunInput(command, input), withFormatConfig(context, {
+      to: (step.to as "pdf" | "svg" | "html" | "pptx" | "docx" | "xlsx" | undefined) ?? "pdf",
+      mode: (step.mode as "fast" | "internal" | "native" | undefined) ?? "fast",
+      out: out ?? path.join(folder.outputDir, `${String(index + 1).padStart(2, "0")}-export.${String(step.to ?? "pdf")}`)
+    }));
+  }
+  if (command === "diff") {
+    const before = await resolveRunInput(context, step.before, stepOutputs);
+    const after = await resolveRunInput(context, step.after, stepOutputs);
+    return diffDocuments(requireRunInput("diff.before", before), requireRunInput("diff.after", after), withFormatConfig(context, {
+      visual: step.visual === true,
+      maxPages: typeof step.maxPages === "number" ? step.maxPages : undefined
+    }));
+  }
+  throw new CliFailure({
+    code: "UNKNOWN_COMMAND",
+    command: "run",
+    message: `Unsupported run step command: ${command}`,
+    details: { command, supported: ["inspect", "view", "diagnose", "render", "edit", "export", "diff"] }
+  }, 2);
+}
+
+async function resolveRunInput(context: RuntimeContext, value: unknown, stepOutputs: Map<string, string>): Promise<string | undefined> {
+  if (typeof value !== "string") return undefined;
+  if (value.startsWith("$")) return stepOutputs.get(value.slice(1));
+  return validateInputPath(context, value);
+}
+
+async function resolveRunOutput(context: RuntimeContext, folder: Awaited<ReturnType<typeof createRunFolder>>, step: Record<string, unknown>, index: number): Promise<string | undefined> {
+  if (typeof step.out !== "string") return undefined;
+  if (step.out.startsWith("$run/")) {
+    const candidate = path.resolve(folder.root, step.out.slice("$run/".length));
+    const relative = path.relative(folder.root, candidate);
+    if (relative.startsWith("..") || path.isAbsolute(relative)) {
+      throw new CliFailure({
+        code: "SECURITY_PATH_OUTSIDE_ROOT",
+        command: "run",
+        message: "$run output paths must stay inside the run folder.",
+        details: { out: step.out }
+      }, 4);
+    }
+    return candidate;
+  }
+  return validateOutputPath(context, step.out);
+}
+
+function requireRunInput(command: string, input: string | undefined): string {
+  if (input) return input;
+  throw new CliFailure({
+    code: "INPUT_NOT_FOUND",
+    command: "run",
+    message: `run step ${command} requires an input path.`
+  }, 3);
+}
+
+function safeFileToken(value: string): string {
+  return value.replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 80) || "step";
 }
 
 export async function assetPayload(context: RuntimeContext, subcommand?: string): Promise<unknown> {

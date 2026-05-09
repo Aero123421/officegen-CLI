@@ -3,7 +3,7 @@ import { OFFICEGEN_CLI_VERSION } from "../../../core/dist/index.js";
 import { commandFromArgv, positionalArgs } from "../shared/argv.js";
 import { makeEnvelope, writeResult } from "../shared/envelope.js";
 import { COMMAND_METADATA, metadataFor } from "../shared/metadata.js";
-import { agentPayload, assetPayload, capabilitiesPayload, chartPayload, configPayload, designPayload, diagnosePayload, diagramPayload, doctorPayload, editPayload, errorInspectPayload, errorsListPayload, exportPayload, groupPayload, helpPayload, inspectPayload, layoutPayload, mcpPayload, pluginPayload, renderPayload, rendererPayload, repairPayload, scaffoldPayload, schemaGetPayload, schemaListPayload, schemaMigratePayload, templatePayload, validatePayload, viewPayload, wiredPayload } from "./payloads.js";
+import { agentPayload, assetPayload, capabilitiesPayload, chartPayload, configPayload, designPayload, diagnosePayload, diffPayload, diagramPayload, doctorPayload, editPayload, errorInspectPayload, errorsListPayload, exportPayload, groupPayload, helpPayload, inspectPayload, layoutPayload, mcpPayload, pluginPayload, renderPayload, rendererPayload, repairPayload, runPayload, scaffoldPayload, schemaGetPayload, schemaListPayload, schemaMigratePayload, templatePayload, validatePayload, viewPayload } from "./payloads.js";
 const leafPayloads = {
     capabilities: capabilitiesPayload,
     help: (ctx) => helpPayload(ctx, positionalArgs(ctx.argv, 3)),
@@ -17,7 +17,8 @@ const leafPayloads = {
     validate: validatePayload,
     diagnose: diagnosePayload,
     repair: repairPayload,
-    run: wiredPayload("run")
+    diff: diffPayload,
+    run: runPayload
 };
 const groupPayloads = {
     asset: assetPayload,
@@ -162,6 +163,8 @@ export function writeCommandHelp(context, commandGroup, subcommand, stdout) {
 function usageSuffix(commandGroup, subcommand) {
     if (commandGroup === "inspect" || commandGroup === "view" || commandGroup === "diagnose" || commandGroup === "repair" || commandGroup === "export")
         return " <input>";
+    if (commandGroup === "diff")
+        return " <before> <after>";
     if (commandGroup === "render" || commandGroup === "validate")
         return " <input.json>";
     if (commandGroup === "edit")
@@ -195,6 +198,8 @@ function commandExamples(commandGroup, subcommand) {
         ];
     if (commandGroup === "render")
         return ["officegen render deck.ir.json --target pptx --out deck.pptx --json"];
+    if (commandGroup === "diff")
+        return ["officegen diff before.pptx after.pptx --visual --json"];
     if (commandGroup === "asset" && subcommand === "replace")
         return ["officegen asset replace deck.pptx --asset ppt/media/image1.png logo.png --out deck-logo.pptx --json"];
     if (commandGroup === "template")
@@ -311,6 +316,7 @@ function baseCommand(name, description) {
         .option("--mode <mode>", "export mode")
         .option("--issues <path>", "repair issues JSON")
         .option("--images", "extract image assets")
+        .option("--visual", "include approximate visual diff/regression output")
         .option("--asset <path>", "asset zip path")
         .option("--selector <selector>", "asset or object selector")
         .option("--name <name>", "template, design, plugin, or renderer name")

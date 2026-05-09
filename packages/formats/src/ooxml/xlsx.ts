@@ -52,6 +52,7 @@ export async function inspectSheets(zip: JSZip): Promise<{ sheets: XlsxSheet[]; 
         bounds,
         bbox: bounds ? [bounds.x, bounds.y, bounds.width, bounds.height] : undefined,
         selectorHints: { sheet: sheetIndex + 1, cell: cell.ref },
+        editableOps: ["setText", "xlsx.setCell"],
         trust: { level: "untrusted", reason: "document-content" },
         untrusted: true
       };
@@ -63,6 +64,47 @@ export async function inspectSheets(zip: JSZip): Promise<{ sheets: XlsxSheet[]; 
       index: sheetIndex + 1,
       sourcePath: sheetPath,
       cells,
+      untrusted: true
+    });
+  }
+  for (const [index, path] of paths.filter((path) => /^xl\/tables\/table\d+\.xml$/i.test(path)).sort(naturalSort).entries()) {
+    const xml = (await readZipText(zip, path)) ?? "";
+    const attrs = /<table\b([^>]*)/.exec(xml)?.[1] ?? "";
+    const name = xmlAttr(attrs, "displayName") ?? xmlAttr(attrs, "name") ?? `Table${index + 1}`;
+    const ref = xmlAttr(attrs, "ref");
+    objectMap.push({
+      stableObjectId: stableHashId("xlsx", "workbook", "table", path),
+      kind: "table",
+      label: name,
+      sourcePath: path,
+      xmlPath: path,
+      selectorHints: { tableName: name, ref },
+      editableOps: ["xlsx.writeTable", "xlsx.updateTable", "xlsx.appendRows"],
+      trust: { level: "untrusted", reason: "document-content" },
+      untrusted: true
+    });
+  }
+  for (const [index, path] of paths.filter((path) => /^xl\/charts\/chart\d+\.xml$/i.test(path)).sort(naturalSort).entries()) {
+    objectMap.push({
+      stableObjectId: stableHashId("xlsx", "workbook", "chart", path),
+      kind: "chart",
+      label: `Chart ${index + 1}`,
+      sourcePath: path,
+      xmlPath: path,
+      selectorHints: { chartPath: path },
+      trust: { level: "untrusted", reason: "document-content" },
+      untrusted: true
+    });
+  }
+  for (const [index, path] of paths.filter((path) => /^xl\/pivotTables\/pivotTable\d+\.xml$/i.test(path)).sort(naturalSort).entries()) {
+    objectMap.push({
+      stableObjectId: stableHashId("xlsx", "workbook", "pivotTable", path),
+      kind: "pivotTable",
+      label: `PivotTable ${index + 1}`,
+      sourcePath: path,
+      xmlPath: path,
+      selectorHints: { pivotTablePath: path },
+      trust: { level: "untrusted", reason: "document-content" },
       untrusted: true
     });
   }
@@ -110,6 +152,14 @@ export function insertRows(xml: string, rowIndex: number, rows: unknown[][]): { 
     .join("");
   const next = shifted.replace(/<\/sheetData>/, `${rowXml}</sheetData>`);
   return { changed: next !== xml, xml: next };
+}
+
+export function appendRows(xml: string, rows: unknown[][]): { changed: boolean; xml: string; startRow: number } {
+  const existing = extractWorksheetCells(xml);
+  const maxRow = Math.max(0, ...existing.map((cell) => rowFromRef(cell.ref)));
+  const startRow = maxRow + 1;
+  const inserted = insertRows(xml, startRow, rows);
+  return { ...inserted, startRow };
 }
 
 export function extractWorksheetCells(xml: string): WorksheetCell[] {

@@ -90,7 +90,25 @@ function editOperationSchemas() {
         size: { type: "number", minimum: 1 },
         color: { type: "string" },
         width: { type: "number", minimum: 0 },
-        height: { type: "number", minimum: 0 }
+        height: { type: "number", minimum: 0 },
+        replacementPath: { type: "string" },
+        replacementBase64: { type: "string" },
+        fit: { enum: ["contain", "cover", "stretch"] },
+        crop: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+                left: { type: "number", minimum: 0, maximum: 1 },
+                right: { type: "number", minimum: 0, maximum: 1 },
+                top: { type: "number", minimum: 0, maximum: 1 },
+                bottom: { type: "number", minimum: 0, maximum: 1 }
+            }
+        },
+        categories: { type: "array", minItems: 1, items: { type: "string" } },
+        values: { type: "array", minItems: 1, items: { type: "number" } },
+        seriesName: { type: "string" },
+        author: { type: "string" },
+        tableName: { type: "string" }
     };
     const pickFields = (allowed) => Object.fromEntries(allowed.map((field) => [field, fields[field]]));
     const op = (name, required, allowed, extra = {}, constraints = {}) => ({
@@ -111,10 +129,18 @@ function editOperationSchemas() {
         op("pptx.reorderSlides", ["order"], ["order"]),
         op("pptx.insertBulletItems", ["selector", "items"], ["selector", "items"]),
         op("pptx.replaceBulletItems", ["selector", "items"], ["selector", "items"]),
+        op("pptx.replaceImageByShape", ["selector"], ["selector", "replacementPath", "replacementBase64", "fit", "crop"], {}, { anyOf: [{ required: ["replacementPath"] }, { required: ["replacementBase64"] }] }),
+        op("pptx.updateChartData", ["selector", "categories", "values"], ["selector", "categories", "values", "seriesName"]),
         op("docx.insertParagraphAfter", ["selector", "text"], ["selector", "text"]),
+        op("docx.setHeader", ["text"], ["text"]),
+        op("docx.setFooter", ["text"], ["text"]),
+        op("docx.addComment", ["selector", "text"], ["selector", "text", "author"]),
+        op("docx.addRedline", ["selector", "text"], ["selector", "text", "author"]),
         op("xlsx.insertRows", ["rowIndex", "rows"], ["sheet", "rowIndex", "rows"]),
+        op("xlsx.appendRows", ["rows"], ["sheet", "rows"]),
         op("xlsx.setCell", ["cell", "value"], ["sheet", "cell", "value"]),
         op("xlsx.updateTable", ["startCell", "rows"], ["sheet", "startCell", "rows"]),
+        op("xlsx.writeTable", ["startCell", "rows"], ["sheet", "startCell", "rows", "tableName"]),
         op("pdf.textOverlay", ["page", "text", "x", "y"], ["page", "text", "x", "y", "size", "color"]),
         op("pdf.annotation", ["page", "text", "x", "y"], ["page", "text", "x", "y", "width", "height"])
     ];
@@ -182,6 +208,8 @@ const documentIrSchema = {
     properties: {
         schema: schemaField("officegen.ir.document@1.2"),
         title: { type: "string" },
+        header: { type: "string" },
+        footer: { type: "string" },
         metadata: {
             type: "object",
             additionalProperties: true,

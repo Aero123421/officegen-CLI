@@ -23,6 +23,10 @@ async function inspectPptx(input, options) {
     const mediaPaths = paths.filter((path) => /^ppt\/media\//i.test(path));
     const { slides, objectMap } = await inspectSlides(zip);
     const summaryDepth = options.depth === "summary";
+    const themePaths = paths.filter((path) => /^ppt\/theme\/theme\d+\.xml$/i.test(path));
+    const masterPaths = paths.filter((path) => /^ppt\/slideMasters\/slideMaster\d+\.xml$/i.test(path));
+    const layoutPaths = paths.filter((path) => /^ppt\/slideLayouts\/slideLayout\d+\.xml$/i.test(path));
+    const chartPaths = paths.filter((path) => /^ppt\/charts\/chart\d+\.xml$/i.test(path));
     const slidePayload = summaryDepth
         ? slides.map((slide) => ({
             stableObjectId: slide.stableObjectId,
@@ -32,6 +36,7 @@ async function inspectPptx(input, options) {
             textObjectCount: slide.textObjects.length,
             shapeCount: slide.shapeCount,
             pictureCount: slide.pictureCount,
+            chartCount: slide.chartCount,
             untrusted: true
         }))
         : slides;
@@ -42,6 +47,10 @@ async function inspectPptx(input, options) {
             slides: slides.length,
             textObjects: objectMap.length,
             assets: mediaPaths.length,
+            charts: chartPaths.length,
+            masters: masterPaths.length,
+            layouts: layoutPaths.length,
+            themes: themePaths.length,
             macros: macros.length,
             zipEntries: paths.length
         }, ["PPTX inspect is zip/XML based; animation and theme resolution are summarized only.", ...zipSafetyCaveats(getLoadedZipSafetyReport(zip))]),
@@ -53,6 +62,22 @@ async function inspectPptx(input, options) {
                 fileName: path.split("/").pop(),
                 untrusted: true
             })),
+            designInventory: {
+                themes: themePaths,
+                masters: masterPaths,
+                layouts: layoutPaths,
+                charts: chartPaths,
+                placeholders: objectMap
+                    .filter((entry) => entry.selectorHints?.placeholder)
+                    .slice(0, summaryDepth ? 40 : undefined)
+                    .map((entry) => ({
+                    stableObjectId: entry.stableObjectId,
+                    slide: entry.selectorHints?.slide,
+                    placeholder: entry.selectorHints?.placeholder,
+                    label: entry.label,
+                    untrusted: true
+                }))
+            },
             ...(options.depth === "full" || options.include?.includes("rawPaths") ? { rawPaths: paths } : {})
         },
         objectMap: summaryDepth ? compactObjectMap(objectMap, 25) : objectMap,
@@ -64,6 +89,10 @@ async function inspectDocx(input, options) {
     const paths = sortedZipFiles(zip);
     const { paragraphs, objectMap } = await inspectParagraphs(zip);
     const mediaPaths = paths.filter((path) => /^word\/media\//i.test(path));
+    const headerPaths = paths.filter((path) => /^word\/header\d+\.xml$/i.test(path));
+    const footerPaths = paths.filter((path) => /^word\/footer\d+\.xml$/i.test(path));
+    const commentPaths = paths.filter((path) => /^word\/comments\.xml$/i.test(path));
+    const stylePaths = paths.filter((path) => /^word\/styles\.xml$/i.test(path));
     const macros = paths.filter((path) => /vbaProject\.bin$/i.test(path));
     const summaryDepth = options.depth === "summary";
     return {
@@ -72,11 +101,21 @@ async function inspectDocx(input, options) {
             paragraphs: paragraphs.length,
             textObjects: objectMap.length,
             assets: mediaPaths.length,
+            headers: headerPaths.length,
+            footers: footerPaths.length,
+            comments: commentPaths.length,
+            styles: stylePaths.length,
             macros: macros.length,
             zipEntries: paths.length
         }, ["DOCX inspect reads main document XML; headers, footers, fields, and styles are summarized.", ...zipSafetyCaveats(getLoadedZipSafetyReport(zip))]),
         untrusted: {
             paragraphs: summaryDepth ? paragraphs.slice(0, 50).map((paragraph) => ({ ...paragraph, text: paragraph.text.slice(0, 300) })) : paragraphs,
+            documentParts: {
+                headers: headerPaths,
+                footers: footerPaths,
+                comments: commentPaths,
+                styles: stylePaths
+            },
             assets: mediaPaths.map((path, index) => ({
                 stableObjectId: makeStableObjectId("docx", "body", "asset", index + 1),
                 path,
@@ -99,6 +138,12 @@ async function inspectXlsx(input, options) {
         .filter((path) => /^xl\/worksheets\/sheet\d+\.xml$/i.test(path))
         .map(async (path) => (await readZipText(zip, path)) ?? ""));
     const formulaCount = worksheetXml.reduce((count, xml) => count + (xml.match(/<f\b/g) ?? []).length, 0);
+    const tablePaths = paths.filter((path) => /^xl\/tables\//i.test(path));
+    const chartPaths = paths.filter((path) => /^xl\/charts\//i.test(path));
+    const pivotPaths = paths.filter((path) => /^xl\/pivotTables\//i.test(path));
+    const slicerPaths = paths.filter((path) => /^xl\/slicers\//i.test(path) || /^xl\/slicerCaches\//i.test(path));
+    const definedNames = await readDefinedNames(zip);
+    const cellCount = sheets.reduce((count, sheet) => count + sheet.cells.length, 0);
     const sheetSummaries = summaryDepth
         ? sheets.map((sheet) => ({
             stableObjectId: sheet.stableObjectId,
@@ -119,16 +164,26 @@ async function inspectXlsx(input, options) {
         schema: "officegen.inspect.result@1.2",
         trusted: trustedMeta("officegen.inspect.result@1.2", input, {
             sheets: sheets.length,
-            cells: objectMap.length,
+            cells: cellCount,
             sharedStrings: sharedStrings.length,
             formulas: formulaCount,
-            tables: paths.filter((path) => /^xl\/tables\//i.test(path)).length,
-            charts: paths.filter((path) => /^xl\/charts\//i.test(path)).length,
+            tables: tablePaths.length,
+            charts: chartPaths.length,
+            pivotTables: pivotPaths.length,
+            slicers: slicerPaths.length,
+            definedNames: definedNames.length,
             macros: macros.length,
             zipEntries: paths.length
         }, ["XLSX inspect reads cached cell values; formulas, styles, and charts are summarized.", ...zipSafetyCaveats(getLoadedZipSafetyReport(zip))]),
         untrusted: {
             sheets: sheetSummaries,
+            workbookObjects: {
+                tables: tablePaths,
+                charts: chartPaths,
+                pivotTables: pivotPaths,
+                slicers: slicerPaths,
+                definedNames
+            },
             ...(options.depth === "full" || options.include?.includes("rawPaths") ? { rawPaths: paths } : {})
         },
         objectMap: summaryDepth ? compactObjectMap(objectMap, 50) : objectMap,
@@ -251,5 +306,16 @@ function columnName(index) {
         value = Math.floor(value / 26);
     }
     return name || "A";
+}
+async function readDefinedNames(zip) {
+    const workbookXml = (await readZipText(zip, "xl/workbook.xml")) ?? "";
+    return [...workbookXml.matchAll(/<definedName\b([^>]*)>([\s\S]*?)<\/definedName>/g)]
+        .map((match) => {
+        const attrs = match[1] ?? "";
+        const name = /\bname="([^"]+)"/.exec(attrs)?.[1] ?? "";
+        const ref = (match[2] ?? "").replace(/&apos;/g, "'").replace(/&amp;/g, "&");
+        return name ? { name, ref, untrusted: true } : undefined;
+    })
+        .filter((item) => Boolean(item));
 }
 //# sourceMappingURL=inspect.js.map

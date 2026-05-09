@@ -63,13 +63,47 @@ export type EditOperation = {
     items: string[];
     selector: EditSelector;
 } | {
+    op: "pptx.replaceImageByShape";
+    selector: EditSelector;
+    replacementBase64: string;
+    replacementPath?: string;
+    fit?: "contain" | "cover" | "stretch";
+    crop?: CropRect;
+} | {
+    op: "pptx.updateChartData";
+    selector: EditSelector;
+    categories: string[];
+    values: number[];
+    seriesName?: string;
+} | {
     op: "docx.insertParagraphAfter";
     text: string;
     selector: EditSelector;
 } | {
+    op: "docx.setHeader";
+    text: string;
+} | {
+    op: "docx.setFooter";
+    text: string;
+} | {
+    op: "docx.addComment";
+    text: string;
+    selector: EditSelector;
+    author?: string;
+} | {
+    op: "docx.addRedline";
+    text: string;
+    selector: EditSelector;
+    author?: string;
+} | {
     op: "xlsx.insertRows";
     sheet?: number;
     rowIndex: number;
+    rows: unknown[][];
+    selector?: EditSelector;
+} | {
+    op: "xlsx.appendRows";
+    sheet?: number;
     rows: unknown[][];
     selector?: EditSelector;
 } | {
@@ -84,7 +118,20 @@ export type EditOperation = {
     startCell: string;
     rows: unknown[][];
     selector?: EditSelector;
+} | {
+    op: "xlsx.writeTable";
+    sheet?: number;
+    startCell: string;
+    rows: unknown[][];
+    tableName?: string;
+    selector?: EditSelector;
 };
+interface CropRect {
+    left?: number;
+    right?: number;
+    top?: number;
+    bottom?: number;
+}
 export interface EditOptions {
     out?: string;
     dryRun?: boolean;
@@ -142,3 +189,4 @@ export interface EditResult {
 export declare function edit(input: InputLike, operations: EditOperation[], options?: EditOptions): Promise<EditResult>;
 export declare const editDocument: typeof edit;
 export declare function resolveEditSelectors(input: InputLike, operations: EditOperation[], options?: Pick<EditOptions, "format" | "config">): Promise<ResolveEditSelectorsResult>;
+export {};

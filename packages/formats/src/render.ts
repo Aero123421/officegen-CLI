@@ -12,6 +12,11 @@ interface BlockIR {
   items?: string[];
   rows?: Array<Record<string, unknown> | unknown[]>;
   path?: string;
+  chartType?: string;
+  categories?: string[];
+  values?: number[];
+  series?: Array<{ name?: string; values?: number[]; labels?: string[] }>;
+  fit?: "contain" | "cover" | "stretch";
 }
 
 export interface DocumentIR {
@@ -29,9 +34,16 @@ export interface DocumentIR {
   design?: {
     colors?: Record<string, string>;
     typography?: Record<string, unknown>;
+    theme?: {
+      headFontFace?: string;
+      bodyFontFace?: string;
+      lang?: string;
+    };
   };
   slides?: Array<{ title?: string; body?: string | string[]; blocks?: BlockIR[] }>;
-  sheets?: Array<{ name?: string; rows?: Array<Record<string, unknown> | unknown[]> }>;
+  sheets?: Array<{ name?: string; rows?: Array<Record<string, unknown> | unknown[]>; tableName?: string }>;
+  header?: string;
+  footer?: string;
 }
 
 export interface RenderOptions {
@@ -63,9 +75,18 @@ async function renderPptx(ir: DocumentIR, options: RenderOptions): Promise<Rende
   const mod = (await import("pptxgenjs")) as unknown as { default: new () => any };
   const pptx = new mod.default();
   pptx.layout = "LAYOUT_WIDE";
+  const theme = ir.design?.theme;
+  if (theme) {
+    pptx.author = "officegen";
+    pptx.theme = {
+      headFontFace: String(theme.headFontFace ?? "Aptos Display"),
+      bodyFontFace: String(theme.bodyFontFace ?? "Aptos"),
+      lang: String(theme.lang ?? "en-US")
+    };
+  }
   const slides = ir.slides?.length ? ir.slides : normalizedSections(ir);
   const diagnostics: Array<Record<string, unknown>> = [];
-  const caveats = ["PPTX generation supports native text boxes, lists, images, callouts, and tables; charts are currently represented as editable labeled placeholders unless a native chart renderer is added."];
+  const caveats = ["PPTX generation supports native text boxes, lists, images, callouts, tables, and basic editable Office charts."];
   for (const [sectionIndex, section] of slides.entries()) {
     const slide = pptx.addSlide();
     const palette = pptxPalette(ir);
@@ -127,8 +148,35 @@ async function renderPptx(ir: DocumentIR, options: RenderOptions): Promise<Rende
         continue;
       }
       if (type === "chart") {
-        slide.addText(`Chart: ${block.title ?? block.text ?? "data"}`, { x: 0.65, y, w: 12, h: 0.5, fontSize: 14, color: palette.accent, italic: true });
-        y += 0.65;
+        const chart = nativeChartData(block);
+        if (chart) {
+          const chartType = pptxChartType(pptx, block.chartType);
+          slide.addChart(chartType, chart.data, {
+            x: 0.75,
+            y,
+            w: 11.6,
+            h: 3.0,
+            showTitle: Boolean(block.title),
+            title: block.title,
+            showLegend: chart.data.length > 1,
+            showValue: false,
+            catAxisLabelFontFace: String(ir.design?.theme?.bodyFontFace ?? "Aptos"),
+            valAxisLabelFontFace: String(ir.design?.theme?.bodyFontFace ?? "Aptos"),
+            valAxisMinVal: 0,
+            showCatName: true
+          });
+          y += 3.25;
+        } else {
+          diagnostics.push({
+            code: "RENDER_CHART_DATA_MISSING",
+            severity: "warning",
+            slide: sectionIndex + 1,
+            message: "Chart block was rendered as a labeled placeholder because categories/values or series data were missing."
+          });
+          slide.addText(`Chart: ${block.title ?? block.text ?? "data"}`, { x: 0.65, y, w: 12, h: 0.5, fontSize: 14, color: palette.accent, italic: true });
+          y += 0.65;
+        }
+        if (y > 7.0) diagnostics.push(renderOverflowDiagnostic(sectionIndex + 1, type, y));
         continue;
       }
       const text = block.text ?? "";
@@ -159,10 +207,29 @@ async function renderDocx(ir: DocumentIR, options: RenderOptions): Promise<Rende
     new docx.Paragraph({ text: ir.title ?? "Untitled", heading: docx.HeadingLevel.TITLE }),
     ...sections.flatMap((section) => [
       ...(section.title ? [new docx.Paragraph({ text: section.title, heading: docx.HeadingLevel.HEADING_1 })] : []),
-      ...toLines(section.body).map((line) => new docx.Paragraph({ children: [new docx.TextRun(line)] }))
+      ...docxChildrenFromBlocks(docx, section.blocks?.length ? section.blocks : blocksFromBody(section.body))
     ])
   ];
-  const document = new docx.Document({ sections: [{ properties: {}, children }] });
+  const document = new docx.Document({
+    styles: {
+      paragraphStyles: [
+        {
+          id: "OfficegenBody",
+          name: "Officegen Body",
+          basedOn: "Normal",
+          next: "OfficegenBody",
+          run: { font: "Aptos", size: 22 },
+          paragraph: { spacing: { after: 120 } }
+        }
+      ]
+    },
+    sections: [{
+      properties: {},
+      headers: ir.header ? { default: new docx.Header({ children: [new docx.Paragraph(ir.header)] }) } : undefined,
+      footers: ir.footer ? { default: new docx.Footer({ children: [new docx.Paragraph(ir.footer)] }) } : undefined,
+      children: children as any
+    }]
+  });
   const bytes = await docx.Packer.toBuffer(document);
   await writeOutput(options.out, bytes);
   return {
@@ -170,7 +237,7 @@ async function renderDocx(ir: DocumentIR, options: RenderOptions): Promise<Rende
     target: "docx",
     out: options.out,
     bytes: options.out ? undefined : bytes,
-    caveats: ["Basic DOCX generation supports headings and paragraphs only."]
+    caveats: ["DOCX generation supports headings, paragraphs, lists, tables, and simple headers/footers; tracked changes/comments are available through edit operations."]
   };
 }
 
@@ -185,8 +252,31 @@ async function renderXlsx(ir: DocumentIR, options: RenderOptions): Promise<Rende
       const keys = Object.keys(rows[0] as Record<string, unknown>);
       sheet.addRow(keys);
       for (const row of rows as Array<Record<string, unknown>>) sheet.addRow(keys.map((key) => row[key]));
+      if (rows.length) {
+        sheet.addTable({
+          name: sanitizeTableName(sheetSpec.tableName ?? `${sanitizeSheetName(sheetSpec.name ?? "Sheet")}Table`),
+          ref: "A1",
+          headerRow: true,
+          totalsRow: false,
+          style: { theme: "TableStyleMedium2", showRowStripes: true },
+          columns: keys.map((key) => ({ name: key })),
+          rows: (rows as Array<Record<string, unknown>>).map((row) => keys.map((key) => row[key]))
+        });
+      }
     } else {
       for (const row of rows as unknown[][]) sheet.addRow(row);
+      if (rows.length > 1 && Array.isArray(rows[0])) {
+        const headers = (rows[0] as unknown[]).map((value, index) => String(value ?? `Column${index + 1}`));
+        sheet.addTable({
+          name: sanitizeTableName(sheetSpec.tableName ?? `${sanitizeSheetName(sheetSpec.name ?? "Sheet")}Table`),
+          ref: "A1",
+          headerRow: true,
+          totalsRow: false,
+          style: { theme: "TableStyleMedium2", showRowStripes: true },
+          columns: headers.map((name) => ({ name })),
+          rows: (rows.slice(1) as unknown[][])
+        });
+      }
     }
     sheet.columns?.forEach((column: { width?: number }) => {
       column.width = Math.max(column.width ?? 12, 12);
@@ -199,7 +289,7 @@ async function renderXlsx(ir: DocumentIR, options: RenderOptions): Promise<Rende
     target: "xlsx",
     out: options.out,
     bytes: options.out ? undefined : bytes,
-    caveats: ["Basic XLSX generation supports worksheets and tabular rows only."]
+    caveats: ["XLSX generation supports worksheets, typed rows, and native Excel table objects; charts/pivots/slicers are inspected and guarded but not recalculated internally."]
   };
 }
 
@@ -308,6 +398,11 @@ function sanitizeSheetName(name: string): string {
   return name.replace(/[\[\]*?/\\:]/g, " ").slice(0, 31) || "Sheet";
 }
 
+function sanitizeTableName(name: string): string {
+  const cleaned = name.replace(/[^A-Za-z0-9_]/g, "_").replace(/^[^A-Za-z_]+/, "T_").slice(0, 120);
+  return cleaned || "OfficegenTable";
+}
+
 function pptxPalette(ir: DocumentIR): { background: string; text: string; accent: string; callout: string } {
   const colors = ir.design?.colors ?? {};
   return {
@@ -335,6 +430,60 @@ function normalizeTableRows(rows: Array<Record<string, unknown> | unknown[]>): u
     return [keys, ...(rows as Array<Record<string, unknown>>).map((row) => keys.map((key) => row[key]))];
   }
   return rows as unknown[][];
+}
+
+function nativeChartData(block: BlockIR): { data: Array<{ name: string; labels: string[]; values: number[] }> } | undefined {
+  const series = block.series?.length
+    ? block.series.map((item, index) => ({
+        name: String(item.name ?? `Series ${index + 1}`),
+        labels: (item.labels ?? block.categories ?? []).map(String),
+        values: (item.values ?? []).map(Number).filter(Number.isFinite)
+      }))
+    : [{
+        name: String(block.title ?? "Series 1"),
+        labels: (block.categories ?? []).map(String),
+        values: (block.values ?? []).map(Number).filter(Number.isFinite)
+      }];
+  const valid = series.filter((item) => item.labels.length && item.values.length && item.labels.length === item.values.length);
+  return valid.length ? { data: valid } : undefined;
+}
+
+function pptxChartType(pptx: any, chartType: unknown): unknown {
+  const requested = String(chartType ?? "bar").toLowerCase();
+  const types = pptx.ChartType ?? {};
+  if (requested === "line") return types.line ?? types.bar;
+  if (requested === "pie" || requested === "doughnut") return types.pie ?? types.bar;
+  if (requested === "scatter") return types.scatter ?? types.bar;
+  if (requested === "area") return types.area ?? types.bar;
+  return types.bar;
+}
+
+function docxChildrenFromBlocks(docx: typeof import("docx"), blocks: BlockIR[]): unknown[] {
+  const children: unknown[] = [];
+  for (const block of blocks) {
+    const type = block.type ?? "paragraph";
+    if (type === "heading") {
+      children.push(new docx.Paragraph({ text: block.text ?? block.title ?? "", heading: docx.HeadingLevel.HEADING_2 }));
+    } else if (type === "list" || block.items?.length) {
+      for (const item of block.items?.length ? block.items : toLines(block.text)) {
+        children.push(new docx.Paragraph({ text: item, bullet: { level: 0 } }));
+      }
+    } else if (type === "table" && block.rows?.length) {
+      children.push(new docx.Table({
+        width: { size: 100, type: docx.WidthType.PERCENTAGE },
+        rows: normalizeTableRows(block.rows).map((row) => new docx.TableRow({
+          children: row.map((cell) => new docx.TableCell({
+            children: [new docx.Paragraph(String(cell ?? ""))]
+          }))
+        }))
+      }));
+    } else if (type === "callout") {
+      children.push(new docx.Paragraph({ children: [new docx.TextRun({ text: block.text ?? "", bold: true })] }));
+    } else {
+      for (const line of toLines(block.text)) children.push(new docx.Paragraph({ text: line, style: "OfficegenBody" }));
+    }
+  }
+  return children;
 }
 
 function renderOverflowDiagnostic(slide: number, blockType: string, y: number): Record<string, unknown> {

@@ -11,6 +11,7 @@ export interface PptxShape {
   shapeIndex: number;
   shapeId?: string;
   name?: string;
+  placeholderType?: string;
   text: string;
   textPreview?: string;
   bounds?: ObjectBounds;
@@ -29,6 +30,18 @@ interface PptxPicture {
   sourcePath: string;
 }
 
+interface PptxChart {
+  stableObjectId: string;
+  slideIndex: number;
+  chartIndex: number;
+  shapeId?: string;
+  name?: string;
+  relationshipId?: string;
+  chartPath?: string;
+  bounds?: ObjectBounds;
+  sourcePath: string;
+}
+
 export interface PptxSlide {
   stableObjectId: string;
   index: number;
@@ -38,6 +51,7 @@ export interface PptxSlide {
   textObjects: ObjectMapEntry[];
   shapeCount: number;
   pictureCount: number;
+  chartCount: number;
   untrusted: true;
 }
 
@@ -70,6 +84,7 @@ export async function inspectSlides(zip: JSZip): Promise<{ slides: PptxSlide[]; 
     const slideStableObjectId = stableHashId("pptx", "deck", "slide", slidePath);
     const shapes = extractShapes(xml, slideNo, slideStableObjectId, slidePath);
     const pictures = extractPictures(xml, slideNo, slidePath, rels);
+    const charts = extractCharts(xml, slideNo, slidePath, rels);
     const tableCells = extractTableCells(xml, slideNo, slidePath);
     const textObjects = shapes
       .filter((shape) => shape.text)
@@ -88,8 +103,11 @@ export async function inspectSlides(zip: JSZip): Promise<{ slides: PptxSlide[]; 
             slide: slideNo,
             shapeId: shape.shapeId,
             name: shape.name,
+            placeholder: shape.placeholderType,
+            placeholderKey: shape.placeholderType,
             textPreview: shape.textPreview
           },
+          editableOps: ["setText", "pptx.insertBulletItems", "pptx.replaceBulletItems"],
           trust: { level: "untrusted", reason: "document-content" },
           untrusted: true
         };
@@ -109,6 +127,7 @@ export async function inspectSlides(zip: JSZip): Promise<{ slides: PptxSlide[]; 
             slide: slideNo,
             shapeId: picture.shapeId,
             name: picture.name,
+            pictureIndex: picture.pictureIndex,
             relationshipId: picture.relationshipId,
             assetPath: picture.assetPath
           },
@@ -116,6 +135,33 @@ export async function inspectSlides(zip: JSZip): Promise<{ slides: PptxSlide[]; 
           media: {
             relationshipId: picture.relationshipId,
             assetPath: picture.assetPath
+          },
+          trust: { level: "untrusted", reason: "document-content" },
+          untrusted: true
+        };
+        objectMap.push(entry);
+        return entry;
+      }))
+      .concat(charts.map((chart) => {
+        const entry: ObjectMapEntry = {
+          stableObjectId: chart.stableObjectId,
+          kind: "chart",
+          label: chart.name,
+          sourcePath: slidePath,
+          xmlPath: chart.chartPath,
+          bounds: chart.bounds,
+          bbox: chart.bounds ? [chart.bounds.x, chart.bounds.y, chart.bounds.width, chart.bounds.height] : undefined,
+          selectorHints: {
+            slide: slideNo,
+            shapeId: chart.shapeId,
+            name: chart.name,
+            relationshipId: chart.relationshipId,
+            chartPath: chart.chartPath
+          },
+          editableOps: ["pptx.updateChartData"],
+          media: {
+            relationshipId: chart.relationshipId,
+            chartPath: chart.chartPath
           },
           trust: { level: "untrusted", reason: "document-content" },
           untrusted: true
@@ -146,10 +192,41 @@ export async function inspectSlides(zip: JSZip): Promise<{ slides: PptxSlide[]; 
       textObjects,
       shapeCount: shapes.length,
       pictureCount: pictures.length,
+      chartCount: charts.length,
       untrusted: true
     });
   }
   return { slides, objectMap };
+}
+
+function extractCharts(xml: string, slideNo: number, sourcePath: string, rels: ReturnType<typeof parseRelationships>): PptxChart[] {
+  let chartIndex = 0;
+  const charts: PptxChart[] = [];
+  for (const match of xml.matchAll(/<p:graphicFrame\b[\s\S]*?<\/p:graphicFrame>/g)) {
+      const block = match[0];
+      const relationshipId = /<c:chart\b[^>]*\br:id="([^"]+)"/.exec(block)?.[1];
+      if (!relationshipId) continue;
+      chartIndex += 1;
+      const cNvPr = /<p:cNvPr\b([^>]*)\/>/.exec(block)?.[1] ?? "";
+      const shapeId = xmlAttr(cNvPr, "id");
+      const name = xmlAttr(cNvPr, "name");
+      const rel = rels.find((item) => item.id === relationshipId);
+      const chartPath = rel ? relationshipTarget("ppt/slides", rel.target) : undefined;
+      charts.push({
+        stableObjectId: shapeId
+          ? stableHashId("pptx", slideScope(sourcePath), "chart", `${sourcePath}#${shapeId}`)
+          : makeStableObjectId("pptx", slideScope(sourcePath), "chart", chartIndex),
+        slideIndex: slideNo,
+        chartIndex,
+        shapeId,
+        name,
+        relationshipId,
+        chartPath,
+        bounds: extractBounds(block),
+        sourcePath
+      });
+  }
+  return charts;
 }
 
 function extractPictures(xml: string, slideNo: number, sourcePath: string, rels: ReturnType<typeof parseRelationships>): PptxPicture[] {
@@ -203,6 +280,7 @@ export function extractShapes(xml: string, slideNo: number, slideStableObjectId:
     const cNvPr = /<p:cNvPr\b([^>]*)\/>/.exec(block)?.[1] ?? "";
     const shapeId = xmlAttr(cNvPr, "id");
     const name = xmlAttr(cNvPr, "name");
+    const placeholderType = /<p:ph\b([^>]*?)\/>/.exec(block)?.[1];
     const text = exactText(block, "a:t").join("");
     const scope = slideScope(sourcePath);
     const stableObjectId = shapeId
@@ -215,6 +293,7 @@ export function extractShapes(xml: string, slideNo: number, slideStableObjectId:
       shapeIndex,
       shapeId,
       name,
+      placeholderType: placeholderType ? xmlAttr(placeholderType, "type") ?? "body" : undefined,
       text,
       textPreview: preview(text),
       bounds: extractBounds(block),

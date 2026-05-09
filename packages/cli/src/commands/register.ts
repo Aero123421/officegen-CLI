@@ -12,6 +12,7 @@ import {
   configPayload,
   designPayload,
   diagnosePayload,
+  diffPayload,
   diagramPayload,
   doctorPayload,
   editPayload,
@@ -27,6 +28,7 @@ import {
   renderPayload,
   rendererPayload,
   repairPayload,
+  runPayload,
   scaffoldPayload,
   schemaGetPayload,
   schemaListPayload,
@@ -53,7 +55,8 @@ const leafPayloads: Partial<Record<FeatureKey, LeafPayload>> = {
   validate: validatePayload,
   diagnose: diagnosePayload,
   repair: repairPayload,
-  run: wiredPayload("run")
+  diff: diffPayload,
+  run: runPayload
 };
 
 const groupPayloads: Partial<Record<FeatureKey, GroupPayload>> = {
@@ -220,6 +223,7 @@ export function writeCommandHelp(
 
 function usageSuffix(commandGroup: string, subcommand: string | undefined): string {
   if (commandGroup === "inspect" || commandGroup === "view" || commandGroup === "diagnose" || commandGroup === "repair" || commandGroup === "export") return " <input>";
+  if (commandGroup === "diff") return " <before> <after>";
   if (commandGroup === "render" || commandGroup === "validate") return " <input.json>";
   if (commandGroup === "edit") return " <input> --ops <ops.json>";
   if (commandGroup === "asset" && subcommand === "replace") return " <input> --asset <zip-path> <replacement>";
@@ -242,6 +246,7 @@ function commandExamples(commandGroup: string, subcommand: string | undefined): 
     "officegen edit deck.pptx --ops ops.json --out edited.pptx --json"
   ];
   if (commandGroup === "render") return ["officegen render deck.ir.json --target pptx --out deck.pptx --json"];
+  if (commandGroup === "diff") return ["officegen diff before.pptx after.pptx --visual --json"];
   if (commandGroup === "asset" && subcommand === "replace") return ["officegen asset replace deck.pptx --asset ppt/media/image1.png logo.png --out deck-logo.pptx --json"];
   if (commandGroup === "template") return ["officegen template candidates source.pptx --agent --json"];
   if (commandGroup === "design") return ["officegen design init --name corp --json", "officegen design capture source.pptx --name corp --json"];
@@ -375,6 +380,7 @@ function baseCommand(name: string, description: string): Command {
     .option("--mode <mode>", "export mode")
     .option("--issues <path>", "repair issues JSON")
     .option("--images", "extract image assets")
+    .option("--visual", "include approximate visual diff/regression output")
     .option("--asset <path>", "asset zip path")
     .option("--selector <selector>", "asset or object selector")
     .option("--name <name>", "template, design, plugin, or renderer name")

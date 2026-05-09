@@ -7,6 +7,15 @@ interface BlockIR {
     items?: string[];
     rows?: Array<Record<string, unknown> | unknown[]>;
     path?: string;
+    chartType?: string;
+    categories?: string[];
+    values?: number[];
+    series?: Array<{
+        name?: string;
+        values?: number[];
+        labels?: string[];
+    }>;
+    fit?: "contain" | "cover" | "stretch";
 }
 export interface DocumentIR {
     title?: string;
@@ -23,6 +32,11 @@ export interface DocumentIR {
     design?: {
         colors?: Record<string, string>;
         typography?: Record<string, unknown>;
+        theme?: {
+            headFontFace?: string;
+            bodyFontFace?: string;
+            lang?: string;
+        };
     };
     slides?: Array<{
         title?: string;
@@ -32,7 +46,10 @@ export interface DocumentIR {
     sheets?: Array<{
         name?: string;
         rows?: Array<Record<string, unknown> | unknown[]>;
+        tableName?: string;
     }>;
+    header?: string;
+    footer?: string;
 }
 export interface RenderOptions {
     out?: string;

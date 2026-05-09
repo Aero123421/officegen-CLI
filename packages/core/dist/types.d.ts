@@ -1,5 +1,5 @@
 export declare const OFFICEGEN_SCHEMA_VERSION = "1.2";
-export declare const OFFICEGEN_CLI_VERSION = "2.0.0";
+export declare const OFFICEGEN_CLI_VERSION = "2.0.1";
 export declare const SCHEMA_REGISTRY_VERSION = "1.2.0";
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | {
@@ -9,7 +9,7 @@ export type JsonObject = {
     [key: string]: JsonValue;
 };
 export type OfficegenProfile = "substrate" | "authoring" | "enterprise";
-export type FeatureName = "capabilities" | "help" | "config" | "doctor" | "inspect" | "view" | "edit" | "render" | "scaffold" | "export" | "validate" | "diagnose" | "repair" | "run" | "asset" | "chart" | "diagram" | "schema" | "errors" | "template" | "design" | "layout" | "agent" | "mcp" | "renderer" | "plugin";
+export type FeatureName = "capabilities" | "help" | "config" | "doctor" | "inspect" | "view" | "edit" | "render" | "scaffold" | "export" | "validate" | "diagnose" | "repair" | "diff" | "run" | "asset" | "chart" | "diagram" | "schema" | "errors" | "template" | "design" | "layout" | "agent" | "mcp" | "renderer" | "plugin";
 export type NetworkPolicy = "deny" | "allow";
 export type ProcessPolicy = "deny" | "allow";
 export type OutOfProjectPolicy = "deny" | "warn" | "allow";

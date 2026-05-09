@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -108,6 +108,7 @@ describe("officegen CLI command surface", () => {
       "validate",
       "diagnose",
       "repair",
+      "diff",
       "run",
       "asset",
       "chart",
@@ -382,6 +383,58 @@ describe("officegen CLI command surface", () => {
     expect(envelope.ok).toBe(true);
     expect(envelope.result.migrated).toBe(true);
     expect(migrated).toEqual(document);
+  });
+
+  it("executes a run manifest workflow with render, inspect, and view artifacts", async () => {
+    const cwd = await tempWorkspace();
+    await writeFile(path.join(cwd, "deck.ir.json"), `${JSON.stringify({
+      schema: "officegen.ir.document@1.2",
+      title: "Workflow Deck",
+      targets: ["pptx"],
+      sections: [{ title: "Workflow Deck", blocks: [{ type: "paragraph", text: "Run body" }] }]
+    })}\n`, "utf8");
+    await writeFile(path.join(cwd, "plan.json"), `${JSON.stringify({
+      schema: "officegen.run.plan@1.2",
+      steps: [
+        { id: "rendered", command: "render", input: "deck.ir.json", target: "pptx", out: "$run/output/deck.pptx" },
+        { id: "inspected", command: "inspect", input: "$rendered", depth: "summary" },
+        { id: "viewed", command: "view", input: "$rendered", out: "$run/views/deck" }
+      ]
+    })}\n`, "utf8");
+
+    const captured = await run(["run", "plan.json", "--json"], cwd);
+    const envelope = parseEnvelope(captured);
+
+    expect(envelope.ok).toBe(true);
+    expect(envelope.result.schema).toBe("officegen.run.result@1.2");
+    expect(envelope.result.steps).toHaveLength(3);
+    expect(envelope.result.manifestPath).toContain("manifest.json");
+    const runs = await readdir(path.join(cwd, ".officegen", "runs"));
+    const runRoot = path.join(cwd, ".officegen", "runs", runs[0] as string);
+    expect(await readFile(path.join(runRoot, "output", "deck.pptx"))).toBeInstanceOf(Buffer);
+    expect(await readFile(path.join(runRoot, "views", "deck", "object-map.json"), "utf8")).toContain("Run body");
+  });
+
+  it("rejects run outputs that try to escape the run folder", async () => {
+    const cwd = await tempWorkspace();
+    await writeFile(path.join(cwd, "deck.ir.json"), `${JSON.stringify({
+      schema: "officegen.ir.document@1.2",
+      title: "Traversal",
+      targets: ["pptx"],
+      sections: [{ title: "Traversal", blocks: [{ type: "paragraph", text: "Body" }] }]
+    })}\n`, "utf8");
+    await writeFile(path.join(cwd, "plan.json"), `${JSON.stringify({
+      steps: [
+        { id: "bad", command: "render", input: "deck.ir.json", target: "pptx", out: "$run/../../outside.pptx" }
+      ]
+    })}\n`, "utf8");
+
+    const captured = await run(["run", "plan.json", "--json"], cwd);
+    const envelope = parseEnvelope(captured);
+
+    expect(envelope.ok).toBe(false);
+    expect(envelope.error.code).toBe("SECURITY_PATH_OUTSIDE_ROOT");
+    expect(process.exitCode).toBe(4);
   });
 
   it("rejects render image blocks that point outside the project roots", async () => {
