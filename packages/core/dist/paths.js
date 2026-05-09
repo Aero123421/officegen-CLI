@@ -107,7 +107,7 @@ export async function validatePath(config, options) {
     }
     if (!config.security.followSymlinks) {
         await assertNoSymlinkComponents(candidate.absolutePath, config.paths.projectRoot);
-        if (candidate.existed && normalizeCase(candidate.absolutePath) !== normalizeCase(candidate.realPath)) {
+        if (candidate.existed && (await lstat(candidate.absolutePath)).isSymbolicLink()) {
             throw new OfficegenError("SECURITY_SYMLINK_DENIED", `Symlink or reparse point denied: ${options.path}`);
         }
     }
