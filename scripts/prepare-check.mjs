@@ -10,7 +10,6 @@ const requiredDist = [
 ];
 
 if (requiredDist.every((file) => existsSync(file))) {
-  console.log("officegen prepare: dist artifacts already present; skipping build.");
   process.exit(0);
 }
 
