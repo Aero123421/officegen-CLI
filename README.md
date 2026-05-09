@@ -207,7 +207,7 @@ Use `--json` for machine-readable output. Responses use the v1.2 envelope shape:
   "ok": true,
   "command": "capabilities",
   "runId": "...",
-  "cliVersion": "1.2.0",
+  "cliVersion": "1.2.1",
   "capabilitiesHash": "sha256:...",
   "pathsRedacted": true,
   "result": {},
