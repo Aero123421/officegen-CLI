@@ -22,7 +22,9 @@ try {
     shell: process.platform === "win32"
       });
   if (install.status !== 0) process.exit(install.status ?? 1);
-  const packageRoot = path.join(temp, "node_modules", "officegen");
+  const packageRoot = process.platform === "win32"
+    ? path.join(temp, "node_modules", "officegen")
+    : path.join(temp, "lib", "node_modules", "officegen");
   const cliMain = path.join(packageRoot, "packages", "cli", "dist", "main.js");
   const coreMain = path.join(packageRoot, "packages", "core", "dist", "index.js");
   if (!existsSync(cliMain) || !existsSync(coreMain)) {
