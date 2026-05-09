@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { loadZip, stableHashId } from "../../formats/dist/index.js";
 import { featureRoot, hashFile, listJsonFiles, mergePlainObjects, nowIso, readJsonFile, requireFeature, sha256Buffer, sha256Json, slugify, untrustedContentWarning, validation, writeJsonFile, writeTextFile } from "./common.js";
@@ -93,9 +93,24 @@ export async function captureDesign(options) {
 export async function applyDesign(options) {
     requireFeature(options, "design", "design apply");
     const design = await inspectDesign(options);
+    if (options.targetPath && options.outputPath && path.extname(options.targetPath).toLowerCase() === ".pptx" && path.extname(options.outputPath).toLowerCase() === ".pptx") {
+        const applied = await applyPptxDesign(design, path.resolve(options.cwd ?? process.cwd(), options.targetPath), options.outputPath);
+        return {
+            kind: "officegen.design.apply",
+            planOnly: false,
+            mutatesOffice: true,
+            generatedAt: nowIso(),
+            designId: design.id,
+            designHash: design.hash,
+            targetPath: options.targetPath,
+            out: options.outputPath,
+            ...applied
+        };
+    }
     const plan = {
         kind: "officegen.design.apply",
         planOnly: true,
+        mutatesOffice: false,
         generatedAt: nowIso(),
         designId: design.id,
         designHash: design.hash,
@@ -106,6 +121,64 @@ export async function applyDesign(options) {
     const outputPath = options.outputPath ?? path.join(featureRoot(options, "design"), "runs", `${slugify(design.id)}.apply.json`);
     await writeJsonFile(outputPath, plan);
     return plan;
+}
+async function applyPptxDesign(design, targetPath, outputPath) {
+    const bytes = await readFile(targetPath);
+    const zip = await loadZip({ bytes, path: targetPath, format: "pptx", trusted: false });
+    const accent = designAccentColor(design);
+    const fontFace = designFontFace(design);
+    const changedParts = [];
+    for (const file of Object.values(zip.files)) {
+        if (file.dir || !/^ppt\/theme\/theme\d+\.xml$/i.test(file.name))
+            continue;
+        const xml = await file.async("string");
+        let next = xml;
+        if (accent) {
+            next = replaceThemeColor(next, "accent1", accent);
+            next = replaceThemeColor(next, "accent2", accent);
+        }
+        if (fontFace) {
+            next = next.replace(/(<a:latin\b[^>]*typeface=")[^"]*(")/g, `$1${escapeXmlAttr(fontFace)}$2`);
+            next = next.replace(/(<a:ea\b[^>]*typeface=")[^"]*(")/g, `$1${escapeXmlAttr(fontFace)}$2`);
+        }
+        if (next !== xml) {
+            zip.file(file.name, next);
+            changedParts.push(file.name);
+        }
+    }
+    await writeFile(outputPath, await zip.generateAsync({ type: "uint8array", compression: "DEFLATE", compressionOptions: { level: 6 } }));
+    return {
+        changedParts,
+        tokensApplied: { accent, fontFace },
+        mastersAndLayoutsPreserved: true,
+        note: changedParts.length ? "Updated PPTX theme tokens while preserving slide masters, layouts, placeholders, relationships, and content." : "No theme parts were changed."
+    };
+}
+function designAccentColor(design) {
+    const tokens = design.tokens;
+    const color = tokens.color;
+    const token = color?.accent ?? color?.primary ?? color?.brand;
+    if (typeof token === "string")
+        return normalizeHexColor(token);
+    const capture = design.sourceCapture;
+    return normalizeHexColor(capture?.colorRoleCandidates?.find((candidate) => candidate.role === "accent")?.value);
+}
+function designFontFace(design) {
+    const tokens = design.tokens;
+    const typography = tokens.typography;
+    const family = typography?.fontFamily ?? typography?.bodyFont ?? typography?.headingFont;
+    return typeof family === "string" ? family : undefined;
+}
+function replaceThemeColor(xml, role, hex) {
+    const re = new RegExp(`(<a:${role}>[\\s\\S]*?<a:srgbClr\\b[^>]*val=")[^"]*("[\\s\\S]*?</a:${role}>)`, "i");
+    return re.test(xml) ? xml.replace(re, `$1${hex}$2`) : xml;
+}
+function normalizeHexColor(value) {
+    const match = /^#?([0-9a-f]{6})$/i.exec(value ?? "");
+    return match?.[1]?.toUpperCase();
+}
+function escapeXmlAttr(value) {
+    return value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 export async function validateDesign(options) {
     requireFeature(options, "design", "design validate");

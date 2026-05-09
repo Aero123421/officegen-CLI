@@ -1,10 +1,16 @@
 import { inspect, type InspectResult } from "./inspect.js";
 import { view } from "./view.js";
+import { exportDocument } from "./export.js";
 import { type InputLike, type ObjectMapEntry, type OfficegenConfig } from "./shared.js";
+import { PDFDocument } from "pdf-lib";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 
 export interface DiffOptions {
   config?: OfficegenConfig;
   visual?: boolean;
+  native?: boolean;
   maxPages?: number;
 }
 
@@ -30,9 +36,10 @@ export interface DiffResult {
     }>;
   };
   visual?: {
-    fidelity: "approximate";
+    fidelity: "approximate" | "native";
     pagesCompared: number;
     pageScores: Array<{ page: number; score: number; beforeHash: string; afterHash: string }>;
+    renderer?: string;
   };
   caveats: string[];
 }
@@ -41,7 +48,7 @@ export async function diffDocuments(before: InputLike, after: InputLike, options
   const beforeInspect = await inspect(before, { depth: "shallow", config: options.config });
   const afterInspect = await inspect(after, { depth: "shallow", config: options.config });
   const semantic = semanticDiff(beforeInspect, afterInspect);
-  const visual = options.visual ? await visualDiff(beforeInspect, afterInspect, options) : undefined;
+  const visual = options.visual ? await visualDiff(before, after, beforeInspect, afterInspect, options) : undefined;
   const visualRegressionScore = visual?.pageScores.length
     ? Number((visual.pageScores.reduce((sum, page) => sum + page.score, 0) / visual.pageScores.length).toFixed(4))
     : undefined;
@@ -60,7 +67,9 @@ export async function diffDocuments(before: InputLike, after: InputLike, options
     semantic,
     visual,
     caveats: [
-      "Visual diff is based on officegen's approximate SVG/HTML view, not a native Office rasterization.",
+      visual?.fidelity === "native"
+        ? "Native visual regression compares trusted renderer PDF outputs; fidelity depends on installed renderer filters and fonts."
+        : "Visual diff is based on officegen's approximate SVG/HTML view, not a native Office rasterization.",
       "StableObjectId matching is best-effort across generated files and preserves strongest value for edits within the same document lineage."
     ]
   };
@@ -86,7 +95,15 @@ function semanticDiff(before: InspectResult, after: InspectResult): DiffResult["
   return { added, removed, changedText };
 }
 
-async function visualDiff(before: InspectResult, after: InspectResult, options: DiffOptions): Promise<NonNullable<DiffResult["visual"]>> {
+async function visualDiff(
+  beforeInput: InputLike,
+  afterInput: InputLike,
+  before: InspectResult,
+  after: InspectResult,
+  options: DiffOptions
+): Promise<NonNullable<DiffResult["visual"]>> {
+  if (options.native) return nativeVisualDiff(beforeInput, afterInput, options);
+
   const beforeView = await view(before, { format: "svg", maxPages: options.maxPages, config: options.config });
   const afterView = await view(after, { format: "svg", maxPages: options.maxPages, config: options.config });
   const pagesCompared = Math.min(beforeView.pages.length, afterView.pages.length);
@@ -106,6 +123,51 @@ async function visualDiff(before: InspectResult, after: InspectResult, options: 
     pagesCompared,
     pageScores
   };
+}
+
+async function nativeVisualDiff(beforeInput: InputLike, afterInput: InputLike, options: DiffOptions): Promise<NonNullable<DiffResult["visual"]>> {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "officegen-diff-native-"));
+  try {
+    const beforePdf = path.join(dir, "before.pdf");
+    const afterPdf = path.join(dir, "after.pdf");
+    const beforeExport = await exportDocument(beforeInput, { to: "pdf", mode: "native", out: beforePdf, config: options.config });
+    await exportDocument(afterInput, { to: "pdf", mode: "native", out: afterPdf, config: options.config });
+    const beforeBytes = await readFile(beforePdf);
+    const afterBytes = await readFile(afterPdf);
+    const beforeDoc = await PDFDocument.load(beforeBytes, { ignoreEncryption: true });
+    const afterDoc = await PDFDocument.load(afterBytes, { ignoreEncryption: true });
+    const pagesCompared = Math.min(beforeDoc.getPageCount(), afterDoc.getPageCount(), options.maxPages ?? Number.MAX_SAFE_INTEGER);
+    const beforeText = byteWindows(beforeBytes, pagesCompared);
+    const afterText = byteWindows(afterBytes, pagesCompared);
+    const pageScores = [];
+    for (let index = 0; index < pagesCompared; index += 1) {
+      pageScores.push({
+        page: index + 1,
+        beforeHash: textHash(beforeText[index] ?? ""),
+        afterHash: textHash(afterText[index] ?? ""),
+        score: normalizedStringDistance(beforeText[index] ?? "", afterText[index] ?? "")
+      });
+    }
+    return {
+      fidelity: "native",
+      pagesCompared,
+      pageScores,
+      renderer: beforeExport.renderer?.id ?? "native"
+    };
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+function byteWindows(bytes: Uint8Array, windows: number): string[] {
+  if (windows <= 0) return [];
+  const chunkSize = Math.max(1, Math.ceil(bytes.length / windows));
+  const chunks = [];
+  for (let index = 0; index < windows; index += 1) {
+    const chunk = bytes.subarray(index * chunkSize, Math.min(bytes.length, (index + 1) * chunkSize));
+    chunks.push(Buffer.from(chunk).toString("latin1"));
+  }
+  return chunks;
 }
 
 function normalizedStringDistance(before: string, after: string): number {

@@ -25,6 +25,7 @@ import {
   renderDiagram,
   repair,
   replaceAsset,
+  verify,
   view,
   type RenderTarget
 } from "@officegen/formats";
@@ -102,19 +103,19 @@ export function capabilitiesPayload(context: RuntimeContext): unknown {
         security: entry.security,
         dryRun: ["edit", "repair"].includes(entry.feature),
         outputPolicy: ["render", "export", "edit", "repair", "asset", "template", "design", "layout"].includes(entry.feature) ? "fail-by-default; use --overwrite explicitly where supported" : undefined,
-        planOnly: ["template", "design", "layout"].includes(entry.feature),
-        mutatesOffice: ["render", "export", "edit", "repair", "asset"].includes(entry.feature),
+        planOnly: false,
+        mutatesOffice: ["render", "export", "edit", "repair", "asset", "template", "design", "layout"].includes(entry.feature),
         outputKinds: ["template", "design", "layout"].includes(entry.feature)
-          ? ["json-plan"]
+          ? ["office-artifact", "json-plan", "json-report"]
           : ["render", "export", "edit", "repair", "asset"].includes(entry.feature)
             ? ["office-or-pdf-artifact", "json-report"]
             : ["json-report"],
-        sideEffects: ["template", "design", "layout"].includes(entry.feature) ? "writes JSON plans/captures under .officegen unless --out selects another project-local path; does not directly edit Office files" : undefined
+        sideEffects: ["template", "design", "layout"].includes(entry.feature) ? "writes JSON plans/captures when no Office target/out is supplied; mutates Office files when given a source/target and Office --out path" : undefined
       })),
     unsupportedNow: [
-      "lossless Office-to-PDF conversion without native renderer availability",
-      "OCR for scanned PDF pages",
-      "native Office repair-dialog detection without launching Office"
+      "lossless Office-to-PDF conversion when no trusted native renderer is installed or enabled",
+      "OCR requires an installed OCR renderer such as Tesseract exposed through the local environment",
+      "native Office repair-dialog detection requires native renderer verification policy to be enabled"
     ],
     progressiveDisclosure: {
       jsonBudgetBytes: context.jsonBudgetBytes ?? context.config.agent.defaultJsonBudgetBytes,
@@ -143,7 +144,7 @@ export function helpPayload(context: RuntimeContext, topic: string[]): unknown {
     schema: "officegen.help@1.2",
     topic: topicText || "index",
     commands,
-    workflows: topic[0] === "workflow" || !topicText ? ["substrate-edit", "rich-pptx", "edit-existing"] : [],
+    workflows: topic[0] === "workflow" || !topicText ? ["substrate-edit", "rich-pptx", "edit-existing", "inspect-edit-export", "template-plan-fill", "native-verify-export"] : [],
     workflowDetails: topic[0] === "workflow" ? workflowHelp(topic[1]) : undefined,
     errors: topic[0] === "error" ? errorLookup(topic[1]) : undefined,
     agentGuidance: {
@@ -209,6 +210,7 @@ function workflowHelp(id: string | undefined): unknown[] {
         "officegen edit input.pptx --ops ops.json --dry-run --resolve-selectors --agent --json",
         "officegen edit input.pptx --ops ops.json --out edited.pptx --json",
         "officegen diff input.pptx edited.pptx --visual --agent --json",
+        "officegen verify edited.pptx --visual --agent --json",
         "officegen export edited.pptx --to pdf --mode fast --out edited.pdf --json"
       ],
       fallbacks: [
@@ -217,16 +219,30 @@ function workflowHelp(id: string | undefined): unknown[] {
       ]
     },
     {
+      id: "native-verify-export",
+      summary: "Use a trusted native renderer to verify Office openability, repair risk, visual readiness, and PDF export.",
+      steps: [
+        "OFFICEGEN_PROFILE=enterprise officegen verify input.pptx --native --visual --out verify-report.json --json",
+        "OFFICEGEN_PROFILE=enterprise officegen export input.pptx --to pdf --mode native --out output.pdf --json",
+        "officegen inspect output.pdf --depth summary --agent --json"
+      ],
+      fallbacks: [
+        "If native renderer policy blocks execution, use verify --visual and export --mode fast, then report lower fidelity.",
+        "If OCR is required for scanned PDFs, run OFFICEGEN_PROFILE=enterprise officegen inspect scan.pdf --ocr --json."
+      ]
+    },
+    {
       id: "template-plan-fill",
-      summary: "Capture template candidates and produce a fill plan. In v2.0.2 this workflow is plan-first unless a command explicitly reports mutatesOffice=true.",
+      summary: "Capture template candidates, persist mappings, fill an Office template, then verify the output.",
       steps: [
         "officegen template candidates source.pptx --agent --json",
         "officegen template create source.pptx --name deck-template --json",
-        "officegen template fill --name deck-template --data values.json --out fill-plan.json --json",
-        "officegen help template --agent --json"
+        "officegen template apply-map --name deck-template --map map.json --json",
+        "officegen template fill --name deck-template --data values.json --out filled.pptx --json",
+        "officegen verify filled.pptx --visual --agent --json"
       ],
       caveats: [
-        "template fill/apply-map return plan artifacts unless the result explicitly includes an Office output."
+        "template fill returns planOnly=true only when the template has no source Office file or --out is not an Office output."
       ]
     }
   ];
@@ -391,7 +407,8 @@ export function errorLookup(code: string | undefined): unknown {
 export async function inspectPayload(context: RuntimeContext): Promise<unknown> {
   const input = requireInput(context, 3, "inspect");
   return inspect(await validateInputPath(context, input), withFormatConfig(context, {
-    depth: (optionValue(context.argv, "--depth") as "summary" | "shallow" | "full" | undefined) ?? "summary"
+    depth: (optionValue(context.argv, "--depth") as "summary" | "shallow" | "full" | undefined) ?? "summary",
+    ocr: hasFlag(context.argv, "--ocr")
   }));
 }
 
@@ -555,6 +572,15 @@ export async function diagnosePayload(context: RuntimeContext): Promise<unknown>
   return diagnose(await validateInputPath(context, input), withFormatConfig(context, {}));
 }
 
+export async function verifyPayload(context: RuntimeContext): Promise<unknown> {
+  const input = requireInput(context, 3, "verify");
+  return verify(await validateInputPath(context, input), withFormatConfig(context, {
+    native: hasFlag(context.argv, "--native"),
+    visual: hasFlag(context.argv, "--visual"),
+    out: await validatedOutOption(context)
+  }));
+}
+
 export async function repairPayload(context: RuntimeContext): Promise<unknown> {
   const input = requireInput(context, 3, "repair");
   const issuesPath = optionValue(context.argv, "--issues");
@@ -582,6 +608,7 @@ export async function diffPayload(context: RuntimeContext): Promise<unknown> {
     await validateInputPath(context, after),
     withFormatConfig(context, {
       visual: hasFlag(context.argv, "--visual"),
+      native: hasFlag(context.argv, "--native"),
       maxPages: numberOption(context, "--max-pages")
     })
   );
@@ -643,7 +670,7 @@ export async function runPayload(context: RuntimeContext): Promise<unknown> {
     manifestPath: folder.manifestPath,
     tracePath: folder.tracePath,
     steps: results,
-    caveats: ["Run executes deterministic built-in steps only; external native renderers and OCR are not invoked by the workflow engine."]
+    caveats: ["Run executes deterministic built-in steps and can invoke native verification/export only when the active security policy enables renderers."]
   };
 }
 
@@ -659,6 +686,11 @@ async function executeRunStep(
   const out = await resolveRunOutput(context, folder, step, index);
   if (command === "inspect") return inspect(requireRunInput(command, input), withFormatConfig(context, { depth: (step.depth as "summary" | "shallow" | "full" | undefined) ?? "summary" }));
   if (command === "diagnose") return diagnose(requireRunInput(command, input), withFormatConfig(context, {}));
+  if (command === "verify") return verify(requireRunInput(command, input), withFormatConfig(context, {
+    native: step.native === true,
+    visual: step.visual === true,
+    out: out ?? path.join(folder.logsDir, `${String(index + 1).padStart(2, "0")}-verify.json`)
+  }));
   if (command === "view") {
     const result = await view(requireRunInput(command, input), withFormatConfig(context, { format: "svg" as const, maxPages: typeof step.maxPages === "number" ? step.maxPages : undefined }));
     const viewDir = out ?? path.join(folder.viewsDir, `${String(index + 1).padStart(2, "0")}-view`);
@@ -700,7 +732,7 @@ async function executeRunStep(
     code: "UNKNOWN_COMMAND",
     command: "run",
     message: `Unsupported run step command: ${command}`,
-    details: { command, supported: ["inspect", "view", "diagnose", "render", "edit", "export", "diff"] }
+    details: { command, supported: ["inspect", "view", "diagnose", "verify", "render", "edit", "export", "diff"] }
   }, 2);
 }
 
@@ -852,10 +884,12 @@ function withFormatConfig<T extends object>(context: RuntimeContext, options: T)
 export async function layoutPayload(context: RuntimeContext): Promise<unknown> {
   const input = positionalArgs(context.argv, 4)[0];
   const plan = input ? asRecord(await readInputJson(context, input)) : {};
+  const targetPath = typeof plan.targetPath === "string" ? await validateInputPath(context, plan.targetPath) : undefined;
   return applyLayoutConstraints({
     ...optionalContext(context),
     boxes: Array.isArray(plan.boxes) ? plan.boxes as Parameters<typeof applyLayoutConstraints>[0]["boxes"] : [],
     constraints: Array.isArray(plan.constraints) ? plan.constraints as Parameters<typeof applyLayoutConstraints>[0]["constraints"] : [],
+    targetPath,
     outputPath: await validatedOutOption(context)
   });
 }

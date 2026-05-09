@@ -1,4 +1,5 @@
 import path from "node:path";
+import { edit, type EditOperation } from "@officegen/formats";
 
 import { OptionalContext, featureRoot, nowIso, requireFeature, slugify, writeJsonFile } from "./common.js";
 
@@ -30,6 +31,7 @@ export interface LayoutConstraint {
 export interface LayoutApplyOptions extends OptionalContext {
   boxes: LayoutBox[];
   constraints: LayoutConstraint[];
+  targetPath?: string;
   outputPath?: string;
   planId?: string;
 }
@@ -54,12 +56,35 @@ export async function applyLayoutConstraints(options: LayoutApplyOptions): Promi
     return after;
   });
 
+  if (options.targetPath && options.outputPath && ["pptx"].includes(path.extname(options.outputPath).replace(/^\./, "").toLowerCase())) {
+    const ops: EditOperation[] = changes.map((change) => ({
+      op: "pptx.setBounds",
+      selector: { stableObjectId: change.id },
+      bounds: { x: change.after.x, y: change.after.y, width: change.after.width, height: change.after.height }
+    }));
+    const editResult = await edit(path.resolve(options.cwd ?? process.cwd(), options.targetPath), ops, {
+      out: options.outputPath,
+      format: "pptx",
+      resolveSelectors: true,
+      validateFirst: true,
+      atomic: true
+    });
+    return {
+      kind: "officegen.layout.apply",
+      generatedAt: nowIso(),
+      boxes,
+      changes,
+      note: "Applied layout constraints directly to PPTX object bounds.",
+      ...( { targetPath: options.targetPath, out: options.outputPath, mutatesOffice: true, editResult } as Record<string, unknown> )
+    } as LayoutApplyResult;
+  }
+
   const result: LayoutApplyResult = {
     kind: "officegen.layout.apply",
     generatedAt: nowIso(),
     boxes,
     changes,
-    note: "Simple layout constraints only; Office file mutation is delegated to @officegen/formats."
+    note: "Simple layout constraints computed. Provide targetPath and an Office --out path to mutate PPTX bounds."
   };
 
   const outputPath =

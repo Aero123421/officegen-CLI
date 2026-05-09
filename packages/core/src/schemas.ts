@@ -89,6 +89,8 @@ function editOperationSchemas(): JsonObject[] {
     rows: { type: "array", minItems: 1, items: { type: "array" } },
     cell: { type: "string", pattern: "^[A-Za-z]+[1-9][0-9]*$" },
     value: { type: ["string", "number", "boolean", "null"] },
+    formula: { type: "string", minLength: 1 },
+    ref: { type: "string", pattern: "^[A-Za-z]+[1-9][0-9]*:[A-Za-z]+[1-9][0-9]*$" },
     startCell: { type: "string", pattern: "^[A-Za-z]+[1-9][0-9]*$" },
     page: { type: "integer", minimum: 1 },
     x: { type: "number" },
@@ -110,11 +112,25 @@ function editOperationSchemas(): JsonObject[] {
         bottom: { type: "number", minimum: 0, maximum: 1 }
       }
     },
+    bounds: {
+      type: "object",
+      required: ["x", "y", "width", "height"],
+      additionalProperties: false,
+      properties: {
+        x: { type: "number" },
+        y: { type: "number" },
+        width: { type: "number", minimum: 0 },
+        height: { type: "number", minimum: 0 }
+      }
+    },
     categories: { type: "array", minItems: 1, items: { type: "string" } },
     values: { type: "array", minItems: 1, items: { type: "number" } },
     seriesName: { type: "string" },
     author: { type: "string" },
-    tableName: { type: "string" }
+    tableName: { type: "string" },
+    styleId: { type: "string" },
+    font: { type: "string" },
+    bold: { type: "boolean" }
   };
   const pickFields = (allowed: string[]): Record<string, unknown> =>
     Object.fromEntries(allowed.map((field) => [field, fields[field as keyof typeof fields]]));
@@ -144,16 +160,22 @@ function editOperationSchemas(): JsonObject[] {
     op("pptx.replaceBulletItems", ["selector", "items"], ["selector", "items"]),
     op("pptx.replaceImageByShape", ["selector"], ["selector", "replacementPath", "replacementBase64", "fit", "crop"], {}, { anyOf: [{ required: ["replacementPath"] }, { required: ["replacementBase64"] }] }),
     op("pptx.updateChartData", ["selector", "categories", "values"], ["selector", "categories", "values", "seriesName"]),
+    op("pptx.setBounds", ["selector", "bounds"], ["selector", "bounds"]),
     op("docx.insertParagraphAfter", ["selector", "text"], ["selector", "text"]),
     op("docx.setHeader", ["text"], ["text"]),
     op("docx.setFooter", ["text"], ["text"]),
+    op("docx.setStyle", ["styleId"], ["styleId", "font", "size", "bold"]),
     op("docx.addComment", ["selector", "text"], ["selector", "text", "author"]),
     op("docx.addRedline", ["selector", "text"], ["selector", "text", "author"]),
     op("xlsx.insertRows", ["rowIndex", "rows"], ["sheet", "rowIndex", "rows"]),
     op("xlsx.appendRows", ["rows"], ["sheet", "rows"]),
     op("xlsx.setCell", ["cell", "value"], ["sheet", "cell", "value"]),
+    op("xlsx.setFormula", ["cell", "formula"], ["sheet", "cell", "formula"]),
     op("xlsx.updateTable", ["startCell", "rows"], ["sheet", "startCell", "rows"]),
     op("xlsx.writeTable", ["startCell", "rows"], ["sheet", "startCell", "rows", "tableName"]),
+    op("xlsx.table.resize", ["selector", "ref"], ["selector", "ref"]),
+    op("xlsx.chart.setData", ["selector", "categories", "values"], ["selector", "categories", "values", "seriesName"]),
+    op("xlsx.pivot.refreshDefinition", ["selector"], ["selector"]),
     op("pdf.textOverlay", ["page", "text", "x", "y"], ["page", "text", "x", "y", "size", "color"]),
     op("pdf.annotation", ["page", "text", "x", "y"], ["page", "text", "x", "y", "width", "height"])
   ];

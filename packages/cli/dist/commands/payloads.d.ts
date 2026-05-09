@@ -16,6 +16,7 @@ export declare function editPayload(context: RuntimeContext): Promise<unknown>;
 export declare function renderPayload(context: RuntimeContext): Promise<unknown>;
 export declare function exportPayload(context: RuntimeContext): Promise<unknown>;
 export declare function diagnosePayload(context: RuntimeContext): Promise<unknown>;
+export declare function verifyPayload(context: RuntimeContext): Promise<unknown>;
 export declare function repairPayload(context: RuntimeContext): Promise<unknown>;
 export declare function diffPayload(context: RuntimeContext): Promise<unknown>;
 export declare function runPayload(context: RuntimeContext): Promise<unknown>;

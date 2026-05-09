@@ -116,6 +116,9 @@ export function bboxFromBounds(bounds) {
 export function emuToPx(value) {
     return Math.round((value / 914400) * 96);
 }
+export function pxToEmu(value) {
+    return Math.round((value / 96) * 914400);
+}
 export function escapeRegExp(value) {
     return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

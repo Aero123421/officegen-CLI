@@ -31,5 +31,6 @@ export declare function bboxFromBounds(bounds?: {
     height: number;
 }): [number, number, number, number] | undefined;
 export declare function emuToPx(value: number): number;
+export declare function pxToEmu(value: number): number;
 export declare function escapeRegExp(value: string): string;
 export declare function xmlData(value: unknown): string;

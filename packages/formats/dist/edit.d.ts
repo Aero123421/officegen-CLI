@@ -76,6 +76,15 @@ export type EditOperation = {
     values: number[];
     seriesName?: string;
 } | {
+    op: "pptx.setBounds";
+    selector: EditSelector;
+    bounds: {
+        x: number;
+        y: number;
+        width: number;
+        height: number;
+    };
+} | {
     op: "docx.insertParagraphAfter";
     text: string;
     selector: EditSelector;
@@ -85,6 +94,12 @@ export type EditOperation = {
 } | {
     op: "docx.setFooter";
     text: string;
+} | {
+    op: "docx.setStyle";
+    styleId: string;
+    font?: string;
+    size?: number;
+    bold?: boolean;
 } | {
     op: "docx.addComment";
     text: string;
@@ -113,6 +128,12 @@ export type EditOperation = {
     value: unknown;
     selector?: EditSelector;
 } | {
+    op: "xlsx.setFormula";
+    sheet?: number;
+    cell: string;
+    formula: string;
+    selector?: EditSelector;
+} | {
     op: "xlsx.updateTable";
     sheet?: number;
     startCell: string;
@@ -125,6 +146,19 @@ export type EditOperation = {
     rows: unknown[][];
     tableName?: string;
     selector?: EditSelector;
+} | {
+    op: "xlsx.table.resize";
+    selector: EditSelector;
+    ref: string;
+} | {
+    op: "xlsx.chart.setData";
+    selector: EditSelector;
+    categories: string[];
+    values: number[];
+    seriesName?: string;
+} | {
+    op: "xlsx.pivot.refreshDefinition";
+    selector: EditSelector;
 };
 interface CropRect {
     left?: number;

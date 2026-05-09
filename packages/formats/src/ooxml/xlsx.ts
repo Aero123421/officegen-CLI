@@ -79,7 +79,7 @@ export async function inspectSheets(zip: JSZip): Promise<{ sheets: XlsxSheet[]; 
       sourcePath: path,
       xmlPath: path,
       selectorHints: { tableName: name, ref },
-      editableOps: ["xlsx.writeTable", "xlsx.updateTable", "xlsx.appendRows"],
+      editableOps: ["xlsx.writeTable", "xlsx.updateTable", "xlsx.appendRows", "xlsx.table.resize"],
       trust: { level: "untrusted", reason: "document-content" },
       untrusted: true
     });
@@ -92,6 +92,7 @@ export async function inspectSheets(zip: JSZip): Promise<{ sheets: XlsxSheet[]; 
       sourcePath: path,
       xmlPath: path,
       selectorHints: { chartPath: path },
+      editableOps: ["xlsx.chart.setData"],
       trust: { level: "untrusted", reason: "document-content" },
       untrusted: true
     });
@@ -104,6 +105,20 @@ export async function inspectSheets(zip: JSZip): Promise<{ sheets: XlsxSheet[]; 
       sourcePath: path,
       xmlPath: path,
       selectorHints: { pivotTablePath: path },
+      editableOps: ["xlsx.pivot.refreshDefinition"],
+      trust: { level: "untrusted", reason: "document-content" },
+      untrusted: true
+    });
+  }
+  for (const [index, path] of paths.filter((path) => /^xl\/slicers\//i.test(path) || /^xl\/slicerCaches\//i.test(path)).sort(naturalSort).entries()) {
+    objectMap.push({
+      stableObjectId: stableHashId("xlsx", "workbook", "slicer", path),
+      kind: "slicer",
+      label: `Slicer ${index + 1}`,
+      sourcePath: path,
+      xmlPath: path,
+      selectorHints: { slicerPath: path },
+      editableOps: ["xlsx.slicer.inspect"],
       trust: { level: "untrusted", reason: "document-content" },
       untrusted: true
     });

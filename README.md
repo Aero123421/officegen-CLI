@@ -19,7 +19,7 @@ npm install -g github:Aero123421/officegen-CLI
 For tagged releases, GitHub Actions publishes a checked GitHub Release tarball. This project does not publish the `officegen` name to the public npm registry, because that package name is already owned separately on npm.
 
 ```bash
-npm install -g https://github.com/Aero123421/officegen-CLI/releases/download/v2.0.2/officegen-v2.0.2.tgz
+npm install -g https://github.com/Aero123421/officegen-CLI/releases/download/v2.1.0/officegen-v2.1.0.tgz
 ```
 
 Check that it works:
@@ -218,7 +218,7 @@ Use `--json` for machine-readable output. Responses use the v1.2 envelope shape:
   "ok": true,
   "command": "capabilities",
   "runId": "...",
-  "cliVersion": "2.0.2",
+  "cliVersion": "2.1.0",
   "capabilitiesHash": "sha256:...",
   "pathsRedacted": true,
   "result": {},
@@ -289,7 +289,7 @@ Version bump all managed release files:
 ```bash
 npm run version:bump -- patch
 # or: npm run version:bump -- minor
-# or: npm run version:bump -- 2.0.2
+# or: npm run version:bump -- 2.1.0
 npm run version:check
 ```
 

@@ -35,6 +35,7 @@ import {
   schemaMigratePayload,
   templatePayload,
   validatePayload,
+  verifyPayload,
   viewPayload,
   wiredPayload
 } from "./payloads.js";
@@ -53,6 +54,7 @@ const leafPayloads: Partial<Record<FeatureKey, LeafPayload>> = {
   scaffold: scaffoldPayload,
   export: exportPayload,
   validate: validatePayload,
+  verify: verifyPayload,
   diagnose: diagnosePayload,
   repair: repairPayload,
   diff: diffPayload,
@@ -222,7 +224,7 @@ export function writeCommandHelp(
 }
 
 function usageSuffix(commandGroup: string, subcommand: string | undefined): string {
-  if (commandGroup === "inspect" || commandGroup === "view" || commandGroup === "diagnose" || commandGroup === "repair" || commandGroup === "export") return " <input>";
+  if (commandGroup === "inspect" || commandGroup === "view" || commandGroup === "diagnose" || commandGroup === "repair" || commandGroup === "export" || commandGroup === "verify") return " <input>";
   if (commandGroup === "diff") return " <before> <after>";
   if (commandGroup === "render" || commandGroup === "validate") return " <input.json>";
   if (commandGroup === "edit") return " <input> --ops <ops.json>";
@@ -247,6 +249,7 @@ function commandExamples(commandGroup: string, subcommand: string | undefined): 
   ];
   if (commandGroup === "render") return ["officegen render deck.ir.json --target pptx --out deck.pptx --json"];
   if (commandGroup === "diff") return ["officegen diff before.pptx after.pptx --visual --json"];
+  if (commandGroup === "verify") return ["officegen verify deck.pptx --visual --json", "OFFICEGEN_PROFILE=enterprise officegen verify deck.pptx --native --out verify-report.json --json"];
   if (commandGroup === "asset" && subcommand === "replace") return ["officegen asset replace deck.pptx --asset ppt/media/image1.png logo.png --out deck-logo.pptx --json"];
   if (commandGroup === "template") return ["officegen template candidates source.pptx --agent --json"];
   if (commandGroup === "design") return ["officegen design init --name corp --json", "officegen design capture source.pptx --name corp --json"];
@@ -381,6 +384,8 @@ function baseCommand(name: string, description: string): Command {
     .option("--issues <path>", "repair issues JSON")
     .option("--images", "extract image assets")
     .option("--visual", "include approximate visual diff/regression output")
+    .option("--native", "use native renderer when enabled by policy")
+    .option("--ocr", "attempt OCR for scanned PDFs when enabled by policy")
     .option("--asset <path>", "asset zip path")
     .option("--selector <selector>", "asset or object selector")
     .option("--name <name>", "template, design, plugin, or renderer name")

@@ -12,6 +12,7 @@ export const COMMAND_METADATA = [
     core("scaffold", "Create valid starter IR without an LLM", ["scaffold"]),
     core("export", "Export supported formats with explicit fidelity", ["export"]),
     core("validate", "Validate schemas, structure, and quality gates", ["validate"]),
+    core("verify", "Verify openability, native rendering, repair risk, and visual readiness", ["verify"]),
     core("diagnose", "Detect problems in generated or existing files", ["diagnose"]),
     core("repair", "Repair files or produce a repair plan", ["repair"]),
     core("diff", "Compare Office/PDF files semantically and with approximate visual regression scores", ["diff"]),

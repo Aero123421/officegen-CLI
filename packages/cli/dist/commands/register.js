@@ -3,7 +3,7 @@ import { OFFICEGEN_CLI_VERSION } from "../../../core/dist/index.js";
 import { commandFromArgv, positionalArgs } from "../shared/argv.js";
 import { makeEnvelope, writeResult } from "../shared/envelope.js";
 import { COMMAND_METADATA, metadataFor } from "../shared/metadata.js";
-import { agentPayload, assetPayload, capabilitiesPayload, chartPayload, configPayload, designPayload, diagnosePayload, diffPayload, diagramPayload, doctorPayload, editPayload, errorInspectPayload, errorsListPayload, exportPayload, groupPayload, helpPayload, inspectPayload, layoutPayload, mcpPayload, pluginPayload, renderPayload, rendererPayload, repairPayload, runPayload, scaffoldPayload, schemaGetPayload, schemaListPayload, schemaMigratePayload, templatePayload, validatePayload, viewPayload } from "./payloads.js";
+import { agentPayload, assetPayload, capabilitiesPayload, chartPayload, configPayload, designPayload, diagnosePayload, diffPayload, diagramPayload, doctorPayload, editPayload, errorInspectPayload, errorsListPayload, exportPayload, groupPayload, helpPayload, inspectPayload, layoutPayload, mcpPayload, pluginPayload, renderPayload, rendererPayload, repairPayload, runPayload, scaffoldPayload, schemaGetPayload, schemaListPayload, schemaMigratePayload, templatePayload, validatePayload, verifyPayload, viewPayload } from "./payloads.js";
 const leafPayloads = {
     capabilities: capabilitiesPayload,
     help: (ctx) => helpPayload(ctx, positionalArgs(ctx.argv, 3)),
@@ -15,6 +15,7 @@ const leafPayloads = {
     scaffold: scaffoldPayload,
     export: exportPayload,
     validate: validatePayload,
+    verify: verifyPayload,
     diagnose: diagnosePayload,
     repair: repairPayload,
     diff: diffPayload,
@@ -161,7 +162,7 @@ export function writeCommandHelp(context, commandGroup, subcommand, stdout) {
     stdout(lines.join("\n"));
 }
 function usageSuffix(commandGroup, subcommand) {
-    if (commandGroup === "inspect" || commandGroup === "view" || commandGroup === "diagnose" || commandGroup === "repair" || commandGroup === "export")
+    if (commandGroup === "inspect" || commandGroup === "view" || commandGroup === "diagnose" || commandGroup === "repair" || commandGroup === "export" || commandGroup === "verify")
         return " <input>";
     if (commandGroup === "diff")
         return " <before> <after>";
@@ -200,6 +201,8 @@ function commandExamples(commandGroup, subcommand) {
         return ["officegen render deck.ir.json --target pptx --out deck.pptx --json"];
     if (commandGroup === "diff")
         return ["officegen diff before.pptx after.pptx --visual --json"];
+    if (commandGroup === "verify")
+        return ["officegen verify deck.pptx --visual --json", "OFFICEGEN_PROFILE=enterprise officegen verify deck.pptx --native --out verify-report.json --json"];
     if (commandGroup === "asset" && subcommand === "replace")
         return ["officegen asset replace deck.pptx --asset ppt/media/image1.png logo.png --out deck-logo.pptx --json"];
     if (commandGroup === "template")
@@ -317,6 +320,8 @@ function baseCommand(name, description) {
         .option("--issues <path>", "repair issues JSON")
         .option("--images", "extract image assets")
         .option("--visual", "include approximate visual diff/regression output")
+        .option("--native", "use native renderer when enabled by policy")
+        .option("--ocr", "attempt OCR for scanned PDFs when enabled by policy")
         .option("--asset <path>", "asset zip path")
         .option("--selector <selector>", "asset or object selector")
         .option("--name <name>", "template, design, plugin, or renderer name")

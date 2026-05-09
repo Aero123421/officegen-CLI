@@ -2,6 +2,7 @@ import { type InputLike, type ObjectMapEntry, type OfficegenConfig } from "./sha
 export interface DiffOptions {
     config?: OfficegenConfig;
     visual?: boolean;
+    native?: boolean;
     maxPages?: number;
 }
 export interface DiffResult {
@@ -26,7 +27,7 @@ export interface DiffResult {
         }>;
     };
     visual?: {
-        fidelity: "approximate";
+        fidelity: "approximate" | "native";
         pagesCompared: number;
         pageScores: Array<{
             page: number;
@@ -34,6 +35,7 @@ export interface DiffResult {
             beforeHash: string;
             afterHash: string;
         }>;
+        renderer?: string;
     };
     caveats: string[];
 }

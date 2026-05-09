@@ -15,6 +15,7 @@ const commandMap: Record<FeatureName, string[]> = {
   scaffold: ["scaffold"],
   export: ["export"],
   validate: ["validate"],
+  verify: ["verify"],
   diagnose: ["diagnose"],
   repair: ["repair"],
   diff: ["diff"],

@@ -13,6 +13,7 @@ const commandMap = {
     scaffold: ["scaffold"],
     export: ["export"],
     validate: ["validate"],
+    verify: ["verify"],
     diagnose: ["diagnose"],
     repair: ["repair"],
     diff: ["diff"],

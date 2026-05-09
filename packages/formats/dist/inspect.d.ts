@@ -4,6 +4,7 @@ export interface InspectOptions {
     format?: "pptx" | "docx" | "xlsx" | "pdf" | "unknown";
     depth?: InspectDepth;
     include?: Array<"text" | "assets" | "relationships" | "rawPaths">;
+    ocr?: boolean;
     config?: OfficegenConfig;
 }
 export interface InspectResult extends AgentSeparatedResult<Record<string, unknown>> {

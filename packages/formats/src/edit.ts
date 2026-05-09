@@ -14,11 +14,12 @@ import {
 } from "./shared.js";
 import { inspect } from "./inspect.js";
 import { commentXml, insertParagraphAfter, insertedParagraphXml, replaceOrCreateHeaderFooter, setParagraphText } from "./ooxml/docx.js";
+import { embedPdfFonts } from "./pdfFonts.js";
 import { duplicateSlide, extractShapes, reorderSlides, replaceShapeBulletItems } from "./ooxml/pptx.js";
 import { appendRows, insertRows, setCell, sheetPath } from "./ooxml/xlsx.js";
-import { escapeXmlText, replaceAllXmlText, setFirstTextInBlock } from "./ooxml/xml.js";
+import { escapeXmlText, pxToEmu, replaceAllXmlText, setFirstTextInBlock } from "./ooxml/xml.js";
 import { nextRelationshipId } from "./ooxml/relationships.js";
-import { PDFDocument, rgb, StandardFonts } from "pdf-lib";
+import { PDFDocument, rgb } from "pdf-lib";
 import JSZip from "jszip";
 
 export type EditSelector = {
@@ -44,16 +45,22 @@ export type EditOperation =
   | { op: "pptx.replaceBulletItems"; items: string[]; selector: EditSelector }
   | { op: "pptx.replaceImageByShape"; selector: EditSelector; replacementBase64: string; replacementPath?: string; fit?: "contain" | "cover" | "stretch"; crop?: CropRect }
   | { op: "pptx.updateChartData"; selector: EditSelector; categories: string[]; values: number[]; seriesName?: string }
+  | { op: "pptx.setBounds"; selector: EditSelector; bounds: { x: number; y: number; width: number; height: number } }
   | { op: "docx.insertParagraphAfter"; text: string; selector: EditSelector }
   | { op: "docx.setHeader"; text: string }
   | { op: "docx.setFooter"; text: string }
+  | { op: "docx.setStyle"; styleId: string; font?: string; size?: number; bold?: boolean }
   | { op: "docx.addComment"; text: string; selector: EditSelector; author?: string }
   | { op: "docx.addRedline"; text: string; selector: EditSelector; author?: string }
   | { op: "xlsx.insertRows"; sheet?: number; rowIndex: number; rows: unknown[][]; selector?: EditSelector }
   | { op: "xlsx.appendRows"; sheet?: number; rows: unknown[][]; selector?: EditSelector }
   | { op: "xlsx.setCell"; sheet?: number; cell: string; value: unknown; selector?: EditSelector }
+  | { op: "xlsx.setFormula"; sheet?: number; cell: string; formula: string; selector?: EditSelector }
   | { op: "xlsx.updateTable"; sheet?: number; startCell: string; rows: unknown[][]; selector?: EditSelector }
-  | { op: "xlsx.writeTable"; sheet?: number; startCell: string; rows: unknown[][]; tableName?: string; selector?: EditSelector };
+  | { op: "xlsx.writeTable"; sheet?: number; startCell: string; rows: unknown[][]; tableName?: string; selector?: EditSelector }
+  | { op: "xlsx.table.resize"; selector: EditSelector; ref: string }
+  | { op: "xlsx.chart.setData"; selector: EditSelector; categories: string[]; values: number[]; seriesName?: string }
+  | { op: "xlsx.pivot.refreshDefinition"; selector: EditSelector };
 
 interface CropRect {
   left?: number;
@@ -312,11 +319,17 @@ async function applyOfficeOperation(
   if (format === "pptx" && op === "pptx.updateChartData") {
     return editPptxUpdateChartData(zip, operation as { selector: EditSelector; categories: string[]; values: number[]; seriesName?: string }, objectMap);
   }
+  if (format === "pptx" && op === "pptx.setBounds") {
+    return editPptxSetBounds(zip, operation as { selector: EditSelector; bounds: { x: number; y: number; width: number; height: number } }, objectMap);
+  }
   if (format === "docx" && op === "docx.insertParagraphAfter") {
     return editDocxInsertParagraph(zip, operation as { selector: EditSelector; text: string }, objectMap);
   }
   if (format === "docx" && (op === "docx.setHeader" || op === "docx.setFooter")) {
     return editDocxHeaderFooter(zip, op === "docx.setHeader" ? "header" : "footer", (operation as { text: string }).text);
+  }
+  if (format === "docx" && op === "docx.setStyle") {
+    return editDocxStyle(zip, operation as { styleId: string; font?: string; size?: number; bold?: boolean });
   }
   if (format === "docx" && op === "docx.addComment") {
     return editDocxAddComment(zip, operation as { selector: EditSelector; text: string; author?: string }, objectMap);
@@ -344,6 +357,10 @@ async function applyOfficeOperation(
     const cellOp = operation as { sheet?: number; cell: string; value: unknown };
     return editXlsxSetCell(zip, cellOp.sheet, cellOp.cell, cellOp.value);
   }
+  if (format === "xlsx" && op === "xlsx.setFormula") {
+    const formulaOp = operation as { sheet?: number; cell: string; formula: string };
+    return editXlsxSetFormula(zip, formulaOp.sheet, formulaOp.cell, formulaOp.formula);
+  }
   if (format === "xlsx" && (op === "xlsx.updateTable" || op === "xlsx.writeTable")) {
     const tableOp = operation as { sheet?: number; startCell: string; rows: unknown[][]; tableName?: string };
     let changed = false;
@@ -358,6 +375,38 @@ async function applyOfficeOperation(
     }
     changed = (await ensureXlsxTable(zip, tableOp.sheet, tableOp.startCell, tableOp.rows, tableOp.tableName)) || changed;
     return changed;
+  }
+  if (format === "xlsx" && op === "xlsx.table.resize") {
+    const tableOp = operation as { selector: EditSelector; ref: string };
+    const target = singleMatch(objectMap, tableOp.selector);
+    if (target.kind !== "table" || !target.xmlPath) throw new Error("SELECTOR_NOT_FOUND: selected object is not an XLSX table.");
+    const xml = (await readZipText(zip, target.xmlPath)) ?? "";
+    const ref = escapeXmlText(tableOp.ref);
+    let next = xml.replace(/(<table\b[^>]*\bref=")[^"]*(")/, `$1${ref}$2`);
+    next = next.replace(/(<autoFilter\b[^>]*\bref=")[^"]*(")/, `$1${ref}$2`);
+    if (next !== xml) zip.file(target.xmlPath, next);
+    return next !== xml;
+  }
+  if (format === "xlsx" && op === "xlsx.chart.setData") {
+    const chartOp = operation as { selector: EditSelector; categories: string[]; values: number[]; seriesName?: string };
+    const target = singleMatch(objectMap, chartOp.selector);
+    if (target.kind !== "chart" || !target.xmlPath) throw new Error("SELECTOR_NOT_FOUND: selected object is not an XLSX chart.");
+    const points = chartOp.categories.map((category, pointIndex) => ({ category, value: Number(chartOp.values[pointIndex] ?? 0) }));
+    const xml = (await readZipText(zip, target.xmlPath)) ?? "";
+    const next = replaceChartCaches(xml, chartOp.seriesName ?? target.label ?? "Series 1", points);
+    if (next !== xml) zip.file(target.xmlPath, next);
+    return next !== xml;
+  }
+  if (format === "xlsx" && op === "xlsx.pivot.refreshDefinition") {
+    const pivotOp = operation as { selector: EditSelector };
+    const target = singleMatch(objectMap, pivotOp.selector);
+    if (target.kind !== "pivotTable" || !target.xmlPath) throw new Error("SELECTOR_NOT_FOUND: selected object is not an XLSX pivotTable.");
+    const xml = (await readZipText(zip, target.xmlPath)) ?? "";
+    const next = xml.replace(/<pivotTableDefinition\b([^>]*)>/, (match, attrs: string) =>
+      /\brefreshOnLoad=/.test(attrs) ? match.replace(/\brefreshOnLoad="[^"]*"/, 'refreshOnLoad="1"') : `<pivotTableDefinition${attrs} refreshOnLoad="1">`
+    );
+    if (next !== xml) zip.file(target.xmlPath, next);
+    return next !== xml;
   }
   return false;
 }
@@ -472,6 +521,22 @@ async function editPptxUpdateChartData(
   return next !== xml || workbookChanged;
 }
 
+async function editPptxSetBounds(
+  zip: Awaited<ReturnType<typeof loadZip>>,
+  operation: { selector: EditSelector; bounds: { x: number; y: number; width: number; height: number } },
+  objectMap: ObjectMapEntry[]
+): Promise<boolean> {
+  const target = singleMatch(objectMap, operation.selector);
+  if (!target.sourcePath || !["shape", "picture", "chart"].includes(target.kind)) {
+    throw new Error("SELECTOR_NOT_FOUND: selected object is not a PPTX shape, picture, or chart.");
+  }
+  const xml = (await readZipText(zip, target.sourcePath)) ?? "";
+  const shapeId = String(target.selectorHints?.shapeId ?? "");
+  const next = replacePptxObjectBlock(xml, target.kind, shapeId, (block) => setBlockBounds(block, operation.bounds));
+  if (next !== xml) zip.file(target.sourcePath, next);
+  return next !== xml;
+}
+
 async function editDocxInsertParagraph(zip: Awaited<ReturnType<typeof loadZip>>, operation: { selector: EditSelector; text: string }, objectMap: ObjectMapEntry[]): Promise<boolean> {
   const target = singleMatch(objectMap, operation.selector);
   if (!target?.sourcePath) throw new Error("SELECTOR_NOT_FOUND: selected DOCX paragraph has no sourcePath.");
@@ -527,6 +592,29 @@ async function editDocxAddRedline(zip: Awaited<ReturnType<typeof loadZip>>, oper
   return next.changed;
 }
 
+async function editDocxStyle(zip: Awaited<ReturnType<typeof loadZip>>, operation: { styleId: string; font?: string; size?: number; bold?: boolean }): Promise<boolean> {
+  const path = "word/styles.xml";
+  const styles = (await readZipText(zip, path)) ?? '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"></w:styles>';
+  const styleXml = buildDocxStyleXml(operation);
+  const re = new RegExp(`<w:style\\b[^>]*\\bw:styleId="${escapeRegExp(operation.styleId)}"[\\s\\S]*?<\\/w:style>`);
+  const next = re.test(styles)
+    ? styles.replace(re, styleXml)
+    : styles.replace(/<\/w:styles>\s*$/, `${styleXml}</w:styles>`);
+  if (next !== styles) zip.file(path, next);
+  await ensureContentTypeOverride(zip, "/word/styles.xml", "application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml");
+  return next !== styles;
+}
+
+function buildDocxStyleXml(operation: { styleId: string; font?: string; size?: number; bold?: boolean }): string {
+  const styleId = escapeXmlText(operation.styleId);
+  const runProps = [
+    operation.font ? `<w:rFonts w:ascii="${escapeXmlText(operation.font)}" w:hAnsi="${escapeXmlText(operation.font)}" w:eastAsia="${escapeXmlText(operation.font)}"/>` : "",
+    typeof operation.size === "number" ? `<w:sz w:val="${Math.round(operation.size * 2)}"/>` : "",
+    operation.bold ? "<w:b/>" : ""
+  ].join("");
+  return `<w:style w:type="paragraph" w:styleId="${styleId}"><w:name w:val="${styleId}"/>${runProps ? `<w:rPr>${runProps}</w:rPr>` : ""}</w:style>`;
+}
+
 async function editXlsxSetCell(zip: Awaited<ReturnType<typeof loadZip>>, sheet: number | undefined, ref: string, value: unknown): Promise<boolean> {
   if (!ref) throw new Error("SELECTOR_NOT_FOUND: xlsx cell ref is required.");
   const path = sheetPath(sheet);
@@ -534,6 +622,23 @@ async function editXlsxSetCell(zip: Awaited<ReturnType<typeof loadZip>>, sheet: 
   const next = setCell(xml, ref, value);
   if (next.changed) zip.file(path, next.xml);
   return next.changed;
+}
+
+async function editXlsxSetFormula(zip: Awaited<ReturnType<typeof loadZip>>, sheet: number | undefined, ref: string, formula: string): Promise<boolean> {
+  if (!ref) throw new Error("SELECTOR_NOT_FOUND: xlsx cell ref is required.");
+  const path = sheetPath(sheet);
+  const xml = (await readZipText(zip, path)) ?? "";
+  const cellXml = `<c r="${escapeXmlText(ref)}"><f>${escapeXmlText(formula.replace(/^=/, ""))}</f></c>`;
+  const pattern = new RegExp(`<c\\b[^>]*\\br=["']${escapeRegExp(ref)}["'][^>]*?(?:\\/>|>[\\s\\S]*?<\\/c>)`);
+  const rowNo = rowFromRef(ref);
+  const rowPattern = new RegExp(`<row\\b([^>]*)\\br=["']${rowNo}["'][^>]*>[\\s\\S]*?<\\/row>`);
+  const next = pattern.test(xml)
+    ? xml.replace(pattern, cellXml)
+    : rowPattern.test(xml)
+      ? xml.replace(rowPattern, (row) => row.replace(/<\/row>$/, `${cellXml}</row>`))
+      : xml.replace(/<\/sheetData>/, `<row r="${rowNo}">${cellXml}</row></sheetData>`);
+  if (next !== xml) zip.file(path, next);
+  return next !== xml;
 }
 
 function updatePictureCrop(
@@ -558,6 +663,37 @@ function updatePictureCrop(
     if (/<a:srcRect\b[^>]*\/>/.test(picture)) return picture.replace(/<a:srcRect\b[^>]*\/>/, srcRect);
     return picture.replace(/(<a:blip\b[^>]*\/>|<a:blip\b[\s\S]*?<\/a:blip>)/, `$1${srcRect}`);
   });
+}
+
+function replacePptxObjectBlock(xml: string, kind: string, shapeId: string, updater: (block: string) => string): string {
+  const pattern = kind === "picture"
+    ? /<p:pic\b[\s\S]*?<\/p:pic>/g
+    : kind === "chart"
+      ? /<p:graphicFrame\b[\s\S]*?<\/p:graphicFrame>/g
+      : /<p:sp\b[\s\S]*?<\/p:sp>/g;
+  let index = 0;
+  return xml.replace(pattern, (block) => {
+    index += 1;
+    const cNvPr = /<p:cNvPr\b([^>]*)\/>/.exec(block)?.[1] ?? "";
+    const candidateId = /\bid="([^"]+)"/.exec(cNvPr)?.[1];
+    if ((shapeId && candidateId !== shapeId) || (!shapeId && index !== 1)) return block;
+    return updater(block);
+  });
+}
+
+function setBlockBounds(block: string, bounds: { x: number; y: number; width: number; height: number }): string {
+  const off = `<a:off x="${pxToEmu(bounds.x)}" y="${pxToEmu(bounds.y)}"/>`;
+  const ext = `<a:ext cx="${pxToEmu(bounds.width)}" cy="${pxToEmu(bounds.height)}"/>`;
+  if (/<p:xfrm\b[\s\S]*?<\/p:xfrm>/.test(block)) {
+    return block.replace(/<p:xfrm\b([^>]*)>[\s\S]*?<\/p:xfrm>/, `<p:xfrm$1>${off}${ext}</p:xfrm>`);
+  }
+  if (/<a:xfrm\b[\s\S]*?<\/a:xfrm>/.test(block)) {
+    return block.replace(/<a:xfrm\b([^>]*)>[\s\S]*?<\/a:xfrm>/, `<a:xfrm$1>${off}${ext}</a:xfrm>`);
+  }
+  if (/<p:graphicFrame\b/.test(block)) {
+    return block.replace(/(<p:nvGraphicFramePr\b[\s\S]*?<\/p:nvGraphicFramePr>)/, `$1<p:xfrm>${off}${ext}</p:xfrm>`);
+  }
+  return block.replace(/(<p:spPr\b[^>]*>)/, `$1<a:xfrm>${off}${ext}</a:xfrm>`);
 }
 
 function cropForFit(target: ObjectMapEntry, replacement: Uint8Array, mediaType: string, fit: "contain" | "cover" | "stretch" | undefined): CropRect | undefined {
@@ -945,13 +1081,18 @@ function columnName(index: number): string {
   return name || "A";
 }
 
+function rowFromRef(ref: string): number {
+  return Number(/\d+/.exec(ref)?.[0] ?? 1);
+}
+
 async function editPdf(
   input: Awaited<ReturnType<typeof normalizeInput>>,
   operations: EditOperation[],
   options: EditOptions
 ): Promise<EditResult> {
   const pdf = await PDFDocument.load(input.bytes, { ignoreEncryption: true });
-  const font = await pdf.embedFont(StandardFonts.Helvetica);
+  const fontSet = await embedPdfFonts(pdf, operations.map((op) => "text" in op ? String(op.text) : ""));
+  const font = fontSet.font;
   let applied = 0;
   let skipped = 0;
 

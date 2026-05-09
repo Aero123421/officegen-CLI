@@ -25,6 +25,7 @@ export interface LayoutConstraint {
 export interface LayoutApplyOptions extends OptionalContext {
     boxes: LayoutBox[];
     constraints: LayoutConstraint[];
+    targetPath?: string;
     outputPath?: string;
     planId?: string;
 }

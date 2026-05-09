@@ -160,6 +160,49 @@ describe("@officegen/optional PPTX template and design signals", () => {
       planOnly: true
     });
   });
+
+  it("fills a source-backed PPTX template into a real Office file", async () => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), "officegen-template-fill-"));
+    const deckPath = path.join(cwd, "source.pptx");
+    const outPath = path.join(cwd, "filled.pptx");
+    await writeFile(deckPath, await makePptxFixture());
+    const optional = {
+      cwd,
+      capabilities: createOptionalCapabilities(["template"])
+    };
+    const template = await createTemplate({
+      ...optional,
+      sourcePath: deckPath,
+      template: { id: "deck", name: "Deck", fields: [{ name: "quarter", type: "string" }] }
+    });
+    expect(template.mapping?.quarter).toBeTruthy();
+
+    const result = await fillTemplate({ ...optional, id: "deck", values: { quarter: "Q4 FY27" }, outputPath: outPath });
+    const inspected = await inspect(outPath);
+
+    expect(result.planOnly).toBe(false);
+    expect(result.mutatesOffice).toBe(true);
+    expect(inspected.objectMap.map((entry) => entry.text).join(" ")).toContain("Q4 FY27");
+  });
+
+  it("does not report Office mutation when template fill has no resolved operations", async () => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), "officegen-template-empty-fill-"));
+    const deckPath = path.join(cwd, "source.pptx");
+    const outPath = path.join(cwd, "filled.pptx");
+    await writeFile(deckPath, await makePptxFixture());
+    const optional = {
+      cwd,
+      capabilities: createOptionalCapabilities(["template"])
+    };
+    await createTemplate({
+      ...optional,
+      sourcePath: deckPath,
+      template: { id: "empty", name: "Empty", fields: [{ name: "missing", type: "string" }] }
+    });
+
+    await expect(fillTemplate({ ...optional, id: "empty", values: { missing: "value" }, outputPath: outPath }))
+      .rejects.toThrow(/no Office edit operations/i);
+  });
 });
 
 async function makePptxFixture(): Promise<Buffer> {

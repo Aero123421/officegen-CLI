@@ -1,12 +1,13 @@
 import { inspect } from "./inspect.js";
 import { render, type DocumentIR } from "./render.js";
-import { type InputLike, assertPdfStandardFontText, inspectInputZipSafety, normalizeInput, writeOutput, zipSafetyCaveats } from "./shared.js";
+import { type InputLike, inspectInputZipSafety, normalizeInput, writeOutput, zipSafetyCaveats } from "./shared.js";
+import { embedPdfFonts, ensurePdfTextEncodable } from "./pdfFonts.js";
 import { spawn } from "node:child_process";
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { OfficegenError, type OfficegenConfig } from "@officegen/core";
-import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
+import { PDFDocument, rgb } from "pdf-lib";
 
 export type ExportMode = "fast" | "internal" | "native";
 
@@ -71,7 +72,6 @@ export async function exportDocument(input: InputLike | DocumentIR, options: Exp
   if (options.to === "pdf") {
     const inspected = await inspect({ data: normalized.bytes, format: normalized.format }, { config: options.config });
     const pdf = await PDFDocument.create();
-    const font = await pdf.embedFont(StandardFonts.Helvetica);
     const pages =
       normalized.format === "pptx"
         ? ((inspected.untrusted.slides as Array<Record<string, unknown>>) ?? [])
@@ -79,14 +79,15 @@ export async function exportDocument(input: InputLike | DocumentIR, options: Exp
           ? [{ title: "Document", text: ((inspected.untrusted.paragraphs as Array<Record<string, unknown>>) ?? []).map((p) => p.text).join("\n") }]
           : normalized.format === "xlsx"
             ? ((inspected.untrusted.sheets as Array<Record<string, unknown>>) ?? []).map((sheet) => ({ title: `Sheet ${sheet.index}`, text: ((sheet.cells as Array<Record<string, unknown>>) ?? []).map((cell) => `${cell.ref}: ${cell.value}`).join("\n") }))
-            : [];
+          : [];
+    const fontSet = await embedPdfFonts(pdf, pages.flatMap((pageInfo, index) => [String(pageInfo.title ?? `Page ${index + 1}`), String(pageInfo.text ?? "")]));
     for (const [index, pageInfo] of pages.entries()) {
       const page = pdf.addPage([612, 792]);
-      page.drawText(assertPdfStandardFontText(String(pageInfo.title ?? `Page ${index + 1}`), font, "export.pdf.title"), { x: 54, y: 735, size: 18, font, color: rgb(0.07, 0.07, 0.07) });
+      page.drawText(ensurePdfTextEncodable(String(pageInfo.title ?? `Page ${index + 1}`), fontSet.bold, "export.pdf.title"), { x: 54, y: 735, size: 18, font: fontSet.bold, color: rgb(0.07, 0.07, 0.07) });
       const text = String(pageInfo.text ?? "");
       let y = 700;
       for (const line of text.split(/\r?\n/).slice(0, 36)) {
-        page.drawText(assertPdfStandardFontText(pdfSafeLine(line).slice(0, 95), font, "export.pdf.body"), { x: 54, y, size: 10, font, color: rgb(0.2, 0.2, 0.2) });
+        page.drawText(ensurePdfTextEncodable(pdfSafeLine(line).slice(0, 95), fontSet.font, "export.pdf.body"), { x: 54, y, size: 10, font: fontSet.font, color: rgb(0.2, 0.2, 0.2) });
         y -= 16;
       }
     }
@@ -94,6 +95,7 @@ export async function exportDocument(input: InputLike | DocumentIR, options: Exp
     await writeOutput(options.out, bytes);
     return result(normalized.format, options, bytes, [
       "Fast Office-to-PDF export is approximate and text-summary based.",
+      ...fontSet.caveats,
       ...inspected.trusted.caveats
     ]);
   }

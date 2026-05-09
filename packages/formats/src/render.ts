@@ -1,7 +1,8 @@
 import { extname } from "node:path";
 import { OfficegenError, type OfficegenConfig } from "@officegen/core";
-import { assertPdfStandardFontText, writeOutput } from "./shared.js";
-import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
+import { writeOutput } from "./shared.js";
+import { embedPdfFonts, ensurePdfTextEncodable } from "./pdfFonts.js";
+import { PDFDocument, rgb } from "pdf-lib";
 
 export type RenderTarget = "pptx" | "docx" | "xlsx" | "pdf";
 
@@ -295,17 +296,16 @@ async function renderXlsx(ir: DocumentIR, options: RenderOptions): Promise<Rende
 
 async function renderPdf(ir: DocumentIR, options: RenderOptions): Promise<RenderResult> {
   const pdf = await PDFDocument.create();
-  const font = await pdf.embedFont(StandardFonts.Helvetica);
-  const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
   const sections = normalizedSections(ir);
+  const fontSet = await embedPdfFonts(pdf, sections.flatMap((section) => [String(section.title ?? ir.title ?? "Untitled"), String(section.body ?? "")]));
   for (const section of sections) {
     const page = pdf.addPage([612, 792]);
     const { height } = page.getSize();
-    const title = assertPdfStandardFontText(section.title ?? ir.title ?? "Untitled", bold, "render.pdf.title");
-    page.drawText(title, { x: 54, y: height - 72, size: 22, font: bold, color: rgb(0.07, 0.07, 0.07) });
+    const title = ensurePdfTextEncodable(section.title ?? ir.title ?? "Untitled", fontSet.bold, "render.pdf.title");
+    page.drawText(title, { x: 54, y: height - 72, size: 22, font: fontSet.bold, color: rgb(0.07, 0.07, 0.07) });
     let y = height - 112;
     for (const line of toLines(section.body)) {
-      page.drawText(assertPdfStandardFontText(pdfSafeLine(line).slice(0, 95), font, "render.pdf.body"), { x: 54, y, size: 11, font, color: rgb(0.16, 0.16, 0.16) });
+      page.drawText(ensurePdfTextEncodable(pdfSafeLine(line).slice(0, 95), fontSet.font, "render.pdf.body"), { x: 54, y, size: 11, font: fontSet.font, color: rgb(0.16, 0.16, 0.16) });
       y -= 18;
       if (y < 54) break;
     }
@@ -317,7 +317,7 @@ async function renderPdf(ir: DocumentIR, options: RenderOptions): Promise<Render
     target: "pdf",
     out: options.out,
     bytes: options.out ? undefined : bytes,
-    caveats: ["PDF direct render is fixed-layout and is not a native Office conversion path."]
+    caveats: ["PDF direct render is fixed-layout and is not a native Office conversion path.", ...fontSet.caveats]
   };
 }
 

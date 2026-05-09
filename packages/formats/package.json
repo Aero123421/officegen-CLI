@@ -1,6 +1,6 @@
 {
   "name": "@officegen/formats",
-  "version": "2.0.2",
+  "version": "2.1.0",
   "license": "MIT",
   "type": "module",
   "main": "dist/index.js",
@@ -15,7 +15,9 @@
     "build": "tsc -b"
   },
   "dependencies": {
+    "@embedpdf/fonts-jp": "^1.0.0",
     "@officegen/core": "file:../core",
+    "@pdf-lib/fontkit": "^1.1.1",
     "docx": "^9.5.1",
     "exceljs": "^4.4.0",
     "jszip": "^3.10.1",

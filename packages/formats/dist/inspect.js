@@ -3,6 +3,10 @@ import { inspectParagraphs } from "./ooxml/docx.js";
 import { inspectSlides } from "./ooxml/pptx.js";
 import { inspectSheets } from "./ooxml/xlsx.js";
 import { PDFDocument } from "pdf-lib";
+import { spawn } from "node:child_process";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 export async function inspect(input, options = {}) {
     const normalized = await normalizeInput(input, options.format ?? "unknown");
     if (normalized.format === "pptx")
@@ -193,10 +197,16 @@ async function inspectXlsx(input, options) {
 async function inspectPdf(input, options) {
     const pdf = await PDFDocument.load(input.bytes, { ignoreEncryption: true });
     const extractedText = extractPdfTextPreview(input.bytes);
+    const ocr = options.ocr && !extractedText.pages.some(Boolean)
+        ? options.config?.security.externalProcess === "allow" && options.config.security.renderers === "enabled"
+            ? await tryOcrPdf(input.path, pdf.getPageCount())
+            : { ok: false, engine: "tesseract", message: "OCR requires security.externalProcess=allow and security.renderers=enabled.", pages: [] }
+        : undefined;
+    const textPages = ocr?.pages?.length ? ocr.pages : extractedText.pages;
     const summaryDepth = options.depth === "summary";
     const pages = pdf.getPages().map((page, index) => {
         const size = page.getSize();
-        const text = extractedText.pages[index] ?? "";
+        const text = textPages[index] ?? "";
         return {
             stableObjectId: makeStableObjectId("pdf", "document", "page", index + 1),
             index: index + 1,
@@ -210,19 +220,21 @@ async function inspectPdf(input, options) {
         schema: "officegen.inspect.result@1.2",
         trusted: trustedMeta("officegen.inspect.result@1.2", input, { pages: pages.length, textBlocks: extractedText.pages.filter(Boolean).length, images: extractedText.imageRefs }, [
             "PDF text extraction is best-effort and does not replace OCR or native renderer output.",
+            ...(ocr ? [`OCR ${ocr.ok ? "completed" : "not available"}: ${ocr.message}`] : []),
             ...(extractedText.caveats.length ? extractedText.caveats : [])
         ]),
         untrusted: {
             pages,
-            ...(summaryDepth ? {} : { text: extractedText.pages })
+            ...(summaryDepth ? {} : { text: textPages }),
+            ...(ocr ? { ocr } : {})
         },
         objectMap: pages
-            .map((page, index) => extractedText.pages[index]
+            .map((page, index) => textPages[index]
             ? {
                 stableObjectId: makeStableObjectId("pdf", "document", "text", index + 1),
                 kind: "pdfText",
-                text: summaryDepth ? undefined : extractedText.pages[index],
-                textPreview: extractedText.pages[index]?.slice(0, 240),
+                text: summaryDepth ? undefined : textPages[index],
+                textPreview: textPages[index]?.slice(0, 240),
                 selectorHints: { page: page.index },
                 trust: { level: "untrusted", reason: "document-content" },
                 untrusted: true
@@ -231,6 +243,90 @@ async function inspectPdf(input, options) {
             .filter((entry) => Boolean(entry)),
         agentInstruction: AGENT_UNTRUSTED_INSTRUCTION
     };
+}
+async function tryOcrPdf(inputPath, pageCount) {
+    if (!inputPath)
+        return { ok: false, engine: "tesseract", message: "OCR requires a PDF input path.", pages: [] };
+    const executable = await firstRunnable(["tesseract"]);
+    if (!executable)
+        return { ok: false, engine: "tesseract", message: "tesseract executable was not found.", pages: [] };
+    const result = await runCapture(executable, [inputPath, "stdout", "-l", process.env.OFFICEGEN_OCR_LANG ?? "eng+jpn"], 30000);
+    if (result.ok && result.stdout.trim()) {
+        return { ok: true, engine: "tesseract", message: "OCR text extracted by Tesseract.", pages: result.stdout.split(/\f/g).map((page) => page.trim()) };
+    }
+    const rasterized = await tryRasterizedOcr(inputPath, pageCount, executable);
+    if (rasterized.ok)
+        return rasterized;
+    return {
+        ok: false,
+        engine: "tesseract",
+        message: [result.stderr || `direct OCR exit ${result.code}`, rasterized.message].filter(Boolean).join(" / "),
+        pages: []
+    };
+}
+async function tryRasterizedOcr(inputPath, pageCount, tesseract) {
+    const pdftoppm = await firstRunnable(["pdftoppm"]);
+    if (!pdftoppm)
+        return { ok: false, engine: "tesseract+pdftoppm", message: "pdftoppm executable was not found for PDF raster OCR fallback.", pages: [] };
+    const maxPages = Math.max(1, Number.parseInt(process.env.OFFICEGEN_OCR_MAX_PAGES ?? "20", 10) || 20);
+    const lastPage = Math.min(Math.max(pageCount, 1), maxPages);
+    const dir = await mkdtemp(path.join(os.tmpdir(), "officegen-ocr-"));
+    try {
+        const prefix = path.join(dir, "page");
+        const raster = await runCapture(pdftoppm, ["-png", "-r", "200", "-f", "1", "-l", String(lastPage), inputPath, prefix], 60000);
+        if (!raster.ok)
+            return { ok: false, engine: "tesseract+pdftoppm", message: raster.stderr || `pdftoppm exit ${raster.code}`, pages: [] };
+        const files = (await readdir(dir))
+            .filter((file) => file.toLowerCase().endsWith(".png"))
+            .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+        const pages = [];
+        for (const file of files) {
+            const imagePath = path.join(dir, file);
+            const ocr = await runCapture(tesseract, [imagePath, "stdout", "-l", process.env.OFFICEGEN_OCR_LANG ?? "eng+jpn"], 30000);
+            pages.push(ocr.ok ? ocr.stdout.trim() : "");
+        }
+        const extracted = pages.some(Boolean);
+        return {
+            ok: extracted,
+            engine: "tesseract+pdftoppm",
+            message: extracted
+                ? `OCR text extracted from ${pages.length} rasterized PDF page(s).${pageCount > lastPage ? ` Limited to ${lastPage}/${pageCount} pages by OFFICEGEN_OCR_MAX_PAGES.` : ""}`
+                : "Raster OCR completed but produced no text.",
+            pages
+        };
+    }
+    finally {
+        await rm(dir, { recursive: true, force: true });
+    }
+}
+async function firstRunnable(commands) {
+    for (const command of commands) {
+        const result = await runCapture(command, ["--version"], 5000);
+        if (result.ok)
+            return command;
+    }
+    return undefined;
+}
+function runCapture(command, args, timeoutMs) {
+    return new Promise((resolve) => {
+        const child = spawn(command, args, { windowsHide: true });
+        let stdout = "";
+        let stderr = "";
+        const timer = setTimeout(() => {
+            child.kill();
+            resolve({ ok: false, stdout, stderr: `${stderr}\nTimed out after ${timeoutMs}ms.`.trim() });
+        }, timeoutMs);
+        child.stdout.on("data", (chunk) => { stdout += String(chunk); });
+        child.stderr.on("data", (chunk) => { stderr += String(chunk); });
+        child.on("error", (error) => {
+            clearTimeout(timer);
+            resolve({ ok: false, stdout, stderr: error.message });
+        });
+        child.on("exit", (code) => {
+            clearTimeout(timer);
+            resolve({ ok: code === 0, code, stdout, stderr });
+        });
+    });
 }
 function extractPdfTextPreview(bytes) {
     const raw = Buffer.from(bytes).toString("latin1");

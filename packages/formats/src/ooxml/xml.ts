@@ -143,6 +143,10 @@ export function emuToPx(value: number): number {
   return Math.round((value / 914400) * 96);
 }
 
+export function pxToEmu(value: number): number {
+  return Math.round((value / 96) * 914400);
+}
+
 export function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import JSZip from "jszip";
 import { PDFDocument } from "pdf-lib";
 import { getBuiltinConfig } from "@officegen/core";
-import { diffDocuments, diagnose, edit, exportDocument, extractAssets, inspect, inspectInputZipSafety, render, renderChart, renderDiagram, replaceAsset, resolveEditSelectors, view } from "../src/index.js";
+import { diffDocuments, diagnose, edit, exportDocument, extractAssets, inspect, inspectInputZipSafety, render, renderChart, renderDiagram, replaceAsset, resolveEditSelectors, verify, view } from "../src/index.js";
 
 describe("@officegen/formats MVP", () => {
   it("renders and inspects a basic PPTX with untrusted text separation", async () => {
@@ -164,10 +164,13 @@ describe("@officegen/formats MVP", () => {
     });
   });
 
-  it("surfaces PDF WinAnsi text limitations as OfficegenError", async () => {
-    await expect(render({ title: "\u65e5\u672c\u8a9e", sections: [{ body: "Hello" }] }, { target: "pdf" })).rejects.toMatchObject({
-      payload: { code: "RENDER_FONT_UNSUPPORTED" }
-    });
+  it("renders Japanese/CJK PDF text with the bundled fallback font", async () => {
+    const rendered = await render({ title: "\u65e5\u672c\u8a9e", sections: [{ title: "\u6982\u8981", body: "\u58f2\u4e0a\u306f\u9806\u8abf\u3067\u3059" }] }, { target: "pdf" });
+    const inspected = await inspect({ data: rendered.bytes, format: "pdf" });
+
+    expect(rendered.bytes?.byteLength).toBeGreaterThan(1000);
+    expect(rendered.caveats.join(" ")).toContain("Embedded Unicode PDF font");
+    expect(inspected.trusted.summary.pages).toBe(1);
   });
 
   it("renders tabular ASCII PDF text by normalizing tabs to spaces", async () => {
@@ -261,6 +264,19 @@ describe("@officegen/formats MVP", () => {
     expect(valuesByRef.get("C2")).toBe("");
   });
 
+  it("sets XLSX formulas and exposes them as valid Office XML", async () => {
+    const rendered = await render({ title: "Formula", sheets: [{ rows: [["A", "B"], [2, 3]] }] }, { target: "xlsx" });
+    const edited = await edit(
+      { data: rendered.bytes, format: "xlsx" },
+      [{ op: "xlsx.setFormula", sheet: 1, cell: "C2", formula: "=SUM(A2:B2)" }]
+    );
+    const zip = await JSZip.loadAsync(edited.bytes as Uint8Array);
+    const sheetXml = await zip.file("xl/worksheets/sheet1.xml")?.async("string");
+
+    expect(sheetXml).toContain('<c r="C2"><f>SUM(A2:B2)</f></c>');
+    expect(sheetXml?.match(/<row\b[^>]*\br="2"/g)).toHaveLength(1);
+  });
+
   it("keeps XLSX chart objects in the approximate view object map", async () => {
     const zip = new JSZip();
     zip.file("xl/worksheets/sheet1.xml", '<worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Revenue</t></is></c></row></sheetData></worksheet>');
@@ -300,6 +316,21 @@ describe("@officegen/formats MVP", () => {
     expect(worksheetXml).toContain("<tableParts");
     expect(relsXml).toContain("relationships/table");
     expect(contentTypes).toContain("spreadsheetml.table+xml");
+  });
+
+  it("resizes XLSX tables without leaving stale autoFilter ranges", async () => {
+    const rendered = await render({ title: "Book", sheets: [{ name: "Data", tableName: "ManualTable", rows: [["Name", "Value"], ["A", 1]] }] }, { target: "xlsx" });
+    const inspected = await inspect({ data: rendered.bytes, format: "xlsx" });
+    const tableId = inspected.objectMap.find((entry) => entry.kind === "table")?.stableObjectId;
+    const edited = await edit(
+      { data: rendered.bytes, format: "xlsx" },
+      [{ op: "xlsx.table.resize", selector: { stableObjectId: tableId }, ref: "A1:B4" }]
+    );
+    const zip = await JSZip.loadAsync(edited.bytes as Uint8Array);
+    const tableXml = await zip.file("xl/tables/table1.xml")?.async("string");
+
+    expect(tableXml).toContain('ref="A1:B4"');
+    expect(tableXml).toContain('<autoFilter ref="A1:B4"');
   });
 
   it("edits DOCX headers, comments, and tracked insertions without native Office", async () => {
@@ -349,6 +380,33 @@ describe("@officegen/formats MVP", () => {
     expect(diff.changed).toBe(true);
     expect(diff.summary.changedTextObjects).toBe(1);
     expect(diff.summary.visualRegressionScore).toBeGreaterThan(0);
+  });
+
+  it("updates PPTX chart graphicFrame bounds", async () => {
+    const zip = new JSZip();
+    zip.file(
+      "ppt/slides/slide1.xml",
+      [
+        '<p:sld><p:cSld>',
+        '<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="4" name="Revenue Chart"/></p:nvGraphicFramePr>',
+        '<p:xfrm><a:off x="100" y="200"/><a:ext cx="300" cy="400"/></p:xfrm>',
+        '<a:graphic><a:graphicData><c:chart r:id="rId1"/></a:graphicData></a:graphic></p:graphicFrame>',
+        '</p:cSld></p:sld>'
+      ].join("")
+    );
+    zip.file("ppt/slides/_rels/slide1.xml.rels", '<Relationships><Relationship Id="rId1" Target="../charts/chart1.xml"/></Relationships>');
+    zip.file("ppt/charts/chart1.xml", "<c:chartSpace><c:chart/></c:chartSpace>");
+    const bytes = await zip.generateAsync({ type: "uint8array" });
+    const inspected = await inspect({ data: bytes, format: "pptx" });
+    const chartId = inspected.objectMap.find((entry) => entry.kind === "chart")?.stableObjectId;
+    const edited = await edit(
+      { data: bytes, format: "pptx" },
+      [{ op: "pptx.setBounds", selector: { stableObjectId: chartId }, bounds: { x: 10, y: 20, width: 30, height: 40 } }]
+    );
+    const editedZip = await JSZip.loadAsync(edited.bytes as Uint8Array);
+    const slideXml = await editedZip.file("ppt/slides/slide1.xml")?.async("string");
+
+    expect(slideXml).toContain('<p:xfrm><a:off x="95250" y="190500"/><a:ext cx="285750" cy="381000"/></p:xfrm>');
   });
 
   it("flags OOXML relationship repair risks without launching Office", async () => {
@@ -457,6 +515,16 @@ describe("@officegen/formats MVP", () => {
     const viewed = await view({ data: bytes, format: "pdf" });
 
     expect(viewed.pages).toHaveLength(10);
+  });
+
+  it("verifies openability, repair risk, and approximate visual readiness", async () => {
+    const rendered = await render({ title: "Verify", slides: [{ title: "Ready", body: "Body" }] }, { target: "pptx" });
+    const result = await verify({ data: rendered.bytes, format: "pptx" }, { visual: true });
+
+    expect(result.openable).toBe(true);
+    expect(result.noRepairDialogExpected).toBe(true);
+    expect(result.visual?.pagesChecked).toBeGreaterThan(0);
+    expect(result.readiness).not.toBe("blocked");
   });
 
   it("renders empty sections with at least one PPTX slide, XLSX sheet, and DOCX document body", async () => {
