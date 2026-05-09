@@ -292,4 +292,4 @@ npm run clean
 
 ## License
 
-No license file has been added yet.
+MIT. See [LICENSE](LICENSE).

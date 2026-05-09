@@ -1,6 +1,7 @@
 {
   "name": "@officegen/formats",
   "version": "1.2.6",
+  "license": "MIT",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
