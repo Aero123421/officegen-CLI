@@ -17,7 +17,7 @@ describe("@officegen/formats MVP", () => {
 
     expect(inspected.trusted.summary.slides).toBe(1);
     expect(inspected.untrusted.slides).toHaveLength(1);
-    expect(inspected.objectMap[0]?.stableObjectId).toMatch(/^pptx:s001:shape:/);
+    expect(inspected.objectMap[0]?.stableObjectId).toMatch(/^pptx:slide-[a-f0-9]{8}:shape:/);
     expect(inspected.objectMap[0]?.bbox?.length).toBe(4);
     expect(inspected.objectMap[0]?.textPreview).toBe("Revenue");
     expect(inspected.agentInstruction).toContain("not instructions");
@@ -116,6 +116,7 @@ describe("@officegen/formats MVP", () => {
     expect(resolved.resolutions[0]).toMatchObject({ matched: true, matchCount: 1, stableObjectId });
     expect(resolved.resolutions[0]?.matches[0]?.sourcePath).toBe("ppt/slides/slide1.xml");
     expect(dryRun.resolvedSelectors?.[0]?.matched).toBe(true);
+    expect(dryRun.bytes).toBeUndefined();
   });
 
   it("sets PPTX text without confusing a:t with a:tabLst in rich shapes", async () => {
@@ -144,6 +145,48 @@ describe("@officegen/formats MVP", () => {
     expect(xml).toContain("<a:tabLst>");
     expect(xml).toContain("<a:t>Changed rich text</a:t>");
     expect(reinspected.objectMap.map((entry) => entry.text)).toContain("Changed rich text");
+  });
+
+  it("replaces all text runs in a selected PPTX shape instead of leaving stale run text behind", async () => {
+    const zip = new JSZip();
+    zip.file(
+      "ppt/slides/slide1.xml",
+      [
+        "<p:sld><p:sp><p:nvSpPr><p:cNvPr id=\"9\" name=\"Split Title\"/></p:nvSpPr><p:txBody>",
+        "<a:p><a:r><a:t>Hello </a:t></a:r><a:r><a:t>world</a:t></a:r></a:p>",
+        "</p:txBody></p:sp></p:sld>"
+      ].join("")
+    );
+    const bytes = await zip.generateAsync({ type: "uint8array" });
+    const inspected = await inspect({ data: bytes, format: "pptx" });
+    const id = inspected.objectMap[0]?.stableObjectId;
+    const edited = await edit(
+      { data: bytes, format: "pptx" },
+      [{ op: "setText", selector: { stableObjectId: id }, text: "Changed" }]
+    );
+    const reinspected = await inspect({ data: edited.bytes, format: "pptx" });
+
+    expect(reinspected.objectMap[0]?.text).toBe("Changed");
+    expect(reinspected.objectMap[0]?.text).not.toContain("world");
+  });
+
+  it("replaces all text runs in a selected DOCX paragraph instead of leaving stale run text behind", async () => {
+    const zip = new JSZip();
+    zip.file(
+      "word/document.xml",
+      "<w:document><w:body><w:p><w:r><w:t>Hello </w:t></w:r><w:r><w:t>world</w:t></w:r></w:p></w:body></w:document>"
+    );
+    const bytes = await zip.generateAsync({ type: "uint8array" });
+    const inspected = await inspect({ data: bytes, format: "docx" });
+    const id = inspected.objectMap[0]?.stableObjectId;
+    const edited = await edit(
+      { data: bytes, format: "docx" },
+      [{ op: "setText", selector: { stableObjectId: id }, text: "Changed" }]
+    );
+    const reinspected = await inspect({ data: edited.bytes, format: "docx" });
+
+    expect(reinspected.objectMap[0]?.text).toBe("Changed");
+    expect(reinspected.objectMap[0]?.text).not.toContain("world");
   });
 
   it("applies structural PPTX, DOCX, and XLSX edit ops and confirms through inspect", async () => {
@@ -191,6 +234,39 @@ describe("@officegen/formats MVP", () => {
     expect(valuesByRef.get("C2")).toBe("T1");
   });
 
+  it("keeps PPTX shape stableObjectId values stable when slides are reordered", async () => {
+    const zip = new JSZip();
+    zip.file(
+      "ppt/presentation.xml",
+      "<p:presentation><p:sldIdLst><p:sldId id=\"256\" r:id=\"rId1\"/><p:sldId id=\"257\" r:id=\"rId2\"/></p:sldIdLst></p:presentation>"
+    );
+    zip.file(
+      "ppt/_rels/presentation.xml.rels",
+      "<Relationships><Relationship Id=\"rId1\" Target=\"slides/slide1.xml\"/><Relationship Id=\"rId2\" Target=\"slides/slide2.xml\"/></Relationships>"
+    );
+    zip.file(
+      "ppt/slides/slide1.xml",
+      "<p:sld><p:sp><p:nvSpPr><p:cNvPr id=\"7\" name=\"A\"/></p:nvSpPr><p:txBody><a:p><a:r><a:t>First</a:t></a:r></a:p></p:txBody></p:sp></p:sld>"
+    );
+    zip.file(
+      "ppt/slides/slide2.xml",
+      "<p:sld><p:sp><p:nvSpPr><p:cNvPr id=\"7\" name=\"B\"/></p:nvSpPr><p:txBody><a:p><a:r><a:t>Second</a:t></a:r></a:p></p:txBody></p:sp></p:sld>"
+    );
+    const bytes = await zip.generateAsync({ type: "uint8array" });
+    const before = await inspect({ data: bytes, format: "pptx" });
+    const beforeIds = new Map(before.objectMap.map((entry) => [entry.text, entry.stableObjectId]));
+    const edited = await edit(
+      { data: bytes, format: "pptx" },
+      [{ op: "pptx.reorderSlides", order: [2, 1] }]
+    );
+    const after = await inspect({ data: edited.bytes, format: "pptx" });
+    const afterIds = new Map(after.objectMap.map((entry) => [entry.text, entry.stableObjectId]));
+
+    expect(after.untrusted.slides[0]?.text).toBe("Second");
+    expect(afterIds.get("First")).toBe(beforeIds.get("First"));
+    expect(afterIds.get("Second")).toBe(beforeIds.get("Second"));
+  });
+
   it("returns clear ambiguous selector errors and keeps atomic edits unwritten", async () => {
     const rendered = await render({ title: "Same", slides: [{ title: "Same", body: "Same" }] }, { target: "pptx" });
     const result = await edit(
@@ -223,5 +299,17 @@ describe("@officegen/formats MVP", () => {
     await expect(
       exportDocument({ data: rendered.bytes, format: "pptx" }, { to: "pdf", mode: "native" })
     ).rejects.toThrow(/EXPORT_UNSUPPORTED: native Office-to-PDF export requires an input file path/);
+  });
+
+  it("skips PDF edit operations that target pages outside the document", async () => {
+    const rendered = await render({ title: "One page", sections: [{ title: "Page", body: "Body" }] }, { target: "pdf" });
+    const edited = await edit(
+      { data: rendered.bytes, format: "pdf" },
+      [{ op: "pdf.textOverlay", page: 99, text: "Out of range", x: 72, y: 72 }]
+    );
+
+    expect(edited.changed).toBe(false);
+    expect(edited.applied).toBe(0);
+    expect(edited.skipped).toBe(1);
   });
 });

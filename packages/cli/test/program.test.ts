@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { validateSchema } from "@officegen/core";
 import { runCli } from "../src/program.js";
 
 interface Captured {
@@ -42,7 +43,7 @@ afterEach(() => {
 
 describe("officegen CLI command surface", () => {
   it("wraps capabilities --agent --json in the v1.2 envelope and hides disabled optional commands", async () => {
-    const captured = await run(["capabilities", "--agent", "--json"]);
+    const captured = await run(["capabilities", "--agent", "--json", "--json-budget-bytes", "20000"]);
     const envelope = parseEnvelope(captured);
 
     expect(envelope.schema).toBe("officegen.envelope@1.2");
@@ -82,7 +83,7 @@ describe("officegen CLI command surface", () => {
     const envelope = parseEnvelope(captured);
 
     expect(envelope.ok).toBe(false);
-    expect(envelope.error.code).toBe("FEATURE_HIDDEN");
+    expect(envelope.error.code).toBe("FEATURE_HIDDEN_FROM_AGENT");
     expect(envelope.error.feature).toBe("design");
     expect(envelope.availableCommands).not.toContain("design");
     expect(envelope.nextSuggestedCommands).toContain("officegen capabilities --agent --json");
@@ -184,7 +185,7 @@ describe("officegen CLI command surface", () => {
     expect(envelope.ok).toBe(true);
     expect(envelope.warnings).toEqual(expect.arrayContaining([
       expect.objectContaining({
-        code: "AGENT_ADAPTER_STALE",
+        code: "CAPABILITIES_STALE",
         expected: "sha256:stale"
       })
     ]));
@@ -196,7 +197,7 @@ describe("officegen CLI command surface", () => {
 
     expect(envelope.warnings).toEqual(expect.arrayContaining([
       expect.objectContaining({
-        code: "AGENT_ADAPTER_STALE",
+        code: "CAPABILITIES_STALE",
         expected: "sha256:env-stale"
       })
     ]));
@@ -208,8 +209,86 @@ describe("officegen CLI command surface", () => {
 
     expect(envelope.ok).toBe(true);
     expect(envelope.result.schema).toBe("officegen.progressive-disclosure@1.2");
+    expect(envelope.truncated).toBeUndefined();
+    expect(validateSchema("officegen.envelope@1.2", envelope).ok).toBe(true);
     expect(envelope.warnings).toEqual(expect.arrayContaining([
       expect.objectContaining({ code: "AGENT_JSON_BUDGET_EXCEEDED" })
+    ]));
+  });
+
+  it("applies the default agent JSON budget without breaking the envelope schema", async () => {
+    const captured = await run(["capabilities", "--agent", "--json"]);
+    const envelope = parseEnvelope(captured);
+
+    expect(envelope.ok).toBe(true);
+    expect(envelope.result.schema).toBe("officegen.progressive-disclosure@1.2");
+    expect(envelope.result.truncated).toBe(true);
+    expect(validateSchema("officegen.envelope@1.2", envelope).ok).toBe(true);
+  });
+
+  it("accepts global value options before the command", async () => {
+    const captured = await run(["--capabilities-hash", "sha256:stale", "capabilities", "--json"]);
+    const envelope = parseEnvelope(captured);
+
+    expect(envelope.ok).toBe(true);
+    expect(envelope.result.schema).toBe("officegen.capabilities@1.2");
+    expect(envelope.warnings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "CAPABILITIES_STALE" })
+    ]));
+  });
+
+  it("rejects extra arguments for leaf commands that do not accept positionals", async () => {
+    const captured = await run(["capabilities", "extra", "--json"]);
+    const envelope = parseEnvelope(captured);
+
+    expect(envelope.ok).toBe(false);
+    expect(envelope.error.code).toBe("UNKNOWN_COMMAND");
+    expect(process.exitCode).toBe(2);
+  });
+
+  it("classifies unknown options separately from unknown commands", async () => {
+    const captured = await run(["capabilities", "--definitely-not-an-option", "--json"]);
+    const envelope = parseEnvelope(captured);
+
+    expect(envelope.ok).toBe(false);
+    expect(envelope.error.code).toBe("UNKNOWN_OPTION");
+    expect(process.exitCode).toBe(2);
+  });
+
+  it("reports missing input files as INPUT_NOT_FOUND", async () => {
+    const cwd = await tempWorkspace();
+    const captured = await run(["schema", "validate", "missing.json", "--schema", "officegen.ir.document@1.2", "--json"], cwd);
+    const envelope = parseEnvelope(captured);
+
+    expect(envelope.ok).toBe(false);
+    expect(envelope.error.code).toBe("INPUT_NOT_FOUND");
+    expect(envelope.error.category).toBe("input");
+    expect(process.exitCode).toBe(3);
+  });
+
+  it("keeps JSON schema pointers intact in validation errors", async () => {
+    const cwd = await tempWorkspace();
+    await writeFile(path.join(cwd, "bad.json"), "{\"bad\":true}", "utf8");
+
+    const captured = await run(["schema", "validate", "bad.json", "--schema", "officegen.ir.document@1.2", "--json"], cwd);
+    const envelope = parseEnvelope(captured);
+    const firstError = envelope.error.details.errors[0];
+
+    expect(envelope.ok).toBe(false);
+    expect(envelope.error.code).toBe("SCHEMA_INVALID");
+    expect(firstError.schemaPath).toMatch(/^#\//);
+  });
+
+  it("returns concrete workflow steps for workflow help topics", async () => {
+    const captured = await run(["help", "workflow", "edit-existing", "--json"]);
+    const envelope = parseEnvelope(captured);
+
+    expect(envelope.ok).toBe(true);
+    expect(envelope.result.workflowDetails).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: "edit-existing",
+        steps: expect.arrayContaining([expect.stringContaining("inspect")])
+      })
     ]));
   });
 });

@@ -151,10 +151,10 @@ These optional features are hidden or disabled in the default `substrate` profil
 
 Officegen reads config in this order:
 
-1. CLI flags
-2. project `.officegen/config.json`
-3. user `~/.officegen/config.json`
-4. built-in defaults
+1. built-in defaults
+2. user `~/.officegen/config.json`
+3. project `.officegen/config.json`
+4. environment profile override via `OFFICEGEN_PROFILE`
 
 Default profile:
 
@@ -207,7 +207,7 @@ Use `--json` for machine-readable output. Responses use the v1.2 envelope shape:
   "ok": true,
   "command": "capabilities",
   "runId": "...",
-  "cliVersion": "0.1.0",
+  "cliVersion": "1.2.0",
   "capabilitiesHash": "sha256:...",
   "pathsRedacted": true,
   "result": {},
@@ -219,6 +219,8 @@ Use `--json` for machine-readable output. Responses use the v1.2 envelope shape:
 ```
 
 Errors include `availableCommands` and `nextSuggestedCommands` so agents can recover.
+
+In `--agent` mode, large JSON responses are automatically replaced with a progressive-disclosure envelope within the configured JSON budget. Re-run with `--json-budget-bytes <bytes>` or a narrower command when a full payload is needed.
 
 ## Security Defaults
 

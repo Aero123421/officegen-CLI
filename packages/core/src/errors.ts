@@ -10,7 +10,9 @@ const REQUIRED_ERROR_CODES: OfficegenErrorCode[] = [
   "FEATURE_DISABLED",
   "FEATURE_HIDDEN_FROM_AGENT",
   "UNKNOWN_COMMAND",
+  "UNKNOWN_OPTION",
   "CAPABILITIES_STALE",
+  "INPUT_NOT_FOUND",
   "SCHEMA_INVALID",
   "SCHEMA_DEPRECATED",
   "SCHEMA_MIGRATION_REQUIRED",
@@ -39,9 +41,10 @@ const REQUIRED_ERROR_CODES: OfficegenErrorCode[] = [
 ];
 
 const defaultCategory = (code: OfficegenErrorCode): string => {
-  if (code.startsWith("FEATURE_") || code === "UNKNOWN_COMMAND" || code === "CAPABILITIES_STALE") {
+  if (code.startsWith("FEATURE_") || code === "UNKNOWN_COMMAND" || code === "UNKNOWN_OPTION" || code === "CAPABILITIES_STALE") {
     return "capability";
   }
+  if (code === "INPUT_NOT_FOUND") return "input";
   if (code.startsWith("SCHEMA_")) return "schema";
   if (code.startsWith("SECURITY_")) return "security";
   if (code.startsWith("PLUGIN_")) return "plugin";
@@ -66,7 +69,9 @@ const messages: Partial<Record<OfficegenErrorCode, string>> = {
   FEATURE_DISABLED: "The feature is disabled by the active configuration.",
   FEATURE_HIDDEN_FROM_AGENT: "The feature is hidden from agent-visible capabilities.",
   UNKNOWN_COMMAND: "The command is not known to this Officegen CLI.",
+  UNKNOWN_OPTION: "The option is not supported by this command.",
   CAPABILITIES_STALE: "The embedded capabilities hash does not match the active configuration.",
+  INPUT_NOT_FOUND: "The input file was not found.",
   SCHEMA_INVALID: "The JSON document does not match the requested schema.",
   SCHEMA_DEPRECATED: "The requested schema is deprecated.",
   SCHEMA_MIGRATION_REQUIRED: "The JSON document requires schema migration.",

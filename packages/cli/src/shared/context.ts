@@ -16,7 +16,8 @@ export async function createRuntimeContext(
   const agent = hasFlag(argv, "--agent");
   const json = hasFlag(argv, "--json");
   const capabilitiesHash = computeCapabilitiesHash(config);
-  const jsonBudgetBytes = parsePositiveInt(optionValue(argv, "--json-budget-bytes") ?? env.OFFICEGEN_JSON_BUDGET_BYTES);
+  const explicitJsonBudgetBytes = parsePositiveInt(optionValue(argv, "--json-budget-bytes") ?? env.OFFICEGEN_JSON_BUDGET_BYTES);
+  const jsonBudgetBytes = explicitJsonBudgetBytes ?? (agent ? config.agent.defaultJsonBudgetBytes : undefined);
   const expectedCapabilitiesHash = optionValue(argv, "--capabilities-hash") ?? env.OFFICEGEN_CAPABILITIES_HASH;
 
   return {
@@ -63,13 +64,20 @@ export function gateTopLevelCommand(command: string, context: RuntimeContext): C
   }
   if (context.agent && !entry.visibleToAgents) {
     return {
-      code: "FEATURE_HIDDEN",
+      code: "FEATURE_HIDDEN_FROM_AGENT",
       feature: entry.feature,
       command,
       message: `The ${entry.feature} feature is hidden from agents by the active configuration.`
     };
   }
   const second = secondCommandToken(context.argv);
+  if (second && NO_POSITIONAL_LEAF_COMMANDS.has(entry.commandGroup)) {
+    return {
+      code: "UNKNOWN_COMMAND",
+      command: `${command} ${second}`,
+      message: `Unknown command: ${command} ${second}`
+    };
+  }
   if (second && entry.commands.length > 1) {
     const allowed = new Set(entry.commands.map((registered) => registered.split(" ")[1]).filter(Boolean));
     if (allowed.size > 0 && !allowed.has(second)) {
@@ -82,6 +90,12 @@ export function gateTopLevelCommand(command: string, context: RuntimeContext): C
   }
   return undefined;
 }
+
+const NO_POSITIONAL_LEAF_COMMANDS = new Set([
+  "capabilities",
+  "doctor",
+  "scaffold"
+]);
 
 export function availableCommands(context: RuntimeContext): string[] {
   return context.registry
@@ -118,7 +132,7 @@ function parsePositiveInt(value: string | undefined): number | undefined {
 function staleWarning(expected: string | undefined, actual: string): RuntimeContext["staleCapabilitiesWarning"] {
   if (!expected || expected === actual) return undefined;
   return {
-    code: "AGENT_ADAPTER_STALE",
+    code: "CAPABILITIES_STALE",
     severity: "warning",
     message: "Agent adapter capabilities hash differs from the active CLI capabilities hash.",
     expected,

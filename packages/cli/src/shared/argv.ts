@@ -47,7 +47,15 @@ export function commandFromArgv(argv: string[]): string {
 }
 
 export function getTopCommand(argv: string[]): string | undefined {
-  return argv.slice(2).find((arg) => !arg.startsWith("-"));
+  for (let index = 2; index < argv.length; index += 1) {
+    const value = argv[index];
+    if (value.startsWith("-")) {
+      if (VALUE_OPTIONS.has(value) && !value.includes("=") && index + 1 < argv.length) index += 1;
+      continue;
+    }
+    return value;
+  }
+  return undefined;
 }
 
 export function positionalArgs(argv: string[], start: number): string[] {

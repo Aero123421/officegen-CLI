@@ -29,6 +29,7 @@ const envelopeSchema: JsonObject = {
     cliVersion: { type: "string" },
     capabilitiesHash: { type: "string", pattern: "^sha256:" },
     pathsRedacted: { type: "boolean" },
+    truncated: { type: "boolean" },
     result: {},
     error: {
       type: "object",
@@ -56,6 +57,7 @@ const selectorSchema: JsonObject = {
   additionalProperties: false,
   properties: {
     stableObjectId: { type: "string" },
+    contains: { type: "string" },
     placeholderKey: { type: "string" },
     shapeName: { type: "string" },
     contentControlTag: { type: "string" },

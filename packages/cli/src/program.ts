@@ -82,6 +82,20 @@ function toCliFailure(error: unknown, commandText: string): CliFailure {
     }, error.payload.code.startsWith("SECURITY_") ? 4 : 3);
   }
   if (error instanceof Error) {
+    if (/unknown option/i.test(error.message)) {
+      return new CliFailure({
+        code: "UNKNOWN_OPTION",
+        command: commandText,
+        message: error.message
+      }, 2);
+    }
+    if (isNodeError(error) && error.code === "ENOENT") {
+      return new CliFailure({
+        code: "INPUT_NOT_FOUND",
+        command: commandText,
+        message: error.message
+      }, 3);
+    }
     const coded = /^([A-Z][A-Z0-9_]+):\s*(.*)$/.exec(error.message);
     if (coded) {
       return new CliFailure({
@@ -100,4 +114,8 @@ function toCliFailure(error: unknown, commandText: string): CliFailure {
 
 function asRecord(value: unknown): CliErrorPayload["details"] {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error;
 }

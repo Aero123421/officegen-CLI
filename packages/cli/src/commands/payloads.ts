@@ -124,8 +124,48 @@ export function helpPayload(context: RuntimeContext, topic: string[]): unknown {
     topic: topicText || "index",
     commands,
     workflows: topic[0] === "workflow" || !topicText ? ["substrate-edit", "rich-pptx", "edit-existing"] : [],
+    workflowDetails: topic[0] === "workflow" ? workflowHelp(topic[1]) : undefined,
     errors: topic[0] === "error" ? errorLookup(topic[1]) : undefined
   };
+}
+
+function workflowHelp(id: string | undefined): unknown[] {
+  const workflows = [
+    {
+      id: "substrate-edit",
+      summary: "既存Officeファイルを安全に解析し、selector確認後に編集する最小導線。",
+      steps: [
+        "officegen capabilities --agent --json",
+        "officegen inspect input.pptx --agent --json",
+        "officegen view input.pptx --out .officegen/runs/view --json",
+        "officegen edit input.pptx --ops ops.json --dry-run --resolve-selectors --json",
+        "officegen edit input.pptx --ops ops.json --out output.pptx --json"
+      ]
+    },
+    {
+      id: "rich-pptx",
+      summary: "提案資料や分析資料をIRから生成し、view/object-mapで確認してから追加編集する導線。",
+      steps: [
+        "officegen scaffold --kind pptx --title \"Proposal\" --out proposal.ir.json --json",
+        "officegen schema validate proposal.ir.json --schema officegen.ir.document@1.2 --json",
+        "officegen render proposal.ir.json --target pptx --out proposal.pptx --json",
+        "officegen inspect proposal.pptx --depth summary --agent --json",
+        "officegen view proposal.pptx --out .officegen/runs/proposal-view --json"
+      ]
+    },
+    {
+      id: "edit-existing",
+      summary: "Agentが既存資料を壊さず編集するためのdry-run必須ワークフロー。",
+      steps: [
+        "officegen inspect input.pptx --depth summary --agent --json",
+        "officegen view input.pptx --out .officegen/runs/input-view --json",
+        "officegen edit input.pptx --ops ops.json --dry-run --resolve-selectors --json",
+        "officegen edit input.pptx --ops ops.json --out edited.pptx --json",
+        "officegen inspect edited.pptx --depth summary --agent --json"
+      ]
+    }
+  ];
+  return id ? workflows.filter((workflow) => workflow.id === id) : workflows;
 }
 
 export function configPayload(context: RuntimeContext): unknown {
@@ -311,9 +351,25 @@ export async function viewPayload(context: RuntimeContext): Promise<unknown> {
 export async function editPayload(context: RuntimeContext): Promise<unknown> {
   const input = requireInput(context, 3, "edit");
   const opsPath = optionValue(context.argv, "--ops");
-  const raw = opsPath ? await readJson(resolveCliPath(context, opsPath)) : { ops: [] };
+  if (!opsPath) {
+    throw new CliFailure({
+      code: "SCHEMA_INVALID",
+      command: "edit",
+      message: "edit requires --ops <edit-ops.json> so no-op edits are not reported as success."
+    }, 2);
+  }
+  const raw = await readJson(resolveCliPath(context, opsPath));
   const editOptions = asRecord(asRecord(raw).options);
   const operations = normalizeEditOperations(raw);
+  const editOpsValidation = validateSchema("officegen.edit.ops@1.2", editOpsValidationPayload(raw, operations, input));
+  if (!editOpsValidation.ok) {
+    throw new CliFailure({
+      code: "SCHEMA_INVALID",
+      command: "edit",
+      message: "edit operations must conform to officegen.edit.ops@1.2.",
+      details: { errors: editOpsValidation.errors }
+    }, 3);
+  }
   return edit(resolveCliPath(context, input), operations, {
     out: await validatedOutOption(context),
     dryRun: hasFlag(context.argv, "--dry-run"),
@@ -323,6 +379,36 @@ export async function editPayload(context: RuntimeContext): Promise<unknown> {
     continueOnError: booleanOption(editOptions, "continueOnError"),
     idempotencyKey: typeof editOptions.idempotencyKey === "string" ? editOptions.idempotencyKey : undefined
   });
+}
+
+function editOpsValidationPayload(raw: unknown, operations: ReturnType<typeof normalizeEditOperations>, input: string): unknown {
+  const record = asRecord(raw);
+  return stripUndefined({
+    schema: "officegen.edit.ops@1.2",
+    target: typeof record.target === "string" ? record.target : targetFromInput(input),
+    options: asRecord(record.options),
+    ops: operations.map((operation) => {
+      const item = asRecord(operation);
+      const op = typeof item.op === "string" ? item.op : item.type;
+      const { type: _type, ...rest } = item;
+      return { ...rest, op };
+    })
+  });
+}
+
+function targetFromInput(input: string): string {
+  const extension = path.extname(input).toLowerCase().replace(".", "");
+  return ["pptx", "docx", "xlsx", "pdf"].includes(extension) ? extension : "pptx";
+}
+
+function stripUndefined(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stripUndefined);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([, nested]) => nested !== undefined)
+      .map(([key, nested]) => [key, stripUndefined(nested)])
+  );
 }
 
 export async function renderPayload(context: RuntimeContext): Promise<unknown> {

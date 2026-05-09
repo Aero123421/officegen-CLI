@@ -17,7 +17,15 @@ import { insertRows, setCell, sheetPath } from "./ooxml/xlsx.js";
 import { escapeXmlText, replaceAllXmlText, setFirstTextInBlock } from "./ooxml/xml.js";
 import { PDFDocument, rgb, StandardFonts } from "pdf-lib";
 
-export type EditSelector = { stableObjectId?: string; contains?: string; textMatch?: { text: string; exact?: boolean } };
+export type EditSelector = {
+  stableObjectId?: string;
+  contains?: string;
+  placeholderKey?: string;
+  shapeName?: string;
+  contentControlTag?: string;
+  namedRange?: string;
+  textMatch?: { text: string; exact?: boolean };
+};
 
 export type EditOperation =
   | { type: "replaceText"; from: string; to: string; selector?: EditSelector }
@@ -236,8 +244,8 @@ async function editOfficeXml(
   }
 
   if (options.idempotencyKey && applied > 0) zip.file(idempotencyMarkerPath(options.idempotencyKey), new Date().toISOString());
-  const bytes = options.dryRun ? input.bytes : await zipToBytes(zip);
-  if (!options.dryRun) await writeOutput(options.out, bytes);
+  const bytes = options.dryRun ? undefined : await zipToBytes(zip);
+  if (!options.dryRun) await writeOutput(options.out, bytes as Uint8Array);
   return {
     schema: "officegen.edit.result@1.2",
     format: input.format,
@@ -245,7 +253,7 @@ async function editOfficeXml(
     applied,
     skipped,
     out: options.dryRun ? undefined : options.out,
-    bytes: options.out ? undefined : bytes,
+    bytes: options.dryRun || options.out ? undefined : bytes,
     opResults,
     errors: errors.length ? errors : undefined,
     caveats: [
@@ -435,6 +443,10 @@ function selectorForOperation(operation: EditOperation): EditSelector | undefine
 
 function resolveMatches(objectMap: ObjectMapEntry[], selector: EditSelector): ObjectMapEntry[] {
   if (selector.stableObjectId) return objectMap.filter((entry) => entry.stableObjectId === selector.stableObjectId);
+  if (selector.shapeName) return objectMap.filter((entry) => entry.label === selector.shapeName || entry.selectorHints?.shapeName === selector.shapeName || entry.selectorHints?.name === selector.shapeName);
+  if (selector.placeholderKey) return objectMap.filter((entry) => entry.selectorHints?.placeholderKey === selector.placeholderKey || entry.selectorHints?.placeholder === selector.placeholderKey);
+  if (selector.contentControlTag) return objectMap.filter((entry) => entry.selectorHints?.contentControlTag === selector.contentControlTag || entry.selectorHints?.tag === selector.contentControlTag);
+  if (selector.namedRange) return objectMap.filter((entry) => entry.selectorHints?.namedRange === selector.namedRange || entry.label === selector.namedRange);
   const text = selector.textMatch?.text ?? selector.contains;
   if (!text) return [];
   return objectMap.filter((entry) => selector.textMatch?.exact ? entry.text === text : entry.text?.includes(text));
@@ -523,11 +535,11 @@ async function editPdf(
     const name = operationName(op);
     if (name === "pdf.textOverlay") {
       const textOp = op as { page: number; text: string; x: number; y: number; size?: number; color?: string };
-      const page = pdf.getPage(textOp.page - 1);
-      if (!page) {
+      if (!isValidPage(pdf, textOp.page)) {
         skipped += 1;
         continue;
       }
+      const page = pdf.getPage(textOp.page - 1);
       page.drawText(textOp.text, {
         x: textOp.x,
         y: textOp.y,
@@ -538,11 +550,11 @@ async function editPdf(
       applied += 1;
     } else if (name === "pdf.annotation") {
       const annotation = op as { page: number; text: string; x: number; y: number; width?: number; height?: number };
-      const page = pdf.getPage(annotation.page - 1);
-      if (!page) {
+      if (!isValidPage(pdf, annotation.page)) {
         skipped += 1;
         continue;
       }
+      const page = pdf.getPage(annotation.page - 1);
       page.drawRectangle({
         x: annotation.x,
         y: annotation.y,
@@ -560,8 +572,8 @@ async function editPdf(
     }
   }
 
-  const bytes = options.dryRun ? input.bytes : await pdf.save({ useObjectStreams: false });
-  if (!options.dryRun) await writeOutput(options.out, bytes);
+  const bytes = options.dryRun ? undefined : await pdf.save({ useObjectStreams: false });
+  if (!options.dryRun) await writeOutput(options.out, bytes as Uint8Array);
   return {
     schema: "officegen.edit.result@1.2",
     format: "pdf",
@@ -569,9 +581,13 @@ async function editPdf(
     applied,
     skipped,
     out: options.dryRun ? undefined : options.out,
-    bytes: options.out ? undefined : bytes,
+    bytes: options.dryRun || options.out ? undefined : bytes,
     caveats: ["PDF edit is additive; existing text/content is not removed in the MVP."]
   };
+}
+
+function isValidPage(pdf: PDFDocument, page: number): boolean {
+  return Number.isInteger(page) && page >= 1 && page <= pdf.getPageCount();
 }
 
 function parseRgb(hex?: string): ReturnType<typeof rgb> {

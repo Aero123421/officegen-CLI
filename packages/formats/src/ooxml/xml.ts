@@ -115,9 +115,18 @@ export function replaceFirstBlock(
 
 export function setFirstTextInBlock(block: string, tagName: string, text: string): string {
   const tag = escapeRegExp(tagName);
-  const pattern = new RegExp(`<${tag}(?=\\s|>)([^>]*)>[\\s\\S]*?<\\/${tag}>`);
-  if (pattern.test(block)) return block.replace(pattern, `<${tag}$1>${escapeXmlText(text)}</${tagName}>`);
-  return block;
+  const pattern = new RegExp(`<${tag}(?=\\s|>)([^>]*)>[\\s\\S]*?<\\/${tag}>`, "g");
+  let replaced = false;
+  let sawText = false;
+  const next = block.replace(pattern, (_match, attrs: string) => {
+    sawText = true;
+    if (!replaced) {
+      replaced = true;
+      return `<${tagName}${attrs}>${escapeXmlText(text)}</${tagName}>`;
+    }
+    return `<${tagName}${attrs}></${tagName}>`;
+  });
+  return sawText ? next : block;
 }
 
 export function preview(text: string | undefined, limit = 120): string | undefined {

@@ -66,10 +66,11 @@ export function writeResult(context: RuntimeContext, envelope: Envelope, writer:
 export function normalizeCliError(error: CliErrorPayload): CliErrorPayload {
   const security = error.code.startsWith("SECURITY_") || error.code.includes("TRUST") || error.code.includes("PLUGIN");
   const schema = error.code.startsWith("SCHEMA_") || error.code.includes("VALIDATION");
-  const feature = error.code.startsWith("FEATURE_") || error.code === "UNKNOWN_COMMAND";
+  const feature = error.code.startsWith("FEATURE_") || error.code === "UNKNOWN_COMMAND" || error.code === "UNKNOWN_OPTION";
+  const input = error.code === "INPUT_NOT_FOUND";
   return {
     ...error,
-    category: error.category ?? (security ? "security" : schema ? "schema" : feature ? "usage" : "runtime"),
+    category: error.category ?? (security ? "security" : schema ? "schema" : feature ? "usage" : input ? "input" : "runtime"),
     severity: error.severity ?? (security ? "critical" : "error")
   };
 }
@@ -106,7 +107,6 @@ function applyAgentBudget(context: RuntimeContext, envelope: Envelope): Envelope
   const resultSchema = result && typeof result === "object" ? (result as Record<string, unknown>).schema : undefined;
   const compact: Envelope = {
     ...envelope,
-    truncated: true,
     result: {
       schema: "officegen.progressive-disclosure@1.2",
       status: "truncated",

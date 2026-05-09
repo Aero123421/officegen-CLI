@@ -91,6 +91,7 @@ export function redactPathsInText(text: string, config: OfficegenConfig, locatio
   }
   for (const posixMatch of [...value.matchAll(/(?<![\w:>/])\/(?!\/)[^"'\s,;)]+(?:\/[^"'\s,;)]+)+/g)]) {
     const raw = posixMatch[0];
+    if (value.startsWith("#/")) continue;
     const prefix = raw.startsWith("/") ? "" : raw[0];
     const pathValue = prefix ? raw.slice(1) : raw;
     if (!pathValue.startsWith("<")) {

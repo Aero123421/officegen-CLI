@@ -8,7 +8,7 @@ export const COMMAND_METADATA: CapabilityEntry[] = [
   meta("schema", "schema取得・検証・migration", ["schema list", "schema get", "schema validate", "schema migrate"]),
   meta("errors", "エラーカタログ", ["errors list", "errors inspect"]),
   core("inspect", "既存ファイル解析", ["inspect"]),
-  core("view", "SVG/PNG/HTMLプレビューとobject map", ["view"]),
+  core("view", "SVG/HTMLプレビューとobject map", ["view"]),
   core("edit", "EditOpsで既存ファイル編集", ["edit"]),
   core("render", "IR/Specから新規ファイル生成", ["render"]),
   core("scaffold", "LLMなしの雛形IR/ops/data生成", ["scaffold"]),

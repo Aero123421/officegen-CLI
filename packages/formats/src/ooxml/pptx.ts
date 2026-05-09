@@ -53,7 +53,7 @@ export async function inspectSlides(zip: JSZip): Promise<{ slides: PptxSlide[]; 
   for (const [slideIndex, slidePath] of slidePaths.entries()) {
     const xml = (await readZipText(zip, slidePath)) ?? "";
     const slideNo = slideIndex + 1;
-    const slideStableObjectId = makeStableObjectId("pptx", "deck", "slide", slideNo);
+    const slideStableObjectId = stableHashId("pptx", "deck", "slide", slidePath);
     const shapes = extractShapes(xml, slideNo, slideStableObjectId, slidePath);
     const tableCells = extractTableCells(xml, slideNo, slidePath);
     const textObjects = shapes
@@ -117,7 +117,7 @@ function extractTableCells(xml: string, slideNo: number, sourcePath: string): Ar
       cellIndex += 1;
       const text = exactText(match[0], "a:t").join("");
       return {
-        stableObjectId: stableHashId("pptx", `s${String(slideNo).padStart(3, "0")}`, "tableCell", `${sourcePath}#${cellIndex}`),
+        stableObjectId: stableHashId("pptx", slideScope(sourcePath), "tableCell", `${sourcePath}#${cellIndex}`),
         cellIndex,
         text,
         textPreview: preview(text)
@@ -135,7 +135,7 @@ export function extractShapes(xml: string, slideNo: number, slideStableObjectId:
     const shapeId = xmlAttr(cNvPr, "id");
     const name = xmlAttr(cNvPr, "name");
     const text = exactText(block, "a:t").join("");
-    const scope = `s${String(slideNo).padStart(3, "0")}`;
+    const scope = slideScope(sourcePath);
     const stableObjectId = shapeId
       ? stableHashId("pptx", scope, "shape", `${sourcePath}#${shapeId}`)
       : makeStableObjectId("pptx", scope, "shape", shapeIndex);
@@ -152,6 +152,19 @@ export function extractShapes(xml: string, slideNo: number, slideStableObjectId:
       sourcePath
     };
   });
+}
+
+function slideScope(sourcePath: string): string {
+  return `slide-${stablePathToken(sourcePath)}`;
+}
+
+function stablePathToken(sourcePath: string): string {
+  let hash = 2166136261;
+  for (const char of sourcePath.toLowerCase()) {
+    hash ^= char.charCodeAt(0);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0").slice(0, 8);
 }
 
 export function replaceShapeBulletItems(
