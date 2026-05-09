@@ -1,6 +1,6 @@
 {
-  "name": "officegen",
-  "version": "1.2.1",
+  "name": "@officegen/cli",
+  "version": "1.2.2",
   "type": "module",
   "bin": {
     "officegen": "dist/main.js"
