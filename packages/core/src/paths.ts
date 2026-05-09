@@ -58,7 +58,9 @@ async function allowedRoots(config: OfficegenConfig, extraRoots: string[] = []):
   const resolved = rawRoots.map((root) => resolveOfficegenPath(config, root));
   const roots: string[] = [];
   for (const root of resolved) {
-    roots.push((await exists(root)) ? await realpath(root) : path.resolve(root));
+    const lexicalRoot = path.resolve(root);
+    roots.push(lexicalRoot);
+    roots.push((await exists(root)) ? await realpath(root) : lexicalRoot);
   }
   return [...new Set(roots.map(normalizeCase))];
 }
