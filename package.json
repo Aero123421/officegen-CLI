@@ -66,10 +66,6 @@
   "devDependencies": {
     "@emnapi/core": "^1.10.0",
     "@emnapi/runtime": "^1.10.0",
-    "@officegen/cli": "file:packages/cli",
-    "@officegen/core": "file:packages/core",
-    "@officegen/formats": "file:packages/formats",
-    "@officegen/optional": "file:packages/optional",
     "@types/node": "^24.10.0",
     "typescript": "^5.9.3",
     "vitest": "^4.0.8"

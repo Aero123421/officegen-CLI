@@ -8,6 +8,12 @@
     "sourceMap": true,
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "baseUrl": ".",
+    "paths": {
+      "@officegen/core": ["packages/core/src/index.ts"],
+      "@officegen/formats": ["packages/formats/src/index.ts"],
+      "@officegen/optional": ["packages/optional/src/index.ts"]
+    }
   }
 }
