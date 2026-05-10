@@ -25,7 +25,7 @@ const defaultSpec = specArg ?? process.env.OFFICEGEN_GITHUB_INSTALL_SPEC ?? (ref
   : pathToFileURL(cwd).href);
 try {
   const npmCli = process.env.npm_execpath;
-  const installArgs = ["install", "-g", defaultSpec, "--prefix", temp, "--no-audit", "--no-fund", "--force", "--prefer-online"];
+  const installArgs = ["install", defaultSpec, "--prefix", temp, "--no-audit", "--no-fund", "--force", "--prefer-online"];
   const install = npmCli
     ? spawnSync(process.execPath, [npmCli, ...installArgs], { stdio: "inherit", shell: false })
     : spawnSync("npm", installArgs, {
@@ -33,9 +33,7 @@ try {
     shell: process.platform === "win32"
       });
   if (install.status !== 0) process.exit(install.status ?? 1);
-  const packageRoot = process.platform === "win32"
-    ? path.join(temp, "node_modules", "officegen")
-    : path.join(temp, "lib", "node_modules", "officegen");
+  const packageRoot = path.join(temp, "node_modules", "officegen");
   const cliMain = path.join(packageRoot, "packages", "cli", "dist", "main.js");
   const coreMain = path.join(packageRoot, "packages", "core", "dist", "index.js");
   if (!existsSync(cliMain) || !existsSync(coreMain)) {
@@ -52,8 +50,8 @@ try {
   }
 
   const bin = process.platform === "win32"
-    ? path.join(temp, "officegen.cmd")
-    : path.join(temp, "bin", "officegen");
+    ? path.join(temp, "node_modules", ".bin", "officegen.cmd")
+    : path.join(temp, "node_modules", ".bin", "officegen");
   for (const args of [
     ["--version"],
     ["--help"],
