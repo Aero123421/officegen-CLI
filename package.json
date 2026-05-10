@@ -8,9 +8,6 @@
   "engines": {
     "node": ">=24.0.0"
   },
-  "workspaces": [
-    "packages/*"
-  ],
   "scripts": {
     "build": "tsc -b packages/core packages/formats packages/optional packages/cli && node scripts/patch-dist-imports.mjs",
     "clean": "node scripts/clean.mjs",
@@ -66,6 +63,10 @@
     "pptxgenjs": "^4.0.1"
   },
   "devDependencies": {
+    "@officegen/cli": "file:packages/cli",
+    "@officegen/core": "file:packages/core",
+    "@officegen/formats": "file:packages/formats",
+    "@officegen/optional": "file:packages/optional",
     "@types/node": "^24.10.0",
     "typescript": "^5.9.3",
     "vitest": "^4.0.8"
