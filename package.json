@@ -14,7 +14,6 @@
   "scripts": {
     "build": "tsc -b packages/core packages/formats packages/optional packages/cli && node scripts/patch-dist-imports.mjs",
     "clean": "node scripts/clean.mjs",
-    "prepack": "node scripts/prepare-check.mjs",
     "test": "vitest run",
     "typecheck": "tsc -b packages/core packages/formats packages/optional packages/cli --pretty false",
     "officegen": "node packages/cli/dist/main.js",
