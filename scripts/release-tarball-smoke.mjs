@@ -27,6 +27,9 @@ try {
     generatedTarball = pack.stdout.trim().split(/\r?\n/).at(-1);
     spec = path.resolve(generatedTarball);
   }
+  if (!spec.startsWith("http")) {
+    spec = path.resolve(spec);
+  }
   const npmCli = process.env.npm_execpath;
   const installArgs = ["install", "-g", spec, "--prefix", temp, "--ignore-scripts", "--no-audit", "--no-fund"];
   const install = npmCli
