@@ -14,7 +14,6 @@
   "scripts": {
     "build": "tsc -b packages/core packages/formats packages/optional packages/cli && node scripts/patch-dist-imports.mjs",
     "clean": "node scripts/clean.mjs",
-    "prepare": "node scripts/prepare-check.mjs",
     "prepack": "node scripts/prepare-check.mjs",
     "test": "vitest run",
     "typecheck": "tsc -b packages/core packages/formats packages/optional packages/cli --pretty false",
