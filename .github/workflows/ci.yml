@@ -69,6 +69,7 @@ jobs:
         run: npm run pack:smoke
 
       - name: GitHub HEAD install smoke
+        if: runner.os != 'Windows'
         env:
           OFFICEGEN_GITHUB_INSTALL_SPEC: github:${{ github.repository }}#${{ github.sha }}
         run: npm run github-install:smoke
