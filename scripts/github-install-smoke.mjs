@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { existsSync, realpathSync } from "node:fs";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
@@ -9,10 +9,19 @@ import { pathToFileURL } from "node:url";
 const temp = await mkdtemp(path.join(os.tmpdir(), "officegen-github-install-"));
 const cwd = process.cwd();
 const remote = process.argv.includes("--remote");
+const head = process.argv.includes("--head");
+const specArg = valueArg("--spec");
+const ref = valueArg("--ref");
+const expectedVersionArg = valueArg("--expected-version");
 const rootPackage = JSON.parse(await readFile(path.join(cwd, "package.json"), "utf8"));
+const expectedVersion = expectedVersionArg === "current" ? undefined : expectedVersionArg;
 const repository = process.env.GITHUB_REPOSITORY ?? "Aero123421/officegen-CLI";
-const defaultSpec = process.env.OFFICEGEN_GITHUB_INSTALL_SPEC ?? (remote
+const defaultSpec = specArg ?? process.env.OFFICEGEN_GITHUB_INSTALL_SPEC ?? (ref
+  ? `github:${repository}#${ref}`
+  : remote
   ? `github:${repository}#v${rootPackage.version}`
+  : head
+    ? `github:${repository}`
   : pathToFileURL(cwd).href);
 try {
   const npmCli = process.env.npm_execpath;
@@ -45,7 +54,12 @@ try {
   const bin = process.platform === "win32"
     ? path.join(temp, "officegen.cmd")
     : path.join(temp, "bin", "officegen");
-  for (const args of [["--version"], ["capabilities", "--agent", "--json", "--json-budget-bytes", "80000"]]) {
+  for (const args of [
+    ["--version"],
+    ["--help"],
+    ["capabilities", "--agent", "--json", "--json-budget-bytes", "80000"],
+    ["schema", "list", "--agent", "--json", "--json-budget-bytes", "80000"]
+  ]) {
     const result = process.platform === "win32"
       ? spawnSync("cmd.exe", ["/d", "/c", bin, ...args], { encoding: "utf8" })
       : spawnSync(bin, args, { encoding: "utf8", shell: false });
@@ -54,12 +68,62 @@ try {
       console.error(result.stderr);
       process.exit(result.status ?? 1);
     }
-    if (args[0] === "capabilities" && !result.stdout.includes("capabilitiesHash")) {
-      console.error("capabilities smoke did not emit capabilitiesHash.");
+    if (args[0] === "--version" && expectedVersion && result.stdout.trim() !== expectedVersion) {
+      console.error(`version smoke returned ${result.stdout.trim()}, expected ${expectedVersion ?? rootPackage.version}.`);
       process.exit(1);
     }
+    if (args[0] === "capabilities") {
+      const envelope = JSON.parse(result.stdout);
+      if (!envelope.ok || envelope.result?.schema !== "officegen.capabilities@1.2" || !envelope.capabilitiesHash) {
+        console.error("capabilities smoke did not emit a valid capabilities envelope.");
+        process.exit(1);
+      }
+    }
+    if (args[0] === "schema") {
+      const envelope = JSON.parse(result.stdout);
+      if (!envelope.ok || envelope.result?.schema !== "officegen.schema.list@1.2") {
+        console.error("schema list smoke did not emit a valid schema envelope.");
+        process.exit(1);
+      }
+    }
+  }
+
+  const smokeDir = path.join(temp, "smoke-work");
+  await mkdir(smokeDir, { recursive: true });
+  await writeFile(path.join(smokeDir, "deck.ir.json"), `${JSON.stringify({
+    schema: "officegen.ir.document@1.2",
+    title: "GitHub install smoke",
+    targets: ["pptx"],
+    sections: [{ title: "Install smoke", blocks: [{ type: "table", rows: [{ metric: "ok", value: "true" }] }] }]
+  })}\n`, "utf8");
+  const render = runInstalled(bin, ["render", "deck.ir.json", "--target", "pptx", "--out", "deck.pptx", "--json"], smokeDir);
+  if (!render.ok || render.result?.target !== "pptx") {
+    console.error("render smoke failed.");
+    process.exit(1);
+  }
+  const inspected = runInstalled(bin, ["inspect", "deck.pptx", "--depth", "summary", "--agent", "--json"], smokeDir);
+  if (!inspected.ok || inspected.result?.trusted?.summary?.slides !== 1) {
+    console.error("inspect smoke failed.");
+    process.exit(1);
   }
   console.log(`officegen github-install smoke passed for ${defaultSpec}`);
 } finally {
   await rm(temp, { recursive: true, force: true });
+}
+
+function valueArg(name) {
+  const index = process.argv.indexOf(name);
+  return index >= 0 ? process.argv[index + 1] : undefined;
+}
+
+function runInstalled(bin, args, cwd) {
+  const result = process.platform === "win32"
+    ? spawnSync("cmd.exe", ["/d", "/c", bin, ...args], { encoding: "utf8", cwd })
+    : spawnSync(bin, args, { encoding: "utf8", shell: false, cwd });
+  if (result.status !== 0) {
+    console.error(result.stdout);
+    console.error(result.stderr);
+    process.exit(result.status ?? 1);
+  }
+  return JSON.parse(result.stdout);
 }

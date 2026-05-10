@@ -1,5 +1,5 @@
 export const OFFICEGEN_SCHEMA_VERSION = "1.2";
-export const OFFICEGEN_CLI_VERSION = "2.4.0";
+export const OFFICEGEN_CLI_VERSION = "2.5.0";
 export const SCHEMA_REGISTRY_VERSION = "1.2.0";
 
 export type JsonPrimitive = string | number | boolean | null;
@@ -175,6 +175,7 @@ export type OfficegenErrorCode =
   | "UNSUPPORTED_FORMAT"
   | "TEMPLATE_FILL_FAILED"
   | "TEMPLATE_VALIDATE_FAILED"
+  | "DESIGN_NOT_INITIALIZED"
   | "EXPORT_UNSUPPORTED";
 
 export interface ErrorCatalogEntry {

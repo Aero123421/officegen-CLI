@@ -86,8 +86,14 @@ jobs:
       - name: GitHub install smoke
         run: npm run github-install:smoke
 
-      - name: Remote GitHub install smoke
-        run: npm run github-install:remote-smoke
+      - name: GitHub HEAD install smoke
+        env:
+          OFFICEGEN_GITHUB_INSTALL_SPEC: github:${{ github.repository }}#${{ github.sha }}
+        run: npm run github-install:smoke
+
+      - name: Remote tag GitHub install smoke
+        if: github.event_name != 'workflow_dispatch'
+        run: npm run github-install:tag-smoke
 
       - name: Package npm tarball
         shell: bash
@@ -97,6 +103,9 @@ jobs:
           release_tarball="officegen-v${{ steps.version.outputs.version }}.tgz"
           mv "$tarball" "dist/${release_tarball}"
           node scripts/sha256-file.mjs "dist/${release_tarball}" > "dist/${release_tarball}.sha256"
+
+      - name: Release tarball install smoke
+        run: npm run release-tarball:smoke -- "dist/officegen-v${{ steps.version.outputs.version }}.tgz"
 
       - name: Attest build provenance
         uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0

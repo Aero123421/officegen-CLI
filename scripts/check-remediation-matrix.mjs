@@ -1,13 +1,16 @@
 #!/usr/bin/env node
 import { readFileSync } from "node:fs";
 
-const file = "docs/reviews/v2.4.0-remediation-matrix.md";
+const version = JSON.parse(readFileSync("package.json", "utf8")).version;
+const majorMinor = version.split(".").slice(0, 2).join(".");
+const idPrefix = `V${majorMinor.replace(".", "")}-`;
+const file = `docs/reviews/v${version}-remediation-matrix.md`;
 const allowed = new Set(["fixed", "limited-disclosed", "test-covered", "deferred-v3", "not-applicable"]);
 const requiredSections = [
   "Review 1: Agent Contract / False Success",
-  "Review 2: Security / Path / Report / Native",
-  "Review 3: OOXML / Office Quality",
-  "Review 4: Architecture / Release / Traceability"
+  "Review 2: Install / Release / Packaging",
+  "Review 3: Asset / Office Workflow",
+  "Review 4: UX / Critique / Traceability"
 ];
 
 const text = readFileSync(file, "utf8");
@@ -20,7 +23,7 @@ for (const section of requiredSections) {
 }
 
 for (const line of text.split(/\r?\n/)) {
-  if (!line.startsWith("| V24-")) continue;
+  if (!line.startsWith(`| ${idPrefix}`)) continue;
   matrixRows += 1;
   const cells = line.split("|").map((cell) => cell.trim()).filter(Boolean);
   const id = cells[0];
@@ -32,7 +35,7 @@ for (const line of text.split(/\r?\n/)) {
   if (!cells[4] || cells[4].length < 12) failures.push(`${id} is missing evidence`);
 }
 
-if (matrixRows < 40) failures.push(`expected at least 40 v2.4 remediation rows, found ${matrixRows}`);
+if (matrixRows < 20) failures.push(`expected at least 20 v${version} remediation rows, found ${matrixRows}`);
 for (const status of allowed) {
   if (!text.includes(`| ${status} |`)) failures.push(`matrix is missing status coverage: ${status}`);
 }

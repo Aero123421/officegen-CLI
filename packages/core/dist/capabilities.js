@@ -21,7 +21,7 @@ export const COMMAND_SPECS = [
     spec("critique", ["critique"]),
     spec("improve", ["improve"]),
     spec("benchmark", ["benchmark run", "benchmark compare"]),
-    spec("asset", ["asset add", "asset inspect", "asset extract", "asset replace"]),
+    spec("asset", ["asset inspect", "asset extract", "asset replace"]),
     spec("chart", ["chart render"]),
     spec("diagram", ["diagram render"]),
     spec("schema", ["schema list", "schema get", "schema fetch", "schema validate", "schema migrate"]),

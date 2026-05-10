@@ -459,6 +459,7 @@ const entries: SchemaRegistryEntry[] = [
   entry("officegen.asset.spec@1.2", assetSpecSchema, "asset"),
   entry("officegen.design.pack@1.2", designPackSchema, "design"),
   entry("officegen.template.map@1.2", templateMapSchema, "template"),
+  entry("officegen.template.candidates.result@2.5", looseSchema("officegen.template.candidates.result@2.5"), "template"),
   entry("officegen.view.objectMap@1.2", viewObjectMapSchema, "view"),
   entry("officegen.diagnostics@1.2", diagnosticsSchema, "diagnose"),
   entry("officegen.help@1.2", looseSchema("officegen.help@1.2"), "help"),
@@ -487,11 +488,17 @@ const entries: SchemaRegistryEntry[] = [
   entry("officegen.chart.render.result@1.2", looseSchema("officegen.chart.render.result@1.2"), "chart"),
   entry("officegen.diagram.render.result@1.2", looseSchema("officegen.diagram.render.result@1.2"), "diagram"),
   entry("officegen.asset.info@1.2", looseSchema("officegen.asset.info@1.2"), "asset"),
+  entry("officegen.asset.embedded.info@2.5", looseSchema("officegen.asset.embedded.info@2.5"), "asset"),
+  entry("officegen.asset.embedded.result@2.5", looseSchema("officegen.asset.embedded.result@2.5"), "asset"),
+  entry("officegen.asset.embedded.trusted@2.5", looseSchema("officegen.asset.embedded.trusted@2.5"), "asset"),
+  entry("officegen.asset.embedded.untrusted@2.5", looseSchema("officegen.asset.embedded.untrusted@2.5"), "asset"),
   entry("officegen.asset.extract.result@1.2", looseSchema("officegen.asset.extract.result@1.2"), "asset"),
   entry("officegen.asset.replace.result@1.2", looseSchema("officegen.asset.replace.result@1.2"), "asset"),
   entry("officegen.asset.result@1.2", looseSchema("officegen.asset.result@1.2"), "asset"),
   entry("officegen.critique.result@2.3", looseSchema("officegen.critique.result@2.3"), "critique"),
+  entry("officegen.improve.plan@2.5", looseSchema("officegen.improve.plan@2.5"), "improve"),
   entry("officegen.improve.plan@2.3", looseSchema("officegen.improve.plan@2.3"), "improve"),
+  entry("officegen.benchmark.run.result@2.5", looseSchema("officegen.benchmark.run.result@2.5"), "benchmark"),
   entry("officegen.benchmark.run.result@2.3", looseSchema("officegen.benchmark.run.result@2.3"), "benchmark"),
   entry("officegen.benchmark.compare.result@2.3", looseSchema("officegen.benchmark.compare.result@2.3"), "benchmark"),
   entry("officegen.run.plan@1.2", looseSchema("officegen.run.plan@1.2"), "run"),
@@ -512,21 +519,30 @@ const entries: SchemaRegistryEntry[] = [
 ];
 
 function entry(id: string, schema: JsonObject, feature?: FeatureName): SchemaRegistryEntry {
+  const introducedIn = schemaVersionFromId(id);
   return {
     id,
     schema: {
       ...schema,
       "x-officegen-schema-id": id,
       "x-officegen-stability": "stable",
-      "x-officegen-introduced-in": "1.2.0",
+      "x-officegen-introduced-in": introducedIn,
       "x-officegen-deprecated": false
     },
     stability: "stable",
-    introducedIn: "1.2.0",
+    introducedIn,
     deprecated: false,
     feature,
     visibleToAgents: true
   };
+}
+
+function schemaVersionFromId(id: string): string {
+  const version = id.match(/@([0-9]+(?:\.[0-9]+)*)$/)?.[1];
+  if (!version) return "1.2.0";
+  const parts = version.split(".");
+  while (parts.length < 3) parts.push("0");
+  return parts.join(".");
 }
 
 export class SchemaRegistry {

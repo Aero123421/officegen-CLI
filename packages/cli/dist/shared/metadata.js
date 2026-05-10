@@ -20,7 +20,7 @@ export const COMMAND_METADATA = [
     core("critique", "Lint business quality risks in PPTX/DOCX/XLSX files", ["critique"]),
     core("improve", "Produce dry-run improvement suggestions from critique findings", ["improve"]),
     core("benchmark", "Run and compare optional public corpus benchmark reviews", ["benchmark run", "benchmark compare"]),
-    core("asset", "Inspect, extract, and replace embedded media", ["asset add", "asset inspect", "asset extract", "asset replace"]),
+    core("asset", "Inspect, extract, and replace embedded media", ["asset inspect", "asset extract", "asset replace"]),
     core("chart", "Render safe chart SVG assets", ["chart render"]),
     core("diagram", "Render safe diagram SVG assets", ["diagram render"]),
     optional("template", "Create, inspect, map, validate, and fill templates", [

@@ -45,6 +45,25 @@ function parseEnvelope(captured: Captured): any {
   return JSON.parse(captured.stdout[0] ?? captured.stderr[0]);
 }
 
+async function minimalPptxWithImage(includeImage: boolean): Promise<Uint8Array> {
+  const zip = new JSZip();
+  zip.file("[Content_Types].xml", "<Types><Default Extension=\"xml\" ContentType=\"application/xml\"/><Default Extension=\"png\" ContentType=\"image/png\"/><Override PartName=\"/ppt/presentation.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml\"/><Override PartName=\"/ppt/slides/slide1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slide+xml\"/></Types>");
+  zip.file("_rels/.rels", "<Relationships><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"ppt/presentation.xml\"/></Relationships>");
+  zip.file("ppt/presentation.xml", "<p:presentation xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\"><p:sldIdLst><p:sldId id=\"256\" r:id=\"rId1\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"/></p:sldIdLst></p:presentation>");
+  zip.file("ppt/_rels/presentation.xml.rels", "<Relationships><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide\" Target=\"slides/slide1.xml\"/></Relationships>");
+  zip.file("ppt/slides/slide1.xml", [
+    "<p:sld xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><p:cSld><p:spTree>",
+    "<p:sp><p:nvSpPr><p:cNvPr id=\"2\" name=\"Title\"/></p:nvSpPr><p:txBody><a:p><a:r><a:t>Title</a:t></a:r></a:p></p:txBody></p:sp>",
+    includeImage ? "<p:pic><p:nvPicPr><p:cNvPr id=\"10\" name=\"Logo\"/></p:nvPicPr><p:blipFill><a:blip r:embed=\"rId2\"/></p:blipFill></p:pic>" : "",
+    "</p:spTree></p:cSld></p:sld>"
+  ].join(""));
+  if (includeImage) {
+    zip.file("ppt/slides/_rels/slide1.xml.rels", "<Relationships><Relationship Id=\"rId2\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/image\" Target=\"../media/image1.png\"/></Relationships>");
+    zip.file("ppt/media/image1.png", new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  }
+  return zip.generateAsync({ type: "uint8array" });
+}
+
 afterEach(() => {
   process.exitCode = undefined;
 });
@@ -202,6 +221,89 @@ describe("officegen CLI command surface", () => {
     }
   });
 
+  it("marks benchmark runs with no successful documents as objective failures", async () => {
+    const cwd = await tempWorkspace();
+    await writeBenchmarkManifest(cwd, {
+      storageRoot: ".officegen/benchmark-corpus",
+      documents: [{ id: "missing", kind: "pptx", path: "missing.pptx" }]
+    });
+    const captured = await run(["benchmark", "run", "--json"], cwd);
+    const envelope = parseEnvelope(captured);
+
+    expect(envelope.ok).toBe(false);
+    expect(envelope.objectiveOk).toBe(false);
+    expect(envelope.readiness).toBe("blocked");
+    expect(envelope.error.code).toBe("RUN_STEP_FAILED");
+    expect(envelope.result.schema).toBe("officegen.benchmark.run.result@2.5");
+    expect(envelope.result.failureSummary.failedCount).toBe(1);
+    expect(envelope.result.nextSuggestedCommands).toEqual(expect.arrayContaining([
+      expect.stringContaining("npm run benchmark:fetch")
+    ]));
+  });
+
+  it("marks partially successful benchmark runs as objective failures", async () => {
+    const cwd = await tempWorkspace();
+    await mkdir(path.join(cwd, ".officegen", "benchmark-corpus"), { recursive: true });
+    await writeFile(path.join(cwd, ".officegen", "benchmark-corpus", "ok.pptx"), Buffer.from(await minimalPptxWithImage(true)));
+    await writeBenchmarkManifest(cwd, {
+      storageRoot: ".officegen/benchmark-corpus",
+      documents: [
+        { id: "ok", kind: "pptx", path: "ok.pptx" },
+        { id: "missing", kind: "pptx", path: "missing.pptx" }
+      ]
+    });
+    const captured = await run(["benchmark", "run", "--json"], cwd);
+    const envelope = parseEnvelope(captured);
+
+    expect(envelope.ok).toBe(false);
+    expect(envelope.objectiveOk).toBe(false);
+    expect(envelope.partial).toBe(true);
+    expect(envelope.readiness).toBe("blocked");
+    expect(envelope.result.okCount).toBe(1);
+    expect(envelope.result.failedCount).toBe(1);
+  });
+
+  it("rejects improve --out and recommends --report-out for plan persistence", async () => {
+    const cwd = await tempWorkspace();
+    await writeFile(path.join(cwd, "deck.pptx"), Buffer.from(await minimalPptxWithImage(false)));
+    const captured = await run(["improve", "deck.pptx", "--out", "plan.json", "--json"], cwd);
+    const envelope = parseEnvelope(captured);
+
+    expect(envelope.ok).toBe(false);
+    expect(envelope.error.code).toBe("OPTION_NOT_EFFECTIVE");
+    expect(envelope.error.details.replacementOption).toBe("--report-out");
+  });
+
+  it("allows improve without an explicit dry-run flag and returns actionable suggestions", async () => {
+    const cwd = await tempWorkspace();
+    await writeFile(path.join(cwd, "deck.pptx"), Buffer.from(await minimalPptxWithImage(false)));
+    const captured = await run(["improve", "deck.pptx", "--agent", "--json"], cwd);
+    const envelope = parseEnvelope(captured);
+
+    expect(envelope.ok).toBe(true);
+    expect(envelope.result.schema).toBe("officegen.improve.plan@2.5");
+    expect(envelope.result.planOnly).toBe(true);
+    expect(envelope.result.dryRun).toBe(true);
+    expect(envelope.result.suggestions[0]).toEqual(expect.objectContaining({
+      commands: expect.any(Array)
+    }));
+  });
+
+  it("inspects embedded PPTX assets and usage metadata", async () => {
+    const cwd = await tempWorkspace();
+    await writeFile(path.join(cwd, "deck.pptx"), Buffer.from(await minimalPptxWithImage(true)));
+    const captured = await run(["asset", "inspect", "deck.pptx", "--embedded", "--agent", "--json"], cwd);
+    const envelope = parseEnvelope(captured);
+
+    expect(envelope.ok).toBe(true);
+    expect(envelope.result.schema).toBe("officegen.asset.embedded.result@2.5");
+    expect(envelope.result.assets[0]).toEqual(expect.objectContaining({
+      zipPath: "ppt/media/image1.png",
+      usageCount: 1,
+      replaceCommand: expect.stringContaining("asset replace")
+    }));
+  });
+
   it("writes scaffold IR while still returning a JSON envelope", async () => {
     const cwd = await tempWorkspace();
     const captured = await run(["scaffold", "--kind", "pptx", "--title", "Proposal", "--out", "deck.ir.json", "--json"], cwd);
@@ -271,6 +373,20 @@ describe("officegen CLI command surface", () => {
     expect(captured.stdout[0]).toContain("Usage:");
     expect(captured.stderr).toEqual([]);
     expect(process.exitCode).toBeUndefined();
+  });
+
+  it("prints command-specific help for benchmark, improve, asset, and design capture", async () => {
+    const benchmark = await run(["benchmark", "run", "--help"]);
+    const improve = await run(["improve", "--help"]);
+    const asset = await run(["asset", "inspect", "--help"]);
+    const design = await run(["design", "capture", "--help"]);
+
+    expect(benchmark.stdout[0]).toContain("--manifest <path>");
+    expect(benchmark.stdout[0]).toContain("npm run benchmark:fetch");
+    expect(improve.stdout[0]).toContain("planOnly: true");
+    expect(improve.stdout[0]).toContain("--dry-run");
+    expect(asset.stdout[0]).toContain("--embedded");
+    expect(design.stdout[0]).toContain("design init");
   });
 
   it("returns JSON help for subcommand help flags and help topics", async () => {

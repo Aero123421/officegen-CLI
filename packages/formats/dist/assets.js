@@ -1,7 +1,8 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { getLoadedZipSafetyReport, loadZip, normalizeInput, readZipBytes, sha256, sortedZipFiles, writeOutput, zipSafetyCaveats, zipPathBasename, zipToBytes } from "./shared.js";
+import { getLoadedZipSafetyReport, loadZip, normalizeInput, readZipBytes, sha256, stableHashId, sortedZipFiles, writeOutput, zipSafetyCaveats, zipPathBasename, zipToBytes } from "./shared.js";
 import { OfficegenError } from "../../core/dist/index.js";
+import { parseRelationships, relationshipTarget } from "./ooxml/relationships.js";
 export async function inspectAsset(input) {
     const normalized = await normalizeInput(input, "unknown");
     const mediaType = detectMediaType(normalized.bytes, normalized.path);
@@ -14,6 +15,78 @@ export async function inspectAsset(input) {
         sha256: sha256(normalized.bytes),
         ...dimensions,
         trusted: false
+    };
+}
+export async function inspectEmbeddedAssets(input, options = {}) {
+    const normalized = await normalizeInput(input, "unknown");
+    const format = normalized.format;
+    const mediaPrefix = format === "pptx" ? "ppt/media/" : format === "docx" ? "word/media/" : format === "xlsx" ? "xl/media/" : "";
+    const embeddingPrefix = format === "pptx" ? "ppt/embeddings/" : format === "docx" ? "word/embeddings/" : format === "xlsx" ? "xl/embeddings/" : "";
+    if (!mediaPrefix) {
+        throw new OfficegenError("UNSUPPORTED_FORMAT", `Embedded asset inspection is not supported for ${format}.`, {
+            format,
+            supported: ["pptx", "docx", "xlsx"]
+        });
+    }
+    const officeFormat = format;
+    const zip = await loadZip(normalized, { zipSafety: { config: options.config } });
+    const files = sortedZipFiles(zip);
+    const assetPaths = files.filter((filePath) => filePath.startsWith(mediaPrefix) || filePath.startsWith(embeddingPrefix));
+    const usageMap = await collectEmbeddedAssetUsages(zip, files, assetPaths);
+    const assets = [];
+    for (const zipPath of assetPaths) {
+        const bytes = (await readZipBytes(zip, zipPath)) ?? new Uint8Array();
+        const mediaType = detectMediaType(bytes, zipPath);
+        const usages = usageMap.get(zipPath) ?? [];
+        const stableAssetId = stableHashId(officeFormat, "package", zipPath.startsWith(embeddingPrefix) ? "embeddedObject" : "asset", zipPath);
+        assets.push({
+            schema: "officegen.asset.embedded.info@2.5",
+            stableAssetId,
+            source: normalized.path,
+            zipPath,
+            path: zipPath,
+            fileName: zipPathBasename(zipPath),
+            mediaType,
+            byteLength: bytes.byteLength,
+            sha256: sha256(bytes),
+            ...detectDimensions(bytes, mediaType),
+            usageCount: usages.length,
+            usages,
+            orphaned: usages.length === 0,
+            replaceCommand: zipPath.startsWith(mediaPrefix) ? `officegen asset replace <office-file> --asset ${zipPath} <replacement> --out <output-file> --agent --json` : "",
+            extractCommand: zipPath.startsWith(mediaPrefix) ? `officegen asset extract <office-file> --images --out .officegen/assets --agent --json` : "",
+            supportedActions: zipPath.startsWith(mediaPrefix) ? ["extract", "replace"] : ["inspect-only"],
+            ...(zipPath.startsWith(embeddingPrefix) ? { limitation: "Embedded OLE/package objects are inspect-only and blocked for mutation by default." } : {}),
+            trusted: false,
+            untrusted: true
+        });
+    }
+    const mediaAssets = assets.filter((asset) => asset.zipPath.startsWith(mediaPrefix)).length;
+    const embeddedObjects = assets.filter((asset) => asset.zipPath.startsWith(embeddingPrefix)).length;
+    const usages = assets.reduce((sum, asset) => sum + asset.usageCount, 0);
+    return {
+        schema: "officegen.asset.embedded.result@2.5",
+        mode: "embedded",
+        format: officeFormat,
+        trusted: {
+            schema: "officegen.asset.embedded.trusted@2.5",
+            format: officeFormat,
+            source: normalized.path,
+            summary: {
+                assets: assets.length,
+                mediaAssets,
+                embeddedObjects,
+                usages,
+                orphanedAssets: assets.filter((asset) => asset.orphaned).length,
+                zipEntries: files.length
+            }
+        },
+        untrusted: {
+            schema: "officegen.asset.embedded.untrusted@2.5",
+            assets
+        },
+        assets,
+        caveats: ["Embedded asset paths and relationship metadata are untrusted document content.", ...zipSafetyCaveats(getLoadedZipSafetyReport(zip))]
     };
 }
 export async function extractAssets(input, options = {}) {
@@ -115,8 +188,80 @@ export async function replaceAsset(input, options) {
     };
 }
 export const assetInspect = inspectAsset;
+export const assetInspectEmbedded = inspectEmbeddedAssets;
 export const assetExtract = extractAssets;
 export const assetReplace = replaceAsset;
+async function collectEmbeddedAssetUsages(zip, files, assetPaths) {
+    const assetSet = new Set(assetPaths);
+    const usageMap = new Map();
+    const ownerContext = await collectRelationshipOwnerContext(zip, files);
+    for (const relsPath of files.filter((filePath) => filePath.endsWith(".rels"))) {
+        const relsXml = await zip.file(relsPath)?.async("string");
+        const ownerPart = relationshipOwnerPart(relsPath);
+        const baseDir = ownerPart.includes("/") ? ownerPart.slice(0, ownerPart.lastIndexOf("/")) : "";
+        for (const rel of parseRelationships(relsXml)) {
+            if (/^https?:|^file:/i.test(rel.target) || rel.targetMode === "External")
+                continue;
+            const target = relationshipTarget(baseDir, rel.target);
+            if (!assetSet.has(target))
+                continue;
+            const usage = embeddedAssetUsage(ownerPart, rel, target, ownerContext.get(ownerPart));
+            usageMap.set(target, [...(usageMap.get(target) ?? []), usage]);
+        }
+    }
+    return usageMap;
+}
+async function collectRelationshipOwnerContext(zip, files) {
+    const context = new Map();
+    for (const relsPath of files.filter((filePath) => filePath.endsWith(".rels"))) {
+        const relsXml = await zip.file(relsPath)?.async("string");
+        const ownerPart = relationshipOwnerPart(relsPath);
+        const baseDir = ownerPart.includes("/") ? ownerPart.slice(0, ownerPart.lastIndexOf("/")) : "";
+        const sheet = Number(ownerPart.match(/^xl\/worksheets\/sheet(\d+)\.xml$/)?.[1]);
+        for (const rel of parseRelationships(relsXml)) {
+            if (/^https?:|^file:/i.test(rel.target) || rel.targetMode === "External")
+                continue;
+            const target = relationshipTarget(baseDir, rel.target);
+            if (Number.isFinite(sheet) && sheet > 0 && target.startsWith("xl/drawings/")) {
+                context.set(target, { sheet });
+            }
+        }
+    }
+    return context;
+}
+function embeddedAssetUsage(partPath, rel, target, inherited) {
+    const slide = Number(partPath.match(/^ppt\/slides\/slide(\d+)\.xml$/)?.[1]);
+    const sheet = Number(partPath.match(/^xl\/worksheets\/sheet(\d+)\.xml$/)?.[1]);
+    const story = partPath.startsWith("word/")
+        ? partPath.replace(/^word\//, "").replace(/\.xml$/i, "")
+        : undefined;
+    const isEmbedded = target.includes("/embeddings/") || /oleObject|package/i.test(rel.type);
+    const isChartWorkbook = partPath.startsWith("ppt/charts/") && target.includes("/embeddings/");
+    const kind = isChartWorkbook
+        ? "chartEmbeddedWorkbook"
+        : isEmbedded
+            ? "embeddedObject"
+            : partPath.startsWith("xl/drawings/")
+                ? "worksheetDrawingImage"
+                : partPath.startsWith("ppt/slides/")
+                    ? "picture"
+                    : "relationship";
+    return {
+        kind,
+        partPath,
+        relationshipId: rel.id,
+        relationshipType: rel.type,
+        targetMode: rel.targetMode,
+        ...(Number.isFinite(slide) && slide > 0 ? { slide } : {}),
+        ...(Number.isFinite(sheet) && sheet > 0 ? { sheet } : inherited?.sheet ? { sheet: inherited.sheet } : {}),
+        ...(story ? { story } : {})
+    };
+}
+function relationshipOwnerPart(relsPath) {
+    if (!relsPath.includes("_rels/"))
+        return relsPath.replace(/\.rels$/i, "");
+    return relsPath.replace(/\/_rels\/([^/]+)\.rels$/i, "/$1");
+}
 function detectMediaType(bytes, path) {
     const ext = path?.split(".").pop()?.toLowerCase();
     if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47)

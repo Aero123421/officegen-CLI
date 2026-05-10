@@ -1,8 +1,8 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { appendTrace, createRunFolder, getCapabilities, getSchema, listErrors, listSchemas, OFFICEGEN_CLI_VERSION, redactJson, sha256File, updateManifest, validateSchema } from "../../../core/dist/index.js";
-import { diagnose, detectOoxmlRiskyParts, diffDocuments, edit, exportDocument, extractAssets, inspect, inspectAsset, nativeRendererDoctor, render, renderChart, renderDiagram, repair, replaceAsset, validateOoxml, verify, view } from "../../../formats/dist/index.js";
-import { applyDesign, applyLayoutConstraints, applyTemplateMap, captureDesign, createTemplate, fillTemplate, initDesign, inspectDesign, inspectPlugin, inspectRenderer, inspectTemplate, installAgentAdapter, installPlugin, listDesigns, listMcpTools, listPlugins, listRenderers, listTemplates, refreshAgentAdapter, templateCandidates, TemplateFillError, trustRenderer, updateDesign, validateDesign, validateTemplate } from "../../../optional/dist/index.js";
+import { diagnose, detectOoxmlRiskyParts, diffDocuments, edit, exportDocument, extractAssets, inspect, inspectAsset, inspectEmbeddedAssets, nativeRendererDoctor, render, renderChart, renderDiagram, repair, replaceAsset, validateOoxml, verify, view } from "../../../formats/dist/index.js";
+import { applyDesign, applyLayoutConstraints, applyTemplateMap, captureDesign, createTemplate, featureRoot, fillTemplate, initDesign, inspectDesign, inspectPlugin, inspectRenderer, inspectTemplate, installAgentAdapter, installPlugin, listDesigns, listMcpTools, listPlugins, listRenderers, listTemplates, refreshAgentAdapter, templateCandidates, TemplateFillError, trustRenderer, updateDesign, validateDesign, validateTemplate, slugify } from "../../../optional/dist/index.js";
 import { commandFromArgv, getTopCommand, hasFlag, optionValue, positionalArgs } from "../shared/argv.js";
 import { asRecord, normalizeEditOperations, numberOption, optionalContext, readInputFile, readInputJson, readInputJsonIfPresent, readInputText, requireInput, schemaHiddenFromAgent, validateInputPath, validatedOutOption, validateOutputPath } from "../shared/io.js";
 import { COMMAND_METADATA } from "../shared/metadata.js";
@@ -72,7 +72,12 @@ export function helpPayload(context, topic) {
         commandGroup: entry.commandGroup,
         description: entry.description,
         requiredFeature: entry.feature,
-        commands: entry.commands
+        commands: entry.commands,
+        acceptedOptions: acceptedOptionsForHelp(entry.commandGroup, topic[1]),
+        effectiveOptions: effectiveOptionsForHelp(entry.commandGroup, topic[1]),
+        successCondition: successConditionForHelp(entry.commandGroup),
+        planOnlyWhen: entry.commandGroup === "improve" ? ["always"] : entry.commandGroup === "edit" ? ["--dry-run"] : [],
+        artifactRequiredWhen: artifactRequiredWhenForHelp(entry.commandGroup, topic[1])
     }));
     return {
         schema: "officegen.help@1.2",
@@ -97,6 +102,61 @@ export function helpPayload(context, topic) {
             "officegen edit deck.pptx --ops ops.json --dry-run --resolve-selectors --agent --json"
         ]
     };
+}
+function acceptedOptionsForHelp(commandGroup, subcommand) {
+    return [...new Set([...globalAcceptedOptions(), ...effectiveOptionsForHelp(commandGroup, subcommand)])];
+}
+function effectiveOptionsForHelp(commandGroup, subcommand) {
+    if (commandGroup === "inspect")
+        return ["--depth", "--structure", "--sheet", "--range", "--fields", "--object-map-limit", "--report-out"];
+    if (commandGroup === "view")
+        return ["--format", "--max-pages", "--out", "--object-map-limit", "--report-out"];
+    if (commandGroup === "edit")
+        return ["--ops", "--out", "--dry-run", "--resolve-selectors", "--overwrite", "--report-out"];
+    if (commandGroup === "render")
+        return ["--target", "--out", "--overwrite", "--report-out"];
+    if (commandGroup === "verify")
+        return ["--visual", "--native", "--timeout-ms", "--out", "--report-out"];
+    if (commandGroup === "benchmark")
+        return ["--manifest", "--report-out", "--timeout-ms"];
+    if (commandGroup === "improve")
+        return ["--dry-run", "--profile", "--report-out"];
+    if (commandGroup === "asset" && subcommand === "inspect")
+        return ["--embedded"];
+    if (commandGroup === "asset" && subcommand === "extract")
+        return ["--images", "--out"];
+    if (commandGroup === "asset" && subcommand === "replace")
+        return ["--asset", "--selector", "--out", "--overwrite"];
+    if (commandGroup === "asset")
+        return ["--embedded", "--images", "--out", "--asset", "--selector"];
+    if (commandGroup === "design" && subcommand === "capture")
+        return ["--name", "--report-out"];
+    if (commandGroup === "design")
+        return ["--name", "--out", "--strategy", "--data", "--report-out"];
+    if (commandGroup === "template")
+        return ["--name", "--map", "--data", "--out", "--validate-only", "--report-out"];
+    return [];
+}
+function globalAcceptedOptions() {
+    return ["--json", "--agent", "--strict-json", "--capabilities-hash", "--json-budget-bytes"];
+}
+function artifactRequiredWhenForHelp(commandGroup, subcommand) {
+    if (commandGroup === "asset" && subcommand === "inspect")
+        return [];
+    if (commandGroup === "improve" || commandGroup === "benchmark")
+        return [];
+    return ["edit", "render", "export", "asset", "design", "template"].includes(commandGroup) ? ["--out for mutating Office artifacts"] : [];
+}
+function successConditionForHelp(commandGroup) {
+    if (commandGroup === "benchmark")
+        return "objectiveOk is true only when all benchmark documents succeed.";
+    if (commandGroup === "improve")
+        return "Always plan-only; success means actionable suggestions were returned, not that an Office file changed.";
+    if (commandGroup === "asset")
+        return "asset inspect reports file or embedded assets; asset replace requires changed:true and output artifact exists.";
+    if (commandGroup === "design")
+        return "capture writes design/capture artifacts; apply mutates only when a supported Office target and --out are supplied.";
+    return "See envelope objectiveOk, readiness, partial, artifacts, and command result schema.";
 }
 function workflowHelp(id) {
     const workflows = [
@@ -678,18 +738,21 @@ export async function critiquePayload(context) {
 }
 export async function improvePayload(context) {
     const input = requireInput(context, 3, "improve");
-    if (!hasFlag(context.argv, "--dry-run")) {
+    if (optionValue(context.argv, "--out")) {
         throw new CliFailure({
-            code: "SCHEMA_INVALID",
+            code: "OPTION_NOT_EFFECTIVE",
             command: "improve",
-            message: "improve is suggestion-only in v2.3.0 and requires --dry-run."
+            message: "improve is plan-only and does not write --out. Use --report-out to persist the JSON plan.",
+            details: { out: optionValue(context.argv, "--out"), replacementOption: "--report-out" }
         }, 2);
     }
     const inputPath = await validateInputPath(context, input);
     const inspected = await inspect(inputPath, withFormatConfig(context, { depth: "summary", structure: true }));
     const trusted = asRecord(inspected.trusted);
+    const format = String(trusted.format);
+    const profile = optionValue(context.argv, "--profile") ?? "business";
     const critique = {
-        findings: critiqueFindings(String(trusted.format), asRecord(trusted.summary), asRecord(inspected.untrusted), inspected.objectMap, optionValue(context.argv, "--profile") ?? "business")
+        findings: critiqueFindings(format, asRecord(trusted.summary), asRecord(inspected.untrusted), inspected.objectMap, profile)
     };
     const suggestions = asArray(critique.findings).map((finding) => {
         const record = asRecord(finding);
@@ -697,14 +760,17 @@ export async function improvePayload(context) {
             findingCode: record.code,
             reason: record.repair ?? record.message,
             dryRunOnly: true,
-            suggestedOps: record.suggestedOp ? [record.suggestedOp] : []
+            suggestedOps: record.suggestedOp ? [record.suggestedOp] : [],
+            ...improvementHintsForFinding(String(record.code ?? ""), format, input, inspected.objectMap)
         };
     });
     return maybeWriteReport(context, {
-        schema: "officegen.improve.plan@2.3",
+        schema: "officegen.improve.plan@2.5",
         input,
         planOnly: true,
         mutatesOffice: false,
+        dryRun: true,
+        expectedResult: "No Office file is written; this command returns actionable improvement commands and skeleton operations.",
         suggestions
     }, "improve");
 }
@@ -721,17 +787,30 @@ function critiqueFindings(format, summary, untrusted, objectMap, profile) {
             findings.push(qualityFinding("PPTX_CHARTS_NONE", "warning", "Business/KPI deck has no charts.", "Add chart blocks or use chartData template bindings."));
         if (slides > 0 && textObjects / slides > 18)
             findings.push(qualityFinding("PPTX_TEXT_DENSITY_HIGH", "warning", "Average text object density is high; slide readability may be poor.", "Split dense slides or run layout repair/fit-text."));
+        const titles = objectMap.map(asRecord)
+            .filter((entry) => entry.kind === "shape" && typeof entry.textPreview === "string" && /title/i.test(String(asRecord(entry.selectorHints).placeholderType ?? asRecord(entry.selectorHints).name ?? entry.label ?? "")))
+            .map((entry) => String(entry.textPreview).trim())
+            .filter(Boolean);
+        if (new Set(titles).size < titles.length)
+            findings.push(qualityFinding("PPTX_DUPLICATE_TITLES", "warning", "Repeated slide title text was detected.", "Inspect slide titles and adjust duplicated section headings."));
+        if (slides > 0 && textObjects === 0 && charts === 0 && assets === 0)
+            findings.push(qualityFinding("PPTX_BLANK_LIKE_SLIDES", "warning", "Deck appears to contain blank-like slides.", "Inspect view output and add title/body/chart/image blocks."));
+        if (slides > 2 && assets === 0 && charts === 0)
+            findings.push(qualityFinding("PPTX_VISUAL_ANCHOR_LOW", "warning", "Deck has no detected chart or image visual anchors.", "Add at least one chart or image anchor to business decks."));
     }
     else if (format === "xlsx") {
         const charts = Number(summary.charts ?? 0);
         const formulas = Number(summary.formulas ?? 0);
         const tables = Number(summary.tables ?? 0);
+        const cells = Number(summary.cells ?? objectMap.filter((entry) => asRecord(entry).kind === "cell").length);
         if (/dashboard|kpi|business/i.test(profile) && charts === 0)
             findings.push(qualityFinding("XLSX_DASHBOARD_CHARTS_NONE", "warning", "Workbook profile expects dashboard charts, but no chart objects were detected.", "Add chart sheets or use xlsx chart update workflow."));
         if (tables === 0)
             findings.push(qualityFinding("XLSX_TABLES_NONE", "warning", "Workbook has no Excel table objects.", "Use xlsx.writeTable/updateTableRows for structured data."));
         if (formulas === 0)
             findings.push(qualityFinding("XLSX_FORMULAS_NONE", "info", "No formulas were detected; confirm this is intended for generated workbooks.", "Inspect with --sheet/--range and add formulas where calculations are expected."));
+        if (cells > 250)
+            findings.push(qualityFinding("XLSX_WIDE_SHEET_READABILITY_RISK", "warning", "Workbook has many visible cells and may need dashboard summaries.", "Inspect key ranges and add tables/charts for scanability."));
     }
     else if (format === "docx") {
         const structure = asRecord(untrusted.structureMap);
@@ -741,11 +820,88 @@ function critiqueFindings(format, summary, untrusted, objectMap, profile) {
             findings.push(qualityFinding("DOCX_REPEATED_HEADINGS", "warning", "Adjacent repeated headings were detected.", "Collapse duplicate headings or adjust generated outline."));
         if (Number(summary.headers ?? 0) === 0 && /proposal|report|business/i.test(profile))
             findings.push(qualityFinding("DOCX_HEADERS_NONE", "info", "Business DOCX has no header parts.", "Add header/footer if the deliverable needs a formal template."));
+        const paragraphs = Number(summary.paragraphs ?? objectMap.filter((entry) => asRecord(entry).kind === "paragraph").length);
+        if (paragraphs === 0)
+            findings.push(qualityFinding("DOCX_EMPTY_SECTION", "warning", "Document has no detected paragraph content.", "Inspect the DOCX structure and add body sections."));
+        const headingLevels = headings.map((heading) => Number(asRecord(heading).level ?? 0)).filter((level) => Number.isFinite(level) && level > 0);
+        if (headingLevels.some((level, index) => index > 0 && level - headingLevels[index - 1] > 1))
+            findings.push(qualityFinding("DOCX_HEADING_HIERARCHY_GAP", "warning", "Heading levels appear to skip hierarchy levels.", "Normalize heading levels before final delivery."));
+        const wideTable = objectMap.map(asRecord).some((entry) => entry.kind === "tableCell" && Number(asRecord(entry.bounds).width ?? 0) > 0.9);
+        if (wideTable)
+            findings.push(qualityFinding("DOCX_TABLE_WIDTH_RISK", "warning", "A DOCX table cell appears wider than the page-safe content area.", "Review table widths and split wide tables if needed."));
     }
     return findings;
 }
 function qualityFinding(code, severity, message, repair) {
-    return { code, severity, category: "quality", message, repair, suggestedOp: { reason: repair, dryRunOnly: true } };
+    return {
+        code,
+        severity,
+        category: "quality",
+        message,
+        repair,
+        repairCommands: ["officegen improve <input> --agent --json"],
+        improveHints: [repair],
+        suggestedOp: { reason: repair, dryRunOnly: true }
+    };
+}
+function improvementHintsForFinding(code, format, input, objectMap) {
+    const firstSlide = objectMap.map(asRecord).find((entry) => typeof asRecord(entry.selectorHints).slide === "number");
+    const slide = Number(asRecord(firstSlide?.selectorHints).slide ?? 1);
+    if (format === "pptx" && code === "PPTX_ASSETS_NONE") {
+        return {
+            commands: [
+                `officegen asset inspect --embedded ${quoteCommandValue(input)} --agent --json`,
+                `officegen asset extract ${quoteCommandValue(input)} --images --out .officegen/assets --agent --json`,
+                `officegen inspect ${quoteCommandValue(input)} --depth summary --object-map-limit 50 --agent --json`
+            ],
+            assetWorkflowHints: {
+                targetSlide: slide,
+                preferredKinds: ["logo", "product screenshot", "customer proof image"],
+                replaceCommandSkeleton: `officegen asset replace ${quoteCommandValue(input)} --asset <ppt/media/imageN.png> <replacement.png> --out <edited.pptx> --agent --json`
+            },
+            editOpsSkeleton: [{
+                    op: "pptx.replaceImageByShape",
+                    selector: { stableObjectId: "<picture-stableObjectId-from-asset-inspect-or-inspect>" },
+                    replacementBase64: "<base64-png-or-jpeg>",
+                    fit: "contain"
+                }]
+        };
+    }
+    if (format === "pptx" && code === "PPTX_CHARTS_NONE") {
+        return {
+            commands: [
+                `officegen template candidates ${quoteCommandValue(input)} --agent --json`,
+                `officegen inspect ${quoteCommandValue(input)} --depth full --agent --json`
+            ],
+            templateBindingHints: [{ field: "chartData", type: "chartData", targetSlide: slide }],
+            editOpsSkeleton: [{
+                    op: "pptx.updateChartData",
+                    selector: { stableObjectId: "<chart-stableObjectId>" },
+                    seriesName: "Metric",
+                    categories: ["Q1", "Q2"],
+                    values: [1, 2]
+                }]
+        };
+    }
+    if (format === "xlsx" && (code === "XLSX_DASHBOARD_CHARTS_NONE" || code === "XLSX_TABLES_NONE")) {
+        return {
+            commands: [
+                `officegen inspect ${quoteCommandValue(input)} --sheet "Sheet1" --range "A1:K40" --agent --json`,
+                `officegen improve ${quoteCommandValue(input)} --profile dashboard --agent --json`
+            ],
+            templateBindingHints: [{ field: "dashboardRange", type: "table", range: "A1:K40" }],
+            editOpsSkeleton: [{
+                    op: "xlsx.writeTable",
+                    sheet: 1,
+                    startCell: "A1",
+                    rows: [{ metric: "Revenue", value: 100 }]
+                }]
+        };
+    }
+    return {
+        commands: [`officegen inspect ${quoteCommandValue(input)} --depth summary --agent --json`],
+        editOpsSkeleton: []
+    };
 }
 function severityPenalty(severity) {
     if (severity === "error")
@@ -776,21 +932,55 @@ export async function benchmarkPayload(context, subcommand) {
             const inspected = await inspect(filePath, withFormatConfig(context, { depth: "summary", structure: true }));
             const verified = await verify(filePath, withFormatConfig(context, { timeoutMs: numberOption(context, "--timeout-ms") ?? 60000 }));
             const critiqued = await critiqueResultForBenchmark(context, filePath);
-            results.push({ id: item.id ?? relative, filePath, ok: true, startedAt, inspect: inspected.trusted.summary, verify: { score: verified.score, readiness: verified.readiness, partial: verified.partial }, critique: { score: critiqued.score, readiness: critiqued.readiness } });
+            const documentOk = verified.readiness !== "blocked" && verified.partial !== true;
+            results.push({
+                id: item.id ?? relative,
+                filePath,
+                ok: documentOk,
+                startedAt,
+                inspect: inspected.trusted.summary,
+                verify: { score: verified.score, readiness: verified.readiness, partial: verified.partial },
+                critique: { score: critiqued.score, readiness: critiqued.readiness },
+                ...(documentOk ? {} : { error: `verify readiness ${verified.readiness}${verified.partial ? " partial" : ""}` })
+            });
         }
         catch (error) {
             results.push({ id: item.id ?? relative, filePath, ok: false, startedAt, error: error instanceof Error ? error.message : String(error) });
         }
     }
+    const okCount = results.filter((entry) => entry.ok).length;
+    const failed = results.filter((entry) => !entry.ok);
+    const failureSummary = {
+        failedCount: failed.length,
+        okCount,
+        count: results.length,
+        errors: [...new Set(failed.map((entry) => String(asRecord(entry).error ?? "unknown")).filter(Boolean))].slice(0, 8)
+    };
+    const corpusStatus = results.length === 0 ? "empty" : okCount === results.length ? "complete" : okCount === 0 ? "missing_or_unreadable" : "partial";
     const result = {
-        schema: "officegen.benchmark.run.result@2.3",
+        schema: "officegen.benchmark.run.result@2.5",
         manifestPath,
         storageRoot,
         count: results.length,
-        okCount: results.filter((entry) => entry.ok).length,
-        results
+        okCount,
+        failedCount: failed.length,
+        readiness: okCount === results.length && results.length > 0 ? "pass" : okCount === 0 ? "blocked" : "warning",
+        partial: okCount > 0 && okCount < results.length,
+        setupStatus: corpusStatus === "complete" ? "ready" : "needs_setup_or_fetch",
+        corpusStatus,
+        failureSummary,
+        nextSuggestedCommands: benchmarkRecoveryCommands(manifestPath),
+        results,
+        artifacts: [{ path: manifestPath, exists: true, kind: "benchmark-manifest", format: "json", sourceCommand: "benchmark run" }]
     };
     return maybeWriteReport(context, result, "benchmark run");
+}
+function benchmarkRecoveryCommands(manifestPath) {
+    return [
+        "npm run benchmark:fetch",
+        `officegen benchmark run --manifest ${quoteCommandValue(manifestPath)} --agent --json --strict-json`,
+        "officegen benchmark compare <before.json> <after.json> --agent --json --strict-json"
+    ];
 }
 function resolveBenchmarkStorageRoot(context, storageRoot) {
     return resolveBenchmarkRelativePath(context, context.cwd, String(storageRoot ?? DEFAULT_BENCHMARK_STORAGE_ROOT), "storageRoot");
@@ -1394,10 +1584,31 @@ function runStepFailurePayload(id, command, error) {
 function safeFileToken(value) {
     return value.replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 80) || "step";
 }
+function quoteCommandValue(value) {
+    const text = String(value);
+    if (!/[\s,"'`*?[\]{}()&|<>;]/.test(text))
+        return text;
+    return `"${text.replace(/"/g, '\\"')}"`;
+}
 export async function assetPayload(context, subcommand) {
     const input = requireInput(context, subcommand ? 4 : 3, "asset");
-    if (subcommand === "inspect" || !subcommand)
-        return inspectAsset(await validateInputPath(context, input));
+    if (subcommand === "inspect" || !subcommand) {
+        const inputPath = await validateInputPath(context, input);
+        if (hasFlag(context.argv, "--embedded"))
+            return inspectEmbeddedAssets(inputPath, withFormatConfig(context, {}));
+        const info = await inspectAsset(inputPath);
+        return {
+            ...info,
+            mode: "file",
+            warnings: /\.(pptx|docx|xlsx)$/i.test(inputPath)
+                ? [{
+                        code: "ASSET_EMBEDDED_INSPECT_RECOMMENDED",
+                        severity: "info",
+                        message: "This looks like an Office package. Use asset inspect --embedded to list embedded media and replacement targets."
+                    }]
+                : []
+        };
+    }
     if (subcommand === "extract") {
         const out = optionValue(context.argv, "--out");
         return extractAssets(await validateInputPath(context, input), withFormatConfig(context, {
@@ -1448,7 +1659,13 @@ export async function templatePayload(context, subcommand) {
         const sourcePath = sourceOrQuery && /\.[A-Za-z0-9]+$/.test(sourceOrQuery)
             ? await validateInputPath(context, sourceOrQuery)
             : undefined;
-        return templateCandidates({ ...optional, query: sourcePath ? undefined : sourceOrQuery, sourcePath });
+        const candidates = await templateCandidates({ ...optional, query: sourcePath ? undefined : sourceOrQuery, sourcePath });
+        return {
+            schema: "officegen.template.candidates.result@2.5",
+            candidates,
+            count: candidates.length,
+            artifacts: await templateCandidateArtifacts(candidates)
+        };
     }
     if (subcommand === "create") {
         const sourcePath = positionalArgs(context.argv, 4)[0];
@@ -1513,7 +1730,31 @@ export async function designPayload(context, subcommand) {
     }
     if (subcommand === "capture") {
         const sourcePath = requireInput(context, 4, "design capture");
-        return captureDesign({ ...optional, id, sourcePath: await validateInputPath(context, sourcePath) });
+        const validatedSourcePath = await validateInputPath(context, sourcePath);
+        try {
+            const captured = await captureDesign({ ...optional, id, sourcePath: validatedSourcePath });
+            return {
+                ...asRecord(captured),
+                artifacts: await designCaptureArtifacts(optional, id, captured)
+            };
+        }
+        catch (error) {
+            if (error instanceof Error && /ENOENT|no such file|not found/i.test(error.message)) {
+                throw new CliFailure({
+                    code: "DESIGN_NOT_INITIALIZED",
+                    command: "design capture",
+                    message: `Design "${id}" has not been initialized. Run design init before capture.`,
+                    details: {
+                        name: id,
+                        nextSuggestedCommands: [
+                            `officegen design init --name ${quoteCommandValue(id)} --agent --json`,
+                            `officegen design capture ${quoteCommandValue(sourcePath)} --name ${quoteCommandValue(id)} --agent --json`
+                        ]
+                    }
+                }, 3);
+            }
+            throw error;
+        }
     }
     if (subcommand === "apply") {
         const targetPath = positionalArgs(context.argv, 4)[0];
@@ -1528,6 +1769,46 @@ export async function designPayload(context, subcommand) {
     if (subcommand === "validate")
         return validateDesign({ ...optional, id });
     return groupPayload(context, subcommand);
+}
+async function templateCandidateArtifacts(candidates) {
+    const files = new Set();
+    for (const candidate of candidates.map(asRecord)) {
+        const artifactPaths = asRecord(candidate.artifactPaths);
+        for (const value of [
+            artifactPaths.contextPath,
+            artifactPaths.evidencePath,
+            artifactPaths.templateMapSuggestedPath,
+            artifactPaths.schemaCandidatesPath,
+            ...asArray(artifactPaths.previewPaths)
+        ]) {
+            if (typeof value === "string")
+                files.add(value);
+        }
+    }
+    const artifacts = [];
+    for (const filePath of files) {
+        artifacts.push(await artifactRecord(filePath, "template-candidate", path.extname(filePath).slice(1) || "artifact", "template candidates"));
+    }
+    return artifacts;
+}
+async function designCaptureArtifacts(optional, id, captured) {
+    const designId = slugify(id);
+    const artifacts = [];
+    const designPackPath = path.join(featureRoot(optional, "design"), `${designId}.json`);
+    artifacts.push(await artifactRecord(designPackPath, "design-pack", "json", "design capture"));
+    const capture = asRecord(asRecord(captured).sourceCapture);
+    const artifactPaths = asRecord(capture.artifactPaths);
+    const candidatePaths = [
+        artifactPaths.contextPath,
+        artifactPaths.evidencePath,
+        artifactPaths.templateMapSuggestedPath,
+        artifactPaths.schemaCandidatesPath,
+        ...asArray(artifactPaths.previewPaths)
+    ].filter((value) => typeof value === "string");
+    for (const filePath of candidatePaths) {
+        artifacts.push(await artifactRecord(filePath, "design-capture", path.extname(filePath).slice(1) || "artifact", "design capture"));
+    }
+    return artifacts;
 }
 function booleanOption(record, key) {
     if (!(key in record))

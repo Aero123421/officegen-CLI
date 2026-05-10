@@ -226,6 +226,28 @@ function evaluateObjective(context: RuntimeContext, command: string, result: unk
   if (schema === "officegen.verify.result@1.2" && (record.readiness === "blocked" || record.partial === true)) {
     return objectiveFailure(defaultState, record.partial === true ? "TIMEOUT" : "RUN_STEP_FAILED", "Verification did not reach a passing readiness state.", { readiness: record.readiness, partial: record.partial });
   }
+  if (schema === "officegen.benchmark.run.result@2.5" || schema === "officegen.benchmark.run.result@2.3") {
+    const count = Number(record.count ?? 0);
+    const okCount = Number(record.okCount ?? 0);
+    if (count === 0 || okCount === 0) {
+      return objectiveFailure(defaultState, "RUN_STEP_FAILED", count === 0 ? "Benchmark manifest did not contain runnable documents." : "All benchmark documents failed.", {
+        count,
+        okCount,
+        failureSummary: record.failureSummary
+      });
+    }
+    if (okCount < count) {
+      return objectiveFailure({
+        ...defaultState,
+        readiness: "warning",
+        partial: true
+      }, "RUN_STEP_FAILED", "Some benchmark documents failed.", {
+        count,
+        okCount,
+        failureSummary: record.failureSummary
+      });
+    }
+  }
 
   return {
     ok: true,
@@ -418,9 +440,18 @@ function errorSuggestedCommands(context: RuntimeContext, error: CliErrorPayload)
   } else if (error.code === "EXPECTED_ARTIFACT_MISSING") {
     suggestions.push(`officegen run <workflow.json> --manifest .officegen/runs/run-manifest.json --log-jsonl .officegen/runs/events.jsonl${agent} --json`);
     suggestions.push(`officegen inspect <expected-output> --depth summary${agent} --json`);
+  } else if (error.code === "RUN_STEP_FAILED" && command.startsWith("benchmark")) {
+    suggestions.push("npm run benchmark:fetch");
+    suggestions.push(`officegen benchmark run --manifest benchmarks/office-corpus/manifest.json${agent} --json --strict-json`);
+    suggestions.push(`officegen benchmark compare <before.json> <after.json>${agent} --json --strict-json`);
   } else if (error.code === "REPAIR_NO_SAFE_OPS") {
     suggestions.push(`officegen diagnose <input> --report-out .officegen/runs/diagnose.json${agent} --json`);
     suggestions.push(`officegen edit <input> --ops suggested-ops.json --dry-run --resolve-selectors${agent} --json`);
+  } else if (error.code === "DESIGN_NOT_INITIALIZED") {
+    const detailSuggestions = Array.isArray(error.details?.nextSuggestedCommands) ? error.details.nextSuggestedCommands.map(String) : [];
+    suggestions.push(...detailSuggestions);
+    suggestions.push(`officegen design init --name <name>${agent} --json`);
+    suggestions.push(`officegen design capture <source.pptx> --name <name>${agent} --json`);
   } else if (error.code === "TIMEOUT") {
     suggestions.push(`officegen ${command || "<command>"} --timeout-ms 120000${agent} --json`);
   }
@@ -434,7 +465,7 @@ function recommendedNarrowCommands(command: string, context: RuntimeContext): st
       `officegen inspect <input> --depth summary --object-map-limit 50${agent} --json`,
       `officegen inspect <deck.pptx> --slides 1-5 --depth summary${agent} --json`,
       `officegen inspect <workbook.xlsx> --sheet Sheet1 --range A1:K40${agent} --json`,
-      `officegen inspect <file> --fields schema,trusted,objectMap${agent} --json`
+      `officegen inspect <file> --fields "schema,trusted,objectMap"${agent} --json`
     ];
   }
   if (command.startsWith("view")) {

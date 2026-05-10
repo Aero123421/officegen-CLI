@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import JSZip from "jszip";
 import { PDFDocument } from "pdf-lib";
 import { getBuiltinConfig } from "@officegen/core";
-import { DEFAULT_NATIVE_RENDERER_TIMEOUT_MS, MIN_NATIVE_RENDERER_TIMEOUT_MS, diffDocuments, diagnose, edit, exportDocument, extractAssets, inspect, inspectInputZipSafety, render, renderChart, renderDiagram, replaceAsset, resolveEditSelectors, resolveNativeRendererTimeoutMs, verify, view } from "../src/index.js";
+import { DEFAULT_NATIVE_RENDERER_TIMEOUT_MS, MIN_NATIVE_RENDERER_TIMEOUT_MS, diffDocuments, diagnose, edit, exportDocument, extractAssets, inspect, inspectEmbeddedAssets, inspectInputZipSafety, render, renderChart, renderDiagram, replaceAsset, resolveEditSelectors, resolveNativeRendererTimeoutMs, verify, view } from "../src/index.js";
 
 describe("@officegen/formats MVP", () => {
   it("renders and inspects a basic PPTX with untrusted text separation", async () => {
@@ -661,6 +661,37 @@ describe("@officegen/formats MVP", () => {
       .rejects.toMatchObject({
         payload: expect.objectContaining({ code: "UNSUPPORTED_FORMAT" })
       });
+  });
+
+  it("inspects embedded media usage across PPTX, DOCX, and XLSX packages", async () => {
+    const pptx = new JSZip();
+    pptx.file("ppt/slides/slide1.xml", "<p:sld/>");
+    pptx.file("ppt/slides/_rels/slide1.xml.rels", '<Relationships><Relationship Id="rId1" Type="image" Target="../media/image1.png"/></Relationships>');
+    pptx.file("ppt/media/image1.png", pngBytes(1, 1));
+    pptx.file("ppt/media/orphan.png", pngBytes(1, 1));
+    const pptxResult = await inspectEmbeddedAssets({ data: await pptx.generateAsync({ type: "uint8array" }), format: "pptx" });
+
+    expect(pptxResult.schema).toBe("officegen.asset.embedded.result@2.5");
+    expect(pptxResult.assets.find((asset) => asset.zipPath === "ppt/media/image1.png")?.usages[0]).toMatchObject({ slide: 1, relationshipId: "rId1" });
+    expect(pptxResult.assets.find((asset) => asset.zipPath === "ppt/media/orphan.png")?.orphaned).toBe(true);
+
+    const docx = new JSZip();
+    docx.file("word/document.xml", "<w:document/>");
+    docx.file("word/_rels/document.xml.rels", '<Relationships><Relationship Id="rId2" Type="image" Target="media/image1.png"/></Relationships>');
+    docx.file("word/media/image1.png", pngBytes(1, 1));
+    const docxResult = await inspectEmbeddedAssets({ data: await docx.generateAsync({ type: "uint8array" }), format: "docx" });
+
+    expect(docxResult.assets[0]?.usages[0]).toMatchObject({ story: "document", relationshipId: "rId2" });
+
+    const xlsx = new JSZip();
+    xlsx.file("xl/worksheets/sheet1.xml", "<worksheet/>");
+    xlsx.file("xl/worksheets/_rels/sheet1.xml.rels", '<Relationships><Relationship Id="rId3" Type="drawing" Target="../drawings/drawing1.xml"/></Relationships>');
+    xlsx.file("xl/drawings/drawing1.xml", "<xdr:wsDr/>");
+    xlsx.file("xl/drawings/_rels/drawing1.xml.rels", '<Relationships><Relationship Id="rId4" Type="image" Target="../media/image1.png"/></Relationships>');
+    xlsx.file("xl/media/image1.png", pngBytes(1, 1));
+    const xlsxResult = await inspectEmbeddedAssets({ data: await xlsx.generateAsync({ type: "uint8array" }), format: "xlsx" });
+
+    expect(xlsxResult.assets[0]?.usages[0]).toMatchObject({ kind: "worksheetDrawingImage", relationshipId: "rId4", sheet: 1 });
   });
 
   it("repairs media relationship targets when replacing a mismatched PNG path containing SVG bytes", async () => {

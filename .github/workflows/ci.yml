@@ -68,6 +68,11 @@ jobs:
       - name: Packed install smoke
         run: npm run pack:smoke
 
+      - name: GitHub HEAD install smoke
+        env:
+          OFFICEGEN_GITHUB_INSTALL_SPEC: github:${{ github.repository }}#${{ github.sha }}
+        run: npm run github-install:smoke
+
   dependency-review:
     name: Dependency review
     if: github.event_name == 'pull_request'

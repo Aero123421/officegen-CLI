@@ -46,6 +46,7 @@ const REQUIRED_ERROR_CODES = [
     "UNSUPPORTED_FORMAT",
     "TEMPLATE_FILL_FAILED",
     "TEMPLATE_VALIDATE_FAILED",
+    "DESIGN_NOT_INITIALIZED",
     "EXPORT_UNSUPPORTED"
 ];
 const defaultCategory = (code) => {
@@ -76,6 +77,8 @@ const defaultCategory = (code) => {
         return "asset";
     if (code === "TEMPLATE_FILL_FAILED" || code === "TEMPLATE_VALIDATE_FAILED")
         return "template";
+    if (code === "DESIGN_NOT_INITIALIZED")
+        return "design";
     if (code === "CHART_SPEC_INVALID")
         return "chart";
     if (code === "DIAGRAM_SPEC_INVALID")
@@ -136,6 +139,7 @@ const messages = {
     UNSUPPORTED_FORMAT: "The input format is not supported by this command.",
     TEMPLATE_FILL_FAILED: "Template fill could not create or validate the requested artifact.",
     TEMPLATE_VALIDATE_FAILED: "Template fill validation found unresolved or unsupported bindings.",
+    DESIGN_NOT_INITIALIZED: "The requested design profile has not been initialized.",
     EXPORT_UNSUPPORTED: "The requested export conversion is unsupported."
 };
 const suggestedOps = {
@@ -149,6 +153,7 @@ const suggestedOps = {
     OOXML_VALIDATION_FAILED: ["verify --native --strict", "diagnose --report-out diagnose.json"],
     TEMPLATE_FILL_FAILED: ["template fill --validate-only", "inspect --depth shallow", "template apply-map"],
     TEMPLATE_VALIDATE_FAILED: ["template candidates <source> --agent --json", "inspect <source> --depth shallow --agent --json", "template apply-map --map corrected-map.json"],
+    DESIGN_NOT_INITIALIZED: ["design init --name <name> --agent --json", "design capture <source.pptx> --name <name> --agent --json"],
     CHART_SPEC_INVALID: ["schema validate --schema officegen.chart.vegalite-wrapper@1.2"],
     DIAGRAM_SPEC_INVALID: ["schema validate --schema officegen.diagram.spec@1.2"]
 };

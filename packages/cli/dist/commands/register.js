@@ -151,11 +151,10 @@ export function writeCommandHelp(context, commandGroup, subcommand, stdout) {
         "Options:",
         "  --json                         emit JSON envelope",
         "  --agent                        filter output for agents",
+        "  --strict-json                  force JSON-only stdout",
         "  --capabilities-hash <hash>     warn if adapter capabilities are stale",
         "  --json-budget-bytes <bytes>    cap agent JSON output",
-        "  --depth <summary|shallow|full>  inspection depth",
-        "  --out <path>                   output path",
-        "  --overwrite                    allow overwriting an existing output",
+        ...commandSpecificHelpOptions(commandGroup, subcommand),
         "  -h, --help",
         "",
         "Agent contract:",
@@ -178,6 +177,8 @@ function usageSuffix(commandGroup, subcommand) {
         return " <input> --ops <ops.json>";
     if (commandGroup === "asset" && subcommand === "replace")
         return " <input> --asset <zip-path> <replacement>";
+    if (commandGroup === "asset" && subcommand === "inspect")
+        return " <input> [--embedded]";
     if (commandGroup === "asset")
         return " <input>";
     if (commandGroup === "schema" && subcommand === "get")
@@ -211,6 +212,23 @@ function commandExamples(commandGroup, subcommand) {
         return ["officegen verify deck.pptx --visual --json", "OFFICEGEN_PROFILE=enterprise officegen verify deck.pptx --native --out verify-report.json --json"];
     if (commandGroup === "asset" && subcommand === "replace")
         return ["officegen asset replace deck.pptx --asset ppt/media/image1.png logo.png --out deck-logo.pptx --json"];
+    if (commandGroup === "asset" && subcommand === "inspect")
+        return ["officegen asset inspect logo.png --json", "officegen asset inspect deck.pptx --embedded --agent --json"];
+    if (commandGroup === "asset")
+        return ["officegen asset inspect deck.pptx --embedded --agent --json", "officegen asset extract deck.pptx --images --out .officegen/assets --json"];
+    if (commandGroup === "benchmark" && subcommand === "run")
+        return [
+            "npm run benchmark:fetch",
+            "officegen benchmark run --manifest benchmarks/office-corpus/manifest.json --report-out .officegen/benchmark-results/v2.5.0.json --agent --json",
+            "officegen benchmark compare old.json .officegen/benchmark-results/v2.5.0.json --json"
+        ];
+    if (commandGroup === "benchmark")
+        return [
+            "officegen benchmark run --manifest benchmarks/office-corpus/manifest.json --agent --json",
+            "officegen benchmark compare before.json after.json --json"
+        ];
+    if (commandGroup === "improve")
+        return ["officegen improve deck.pptx --agent --json", "officegen improve workbook.xlsx --profile dashboard --agent --json"];
     if (commandGroup === "template")
         return ["officegen template candidates source.pptx --agent --json"];
     if (commandGroup === "design")
@@ -220,6 +238,49 @@ function commandExamples(commandGroup, subcommand) {
     if (commandGroup === "schema")
         return ["officegen schema list --agent --json", "officegen schema validate deck.ir.json --schema officegen.ir.document@1.2 --json"];
     return [`officegen ${subcommand ? `${commandGroup} ${subcommand}` : commandGroup} --json`];
+}
+function commandSpecificHelpOptions(commandGroup, subcommand) {
+    if (commandGroup === "inspect")
+        return [
+            "  --depth <summary|shallow|full>  inspection depth",
+            "  --structure                    include DOCX structure map",
+            "  --sheet <name>                 limit XLSX inspect to a sheet",
+            "  --range <range>                limit XLSX inspect to an A1 range",
+            "  --fields <csv>                 project selected top-level result fields",
+            "  --object-map-limit <number>    limit object map entries",
+            "  --report-out <path>            write JSON report"
+        ];
+    if (commandGroup === "edit")
+        return [
+            "  --ops <path>                   edit operations JSON",
+            "  --out <path>                   output Office path",
+            "  --dry-run                      resolve without writing",
+            "  --resolve-selectors            include selector resolution details",
+            "  --overwrite                    allow overwriting an existing output"
+        ];
+    if (commandGroup === "improve")
+        return [
+            "  --dry-run                      optional; improve is always plan-only",
+            "  --profile <profile>            critique/improve profile",
+            "  --report-out <path>            write the improvement plan JSON",
+            "  planOnly: true; mutatesOffice: false",
+            "  successCondition: returns actionable suggestions; no Office artifact is expected"
+        ];
+    if (commandGroup === "benchmark")
+        return [
+            "  --manifest <path>              benchmark manifest JSON",
+            "  --report-out <path>            write benchmark JSON report",
+            "  setup: run npm run benchmark:fetch before public corpus runs"
+        ];
+    if (commandGroup === "asset" && subcommand === "inspect")
+        return [
+            "  --embedded                     list embedded media inside PPTX/DOCX/XLSX packages"
+        ];
+    if (commandGroup === "design" && subcommand === "capture")
+        return [
+            "  --name <name>                  design pack name; run design init first if missing"
+        ];
+    return [];
 }
 function registerLeaf(program, feature, context, stdout, now, payloadFactory) {
     const metadata = metadataFor(feature);
@@ -334,6 +395,7 @@ function baseCommand(name, description) {
         .option("--mode <mode>", "export mode")
         .option("--issues <path>", "repair issues JSON")
         .option("--images", "extract image assets")
+        .option("--embedded", "inspect embedded media in Office packages")
         .option("--visual", "include approximate visual diff/regression output")
         .option("--native", "use native renderer when enabled by policy")
         .option("--timeout-ms <ms>", "per-command timeout budget where supported")

@@ -21,13 +21,13 @@ Requires Node.js 24 or later.
 Recommended install is the checked release tarball:
 
 ```bash
-npm install -g https://github.com/Aero123421/officegen-CLI/releases/download/v2.4.0/officegen-v2.4.0.tgz
+npm install -g https://github.com/Aero123421/officegen-CLI/releases/download/v2.5.0/officegen-v2.5.0.tgz
 ```
 
 GitHub direct install is also smoke-tested, but use the tarball when an agent or CI needs the most deterministic path:
 
 ```bash
-npm install -g github:Aero123421/officegen-CLI#v2.4.0
+npm install -g github:Aero123421/officegen-CLI#v2.5.0
 ```
 
 The `officegen` package name is not published from this project to the public npm registry, because that name is owned separately on npm.
@@ -159,9 +159,9 @@ Core commands:
 - `diff` - semantic and approximate visual comparison
 - `run` - manifest-driven workflows
 - `critique` - business-quality lint for generated PPTX/DOCX/XLSX
-- `improve` - dry-run improvement suggestions from critique findings
+- `improve` - plan-only improvement suggestions with executable command/EditOps skeletons
 - `benchmark` - optional corpus run/compare reports
-- `asset` - inspect, extract, replace, and repair embedded media
+- `asset` - inspect files, inspect embedded Office media, extract, replace, and repair media
 - `chart` - standalone chart SVG
 - `diagram` - standalone diagram SVG
 
@@ -179,14 +179,22 @@ Enterprise/optional commands are disabled unless enabled by policy:
 
 `renderer doctor` is safe discovery and can report whether LibreOffice headless or Windows Office COM backends are available. Actual native conversion still requires an enterprise/trusted configuration.
 
+Embedded media inspection:
+
+```bash
+officegen asset inspect deck.pptx --embedded --agent --json
+officegen asset extract deck.pptx --images --out .officegen/assets --agent --json
+officegen asset replace deck.pptx --asset ppt/media/image1.png logo.png --out deck-logo.pptx --agent --json
+```
+
 ## Current Capability Level
 
-Officegen v2.4.0 is a practical v2 authoring substrate. It is strongest when an agent needs structured, auditable Office automation rather than free-form binary generation.
+Officegen v2.5.0 is a practical v2 authoring substrate. It is strongest when an agent needs structured, auditable Office automation rather than free-form binary generation.
 
 PPTX:
 
 - Native text, lists, tables, images, callouts, Office chart caches, chart workbook updates, image replacement, fit/crop metadata, bounds edits, and stable object maps.
-- `design capture` and `design apply --strategy theme-only|inspired|faithful` apply real PPTX changes where possible and report limitations.
+- `design capture` records design-pack and capture artifacts; `design apply --strategy theme-only|inspired|faithful` applies real PPTX changes where possible and reports limitations.
 - Master/layout/placeholder handling is conservative and best-effort rather than a full PowerPoint designer.
 
 DOCX:
@@ -222,7 +230,7 @@ Use `--json` for machine-readable output. Responses use the `officegen.envelope@
   "ok": true,
   "command": "capabilities",
   "runId": "...",
-  "cliVersion": "2.4.0",
+  "cliVersion": "2.5.0",
   "capabilitiesHash": "sha256:...",
   "pathsRedacted": true,
   "result": {},
@@ -324,8 +332,23 @@ npm test
 npm run build
 npm run pack:smoke
 npm run github-install:smoke
-npm run github-install:remote-smoke
+npm run release-tarball:smoke
 npm run remediation:check
+```
+
+After pushing the release commit, but before tagging:
+
+```bash
+npm run github-install:head-smoke
+OFFICEGEN_GITHUB_INSTALL_SPEC=github:Aero123421/officegen-CLI#<commit-sha> npm run github-install:smoke
+```
+
+Post-tag checks:
+
+```bash
+npm run github-install:tag-smoke
+npm run github-install:remote-smoke
+OFFICEGEN_RELEASE_TARBALL_SPEC=https://github.com/Aero123421/officegen-CLI/releases/download/v2.5.0/officegen-v2.5.0.tgz npm run release-tarball:smoke
 ```
 
 Optional public corpus benchmark:
@@ -333,8 +356,8 @@ Optional public corpus benchmark:
 ```bash
 npm run benchmark:fetch
 npm run benchmark:review
-officegen benchmark run --report-out .officegen/benchmark-results/v2.4.0.json --agent --json
-officegen benchmark compare old.json .officegen/benchmark-results/v2.4.0.json --json
+officegen benchmark run --manifest benchmarks/office-corpus/manifest.json --report-out .officegen/benchmark-results/v2.5.0.json --agent --json
+officegen benchmark compare old.json .officegen/benchmark-results/v2.5.0.json --json
 ```
 
 The benchmark downloads public corpus files into `.officegen/benchmark-corpus/`; Office/PDF binaries are not committed to the repository.
@@ -344,7 +367,7 @@ Version bump:
 ```bash
 npm run version:bump -- patch
 npm run version:bump -- minor
-npm run version:bump -- 2.4.0
+npm run version:bump -- 2.5.0
 npm run version:check
 ```
 

@@ -1,6 +1,6 @@
 {
   "name": "officegen",
-  "version": "2.4.0",
+  "version": "2.5.0",
   "private": false,
   "description": "Officegen CLI",
   "license": "MIT",
@@ -14,6 +14,7 @@
   "scripts": {
     "build": "tsc -b packages/core packages/formats packages/optional packages/cli && node scripts/patch-dist-imports.mjs",
     "clean": "node scripts/clean.mjs",
+    "prepare": "node scripts/prepare-check.mjs",
     "prepack": "node scripts/prepare-check.mjs",
     "test": "vitest run",
     "typecheck": "tsc -b packages/core packages/formats packages/optional packages/cli --pretty false",
@@ -21,7 +22,10 @@
     "binary:smoke": "node scripts/binary-smoke.mjs",
     "pack:smoke": "node scripts/pack-smoke.mjs",
     "github-install:smoke": "node scripts/github-install-smoke.mjs",
+    "github-install:head-smoke": "node scripts/github-install-smoke.mjs --head --expected-version current",
+    "github-install:tag-smoke": "node scripts/github-install-smoke.mjs --remote",
     "github-install:remote-smoke": "node scripts/github-install-smoke.mjs --remote",
+    "release-tarball:smoke": "node scripts/release-tarball-smoke.mjs",
     "benchmark:fetch": "node scripts/benchmark-fetch.mjs",
     "benchmark:review": "node scripts/benchmark-review.mjs",
     "remediation:check": "node scripts/check-remediation-matrix.mjs",
@@ -47,6 +51,7 @@
     "scripts/prepare-check.mjs",
     "scripts/patch-dist-imports.mjs",
     "scripts/github-install-smoke.mjs",
+    "scripts/release-tarball-smoke.mjs",
     "benchmarks/office-corpus/manifest.json",
     "docs/reviews/*.md"
   ],
