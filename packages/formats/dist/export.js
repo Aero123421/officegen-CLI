@@ -129,6 +129,15 @@ function result(from, options, bytes, caveats) {
         caveats
     };
 }
+export const MIN_NATIVE_RENDERER_TIMEOUT_MS = 1000;
+export const DEFAULT_NATIVE_RENDERER_TIMEOUT_MS = 120000;
+export function resolveNativeRendererTimeoutMs(timeoutMs) {
+    if (timeoutMs === undefined)
+        return DEFAULT_NATIVE_RENDERER_TIMEOUT_MS;
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0)
+        return DEFAULT_NATIVE_RENDERER_TIMEOUT_MS;
+    return Math.max(MIN_NATIVE_RENDERER_TIMEOUT_MS, Math.trunc(timeoutMs));
+}
 async function exportOfficeToPdfNative(input, options) {
     if (!input.path) {
         throw new OfficegenError("EXPORT_UNSUPPORTED", "Native Office-to-PDF export requires an input file path.");
@@ -147,6 +156,7 @@ async function exportOfficeToPdfNative(input, options) {
     }
     const outDir = options.out ? path.dirname(options.out) : await mkdtemp(path.join(os.tmpdir(), "officegen-pdf-"));
     const cleanup = options.out ? undefined : outDir;
+    const timeoutMs = resolveNativeRendererTimeoutMs(options.timeoutMs);
     try {
         await runProcess(executable, [
             "--headless",
@@ -155,7 +165,7 @@ async function exportOfficeToPdfNative(input, options) {
             "--outdir",
             outDir,
             input.path
-        ]);
+        ], timeoutMs);
         const generated = await findConvertedPdf(outDir, input.path);
         const pdf = await PDFDocument.load(await readFile(generated), { ignoreEncryption: true });
         const bytes = await pdf.save({ useObjectStreams: false });
@@ -203,7 +213,7 @@ async function exportOfficeToPdfWithCom(input, options, renderer, caveats) {
             outPath,
             "-ReportPath",
             reportPath
-        ], 120000);
+        ], resolveNativeRendererTimeoutMs(options.timeoutMs));
         if (!result.ok) {
             throw new OfficegenError("EXPORT_UNSUPPORTED", `Office COM native export failed. ${result.stderr || result.stdout}`);
         }
@@ -294,19 +304,34 @@ async function canRun(command) {
         child.on("exit", (code) => resolve(code === 0));
     });
 }
-async function runProcess(command, args) {
+async function runProcess(command, args, timeoutMs = DEFAULT_NATIVE_RENDERER_TIMEOUT_MS) {
     return new Promise((resolve, reject) => {
         const child = spawn(command, args, { windowsHide: true, env: safeExternalEnv() });
         let stderr = "";
+        let settled = false;
+        let timer;
+        const finish = (callback) => {
+            if (settled)
+                return;
+            settled = true;
+            clearTimeout(timer);
+            callback();
+        };
+        timer = setTimeout(() => {
+            child.kill();
+            finish(() => reject(new OfficegenError("EXPORT_UNSUPPORTED", `LibreOffice conversion timed out after ${timeoutMs}ms.`)));
+        }, timeoutMs);
         child.stderr.on("data", (chunk) => {
             stderr += String(chunk);
         });
-        child.on("error", reject);
+        child.on("error", (error) => finish(() => reject(error)));
         child.on("exit", (code) => {
-            if (code === 0)
-                resolve();
-            else
-                reject(new OfficegenError("EXPORT_UNSUPPORTED", `LibreOffice conversion failed with exit code ${code}. ${stderr.trim()}`));
+            finish(() => {
+                if (code === 0)
+                    resolve();
+                else
+                    reject(new OfficegenError("EXPORT_UNSUPPORTED", `LibreOffice conversion failed with exit code ${code}. ${stderr.trim()}`));
+            });
         });
     });
 }
@@ -315,19 +340,26 @@ function runProcessCapture(command, args, timeoutMs) {
         const child = spawn(command, args, { windowsHide: true, env: safeExternalEnv() });
         let stdout = "";
         let stderr = "";
-        const timer = setTimeout(() => {
+        let settled = false;
+        let timer;
+        const finish = (value) => {
+            if (settled)
+                return;
+            settled = true;
+            clearTimeout(timer);
+            resolve(value);
+        };
+        timer = setTimeout(() => {
             child.kill();
-            resolve({ ok: false, stdout, stderr: `${stderr}\nTimed out after ${timeoutMs}ms.`.trim() });
+            finish({ ok: false, stdout, stderr: `${stderr}\nTimed out after ${timeoutMs}ms.`.trim() });
         }, timeoutMs);
         child.stdout.on("data", (chunk) => { stdout += String(chunk); });
         child.stderr.on("data", (chunk) => { stderr += String(chunk); });
         child.on("error", (error) => {
-            clearTimeout(timer);
-            resolve({ ok: false, stdout, stderr: error.message });
+            finish({ ok: false, stdout, stderr: error.message });
         });
         child.on("exit", (code) => {
-            clearTimeout(timer);
-            resolve({ ok: code === 0, stdout, stderr, code });
+            finish({ ok: code === 0, stdout, stderr, code });
         });
     });
 }

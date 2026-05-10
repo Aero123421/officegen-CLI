@@ -1,6 +1,6 @@
 {
   "name": "officegen",
-  "version": "2.3.0",
+  "version": "2.4.0",
   "private": false,
   "description": "Officegen CLI",
   "license": "MIT",
@@ -25,6 +25,10 @@
     "benchmark:fetch": "node scripts/benchmark-fetch.mjs",
     "benchmark:review": "node scripts/benchmark-review.mjs",
     "remediation:check": "node scripts/check-remediation-matrix.mjs",
+    "contract:check": "node scripts/check-contract.mjs",
+    "schema:coverage": "node scripts/check-schema-coverage.mjs",
+    "security:fixtures": "node scripts/security-fixtures.mjs",
+    "benchmark:local-fixtures": "node scripts/benchmark-local-fixtures.mjs",
     "version:bump": "node scripts/version-bump.mjs",
     "version:check": "node scripts/version-bump.mjs --check"
   },
@@ -39,6 +43,7 @@
     "packages/*/package.json",
     "packages/*/dist/**/*.js",
     "packages/*/dist/**/*.d.ts",
+    "!packages/*/dist/**/*.test.*",
     "scripts/prepare-check.mjs",
     "scripts/patch-dist-imports.mjs",
     "scripts/github-install-smoke.mjs",

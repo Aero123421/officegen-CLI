@@ -8,6 +8,7 @@ export interface ExportOptions {
     mode?: ExportMode;
     pages?: number[];
     config?: OfficegenConfig;
+    timeoutMs?: number;
 }
 export interface PdfOperationOptions {
     out?: string;
@@ -35,6 +36,9 @@ export declare const exportFile: typeof exportDocument;
 export declare function mergePdfs(inputs: InputLike[], options?: PdfOperationOptions): Promise<ExportResult>;
 export declare function splitPdf(input: InputLike, ranges: Array<number[]>, options?: PdfOperationOptions): Promise<Array<ExportResult>>;
 export declare function reorderPdf(input: InputLike, order: number[], options?: PdfOperationOptions): Promise<ExportResult>;
+export declare const MIN_NATIVE_RENDERER_TIMEOUT_MS = 1000;
+export declare const DEFAULT_NATIVE_RENDERER_TIMEOUT_MS = 120000;
+export declare function resolveNativeRendererTimeoutMs(timeoutMs?: number): number;
 export interface NativeRendererDoctorResult {
     schema: "officegen.renderer.doctor@2.2";
     platform: NodeJS.Platform;

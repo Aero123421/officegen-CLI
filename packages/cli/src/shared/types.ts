@@ -59,6 +59,12 @@ export interface Envelope {
   pathsRedacted: boolean;
   result?: unknown;
   error?: CliErrorPayload;
+  executionOk?: boolean;
+  objectiveOk?: boolean;
+  mutationStatus?: "changed" | "noop" | "plan_only" | "failed" | "not_applicable";
+  artifactStatus?: "complete" | "missing" | "not_expected";
+  readiness?: "pass" | "pass_with_environment_gap" | "warning" | "partial" | "blocked";
+  partial?: boolean;
   truncated?: boolean;
   warnings: unknown[];
   diagnostics: unknown[];

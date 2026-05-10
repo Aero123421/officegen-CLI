@@ -5,9 +5,15 @@ import { ENVELOPE_SCHEMA, type CliErrorPayload, type Envelope, type RuntimeConte
 export function makeEnvelope(context: RuntimeContext, command: string, data: unknown, now: Date): Envelope {
   const result = redactForJson(data, context);
   const warnings = [...contextWarnings(context), ...extractArrayField(result, "warnings")];
-  const artifacts = extractArrayField(result, "artifacts");
-  const missingArtifact = artifacts.find((artifact) => artifact && typeof artifact === "object" && (artifact as Record<string, unknown>).exists === false) as Record<string, unknown> | undefined;
-  if (missingArtifact) {
+  const diagnostics = extractArrayField(result, "diagnostics");
+  const objective = evaluateObjective(context, command, result, extractArrayField(result, "artifacts"));
+  if (!objective.ok) {
+    const error = normalizeCliError({
+      code: objective.code,
+      command,
+      message: objective.message,
+      details: { ...objective.details, artifacts: objective.artifacts }
+    });
     return {
       schema: ENVELOPE_SCHEMA,
       ok: false,
@@ -16,18 +22,19 @@ export function makeEnvelope(context: RuntimeContext, command: string, data: unk
       cliVersion: OFFICEGEN_CLI_VERSION,
       capabilitiesHash: context.capabilitiesHash,
       pathsRedacted: true,
+      executionOk: true,
+      objectiveOk: false,
+      mutationStatus: objective.mutationStatus,
+      artifactStatus: objective.artifactStatus,
+      readiness: objective.readiness,
+      partial: objective.partial,
       result,
-      error: normalizeCliError({
-        code: "EDIT_TRANSACTION_FAILED",
-        command,
-        message: "Expected output artifact was not created.",
-        details: { artifacts }
-      }),
+      error,
       warnings,
-      diagnostics: extractArrayField(result, "diagnostics"),
-      artifacts,
+      diagnostics,
+      artifacts: objective.artifacts,
       availableCommands: availableCommands(context),
-      nextSuggestedCommands: errorSuggestedCommands(context, { code: "EDIT_TRANSACTION_FAILED", command, message: "Expected output artifact was not created.", details: { artifacts } })
+      nextSuggestedCommands: errorSuggestedCommands(context, error)
     };
   }
   return {
@@ -38,10 +45,16 @@ export function makeEnvelope(context: RuntimeContext, command: string, data: unk
     cliVersion: OFFICEGEN_CLI_VERSION,
     capabilitiesHash: context.capabilitiesHash,
     pathsRedacted: true,
+    executionOk: true,
+    objectiveOk: objective.objectiveOk,
+    mutationStatus: objective.mutationStatus,
+    artifactStatus: objective.artifactStatus,
+    readiness: objective.readiness,
+    partial: objective.partial,
     result,
     warnings,
-    diagnostics: extractArrayField(result, "diagnostics"),
-    artifacts,
+    diagnostics,
+    artifacts: objective.artifacts,
     availableCommands: availableCommands(context),
     nextSuggestedCommands: nextSuggestedCommands(context)
   };
@@ -63,6 +76,12 @@ export function makeErrorEnvelope(
     cliVersion: OFFICEGEN_CLI_VERSION,
     capabilitiesHash: context.capabilitiesHash,
     pathsRedacted: true,
+    executionOk: false,
+    objectiveOk: false,
+    mutationStatus: "failed",
+    artifactStatus: artifacts.some((artifact) => artifact && typeof artifact === "object" && (artifact as Record<string, unknown>).exists === false) ? "missing" : "not_expected",
+    readiness: "blocked",
+    partial: false,
     error: normalizeCliError(error),
     warnings: contextWarnings(context),
     diagnostics: [],
@@ -74,6 +93,7 @@ export function makeErrorEnvelope(
 
 export function writeResult(context: RuntimeContext, envelope: Envelope, writer: (text: string) => void): void {
   const safeEnvelope = redactForJson(envelope, context) as Envelope;
+  if (!safeEnvelope.ok && process.exitCode === undefined) process.exitCode = exitCodeForError(safeEnvelope.error?.code);
   if (context.json) {
     writer(JSON.stringify(applyAgentBudget(context, safeEnvelope), null, 2));
     return;
@@ -132,6 +152,174 @@ function extractArrayField(value: unknown, field: string): unknown[] {
   return [];
 }
 
+interface ObjectiveEvaluation {
+  ok: boolean;
+  objectiveOk: boolean;
+  code: string;
+  message: string;
+  details?: Record<string, unknown>;
+  artifacts: unknown[];
+  mutationStatus: NonNullable<Envelope["mutationStatus"]>;
+  artifactStatus: NonNullable<Envelope["artifactStatus"]>;
+  readiness: NonNullable<Envelope["readiness"]>;
+  partial: boolean;
+}
+
+function evaluateObjective(context: RuntimeContext, command: string, result: unknown, initialArtifacts: unknown[]): ObjectiveEvaluation {
+  const record = asRecord(result);
+  const schema = typeof record.schema === "string" ? record.schema : "";
+  const outArg = optionFromArgv(context.argv, "--out");
+  const dryRun = hasFlagArg(context.argv, "--dry-run") || record.planOnly === true || record.dryRun === true;
+  const artifacts = ensureRequestedArtifact(initialArtifacts, outArg, record, command, dryRun);
+  const missingArtifact = artifacts.find((artifact) => artifact && typeof artifact === "object" && (artifact as Record<string, unknown>).exists === false) as Record<string, unknown> | undefined;
+  const readiness = readinessFor(record);
+  const partial = record.partial === true || record.truncated === true || record.status === "truncated";
+  const defaultState: Omit<ObjectiveEvaluation, "ok" | "objectiveOk" | "code" | "message"> = {
+    details: undefined,
+    artifacts,
+    mutationStatus: mutationStatusFor(command, record, dryRun),
+    artifactStatus: missingArtifact ? "missing" : artifacts.length ? "complete" : "not_expected",
+    readiness,
+    partial
+  };
+
+  if (record.status === "not_implemented" || record.status === "wired") {
+    return objectiveFailure(defaultState, "FEATURE_NOT_IMPLEMENTED", `${command} is not implemented as a mutating command.`, { status: record.status });
+  }
+  if (record.planOnly === true && outArg && isOfficeOutputPath(outArg)) {
+    return objectiveFailure(defaultState, "FEATURE_NOT_IMPLEMENTED", `${command} produced a plan-only result for an Office output path.`, {
+      out: outArg,
+      planOnly: true,
+      expectedResult: "No Office artifact was created; use a JSON plan output path or a supported mutating command."
+    });
+  }
+  if (schema === "officegen.edit.result@1.2") {
+    const errors = extractArrayField(record, "errors");
+    if (errors.length) {
+      const code = editErrorCode(errors);
+      return objectiveFailure(defaultState, code, code === "SELECTOR_AMBIGUOUS" ? "Edit selector matched multiple objects." : code === "SELECTOR_NOT_FOUND" ? "Edit selector matched no editable object." : "Edit transaction failed.", { errors });
+    }
+    if (!dryRun && outArg && (record.changed === false || Number(record.applied ?? 0) <= 0)) {
+      return objectiveFailure(defaultState, "EDIT_TRANSACTION_FAILED", "Edit requested an output artifact but no operation was applied.", { changed: record.changed, applied: record.applied });
+    }
+  }
+  if (schema === "officegen.repair.result@1.2" && !dryRun && outArg && (record.changed === false || Number(record.applied ?? 0) <= 0)) {
+    return objectiveFailure(defaultState, "REPAIR_NO_SAFE_OPS", "No automatically safe repair operations were available.", { changed: record.changed, applied: record.applied });
+  }
+  if (missingArtifact) {
+    return objectiveFailure(defaultState, "EXPECTED_ARTIFACT_MISSING", "Expected output artifact was not created.", { missingArtifact });
+  }
+  const resultError = asRecord(record.error);
+  if (typeof resultError.code === "string") {
+    return objectiveFailure(defaultState, resultError.code, typeof resultError.message === "string" ? resultError.message : "Command objective failed.", { error: resultError });
+  }
+  if (schema.startsWith("officegen.run.") && Array.isArray(record.steps) && record.steps.some((step) => asRecord(step).ok === false)) {
+    const failedStep = record.steps.map(asRecord).find((step) => step.ok === false);
+    const stepError = asRecord(failedStep?.error);
+    const code = typeof stepError.code === "string" ? stepError.code : "RUN_STEP_FAILED";
+    const message = typeof stepError.message === "string" ? stepError.message : "One or more workflow steps failed.";
+    return objectiveFailure(defaultState, code, message, { steps: record.steps, failedStep });
+  }
+  if (Array.isArray(record.missingExpectedArtifacts) && record.missingExpectedArtifacts.length) {
+    return objectiveFailure(defaultState, "EXPECTED_ARTIFACT_MISSING", "One or more expected artifacts were not created.", { missingExpectedArtifacts: record.missingExpectedArtifacts });
+  }
+  if (schema === "officegen.verify.result@1.2" && (record.readiness === "blocked" || record.partial === true)) {
+    return objectiveFailure(defaultState, record.partial === true ? "TIMEOUT" : "RUN_STEP_FAILED", "Verification did not reach a passing readiness state.", { readiness: record.readiness, partial: record.partial });
+  }
+
+  return {
+    ok: true,
+    objectiveOk: !partial && readiness !== "blocked",
+    code: "",
+    message: "",
+    ...defaultState
+  };
+}
+
+function objectiveFailure(
+  state: Omit<ObjectiveEvaluation, "ok" | "objectiveOk" | "code" | "message">,
+  code: string,
+  message: string,
+  details?: Record<string, unknown>
+): ObjectiveEvaluation {
+  return {
+    ok: false,
+    objectiveOk: false,
+    code,
+    message,
+    ...state,
+    details,
+    mutationStatus: state.mutationStatus === "not_applicable" ? "failed" : state.mutationStatus,
+    readiness: "blocked"
+  };
+}
+
+function ensureRequestedArtifact(artifacts: unknown[], outArg: string | undefined, record: Record<string, unknown>, command: string, dryRun: boolean): unknown[] {
+  if (!outArg || dryRun) return artifacts;
+  if (artifacts.some((artifact) => artifact && typeof artifact === "object" && String((artifact as Record<string, unknown>).path ?? "") === outArg)) return artifacts;
+  if (typeof record.out === "string") return artifacts;
+  if (!isMutationCommand(command)) return artifacts;
+  return [
+    ...artifacts,
+    { path: outArg, exists: false, kind: "output", sourceCommand: command, reason: "output artifact was requested but the result did not report an output path" }
+  ];
+}
+
+function editErrorCode(errors: unknown[]): string {
+  const reasons = errors.map((error) => String(asRecord(error).reason ?? asRecord(error).message ?? ""));
+  if (reasons.some((reason) => reason.includes("ambiguous"))) return "SELECTOR_AMBIGUOUS";
+  if (reasons.some((reason) => reason.includes("not-found") || reason.includes("not found"))) return "SELECTOR_NOT_FOUND";
+  return "EDIT_TRANSACTION_FAILED";
+}
+
+function mutationStatusFor(command: string, record: Record<string, unknown>, dryRun: boolean): NonNullable<Envelope["mutationStatus"]> {
+  if (dryRun || record.planOnly === true) return "plan_only";
+  if (!isMutationCommand(command)) return "not_applicable";
+  if (record.changed === true || Number(record.applied ?? 0) > 0) return "changed";
+  if (record.changed === false || Number(record.applied ?? 0) === 0) return "noop";
+  return "not_applicable";
+}
+
+function readinessFor(record: Record<string, unknown>): NonNullable<Envelope["readiness"]> {
+  const readiness = String(record.readiness ?? "");
+  if (readiness === "pass" || readiness === "pass_with_environment_gap" || readiness === "warning" || readiness === "partial" || readiness === "blocked") return readiness;
+  if (record.partial === true || record.status === "truncated") return "partial";
+  return "pass";
+}
+
+function isMutationCommand(command: string): boolean {
+  const normalized = command.split(/\s+/).slice(0, 2).join(" ");
+  return /^(edit|repair|render|export|asset replace|template fill|design apply|layout apply)/.test(normalized) || command.startsWith("edit") || command.startsWith("repair") || command.startsWith("render") || command.startsWith("export");
+}
+
+function isOfficeOutputPath(filePath: string): boolean {
+  return /\.(pptx|docx|xlsx|pdf)$/i.test(filePath);
+}
+
+function optionFromArgv(argv: string[], name: string): string | undefined {
+  const index = argv.indexOf(name);
+  if (index < 0) return undefined;
+  const value = argv[index + 1];
+  return value && !value.startsWith("-") ? value : undefined;
+}
+
+function hasFlagArg(argv: string[], name: string): boolean {
+  return argv.includes(name);
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function exitCodeForError(code: string | undefined): number {
+  if (!code) return 1;
+  if (code.startsWith("SECURITY_") || code === "BENCHMARK_MANIFEST_PATH_DENIED") return 4;
+  if (code.startsWith("FEATURE_")) return 5;
+  if (code === "UNKNOWN_COMMAND" || code === "UNKNOWN_OPTION" || code === "OPTION_NOT_EFFECTIVE") return 2;
+  if (code === "INPUT_NOT_FOUND" || code === "INPUT_PARSE_ERROR") return 3;
+  return 3;
+}
+
 function applyAgentBudget(context: RuntimeContext, envelope: Envelope): Envelope {
   if (!context.agent || !context.jsonBudgetBytes) return envelope;
   const bytes = Buffer.byteLength(JSON.stringify(envelope, null, 2), "utf8");
@@ -143,6 +331,10 @@ function applyAgentBudget(context: RuntimeContext, envelope: Envelope): Envelope
   const counts = result && typeof result === "object" ? summarizeCounts(result as Record<string, unknown>) : {};
   const compact: Envelope = {
     ...envelope,
+    objectiveOk: false,
+    readiness: "partial",
+    partial: true,
+    truncated: true,
     result: {
       schema: "officegen.progressive-disclosure@1.2",
       status: "truncated",
@@ -223,12 +415,20 @@ function errorSuggestedCommands(context: RuntimeContext, error: CliErrorPayload)
   } else if (error.code === "SCHEMA_INVALID") {
     suggestions.push("officegen schema get officegen.ir.document@1.2 --json");
     suggestions.push("officegen scaffold --kind pptx --title \"Draft\" --out draft.ir.json --json");
+  } else if (error.code === "EXPECTED_ARTIFACT_MISSING") {
+    suggestions.push(`officegen run <workflow.json> --manifest .officegen/runs/run-manifest.json --log-jsonl .officegen/runs/events.jsonl${agent} --json`);
+    suggestions.push(`officegen inspect <expected-output> --depth summary${agent} --json`);
+  } else if (error.code === "REPAIR_NO_SAFE_OPS") {
+    suggestions.push(`officegen diagnose <input> --report-out .officegen/runs/diagnose.json${agent} --json`);
+    suggestions.push(`officegen edit <input> --ops suggested-ops.json --dry-run --resolve-selectors${agent} --json`);
+  } else if (error.code === "TIMEOUT") {
+    suggestions.push(`officegen ${command || "<command>"} --timeout-ms 120000${agent} --json`);
   }
   return [...new Set([...suggestions, ...nextSuggestedCommands(context)])];
 }
 
 function recommendedNarrowCommands(command: string, context: RuntimeContext): string[] {
-  const agent = context.agent ? " --agent" : "";
+  const agent = context.agent ? " --agent --strict-json" : "";
   if (command.startsWith("inspect")) {
     return [
       `officegen inspect <input> --depth summary --object-map-limit 50${agent} --json`,
@@ -239,8 +439,8 @@ function recommendedNarrowCommands(command: string, context: RuntimeContext): st
   }
   if (command.startsWith("view")) {
     return [
-      "officegen view <input> --max-pages 3 --object-map-limit 50 --out .officegen/runs/view --json",
-      "officegen view <pdf> --pages 1-3 --out .officegen/runs/pdf-view --json"
+      `officegen view <input> --max-pages 3 --object-map-limit 50 --out .officegen/runs/view${agent} --json`,
+      `officegen view <pdf> --pages 1-3 --out .officegen/runs/pdf-view${agent} --json`
     ];
   }
   if (command.startsWith("verify")) {

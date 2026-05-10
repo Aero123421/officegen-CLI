@@ -1,6 +1,7 @@
 import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import JSZip from "jszip";
 import { afterEach, describe, expect, it } from "vitest";
 import { validateSchema } from "@officegen/core";
 import { runCli } from "../src/program.js";
@@ -31,6 +32,13 @@ async function tempWorkspace(config?: unknown): Promise<string> {
     await writeFile(path.join(configDir, "config.json"), `${JSON.stringify(config, null, 2)}\n`, "utf8");
   }
   return unique;
+}
+
+async function writeBenchmarkManifest(cwd: string, manifest: unknown): Promise<string> {
+  const manifestPath = path.join(cwd, "benchmarks", "office-corpus", "manifest.json");
+  await mkdir(path.dirname(manifestPath), { recursive: true });
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+  return manifestPath;
 }
 
 function parseEnvelope(captured: Captured): any {
@@ -151,6 +159,47 @@ describe("officegen CLI command surface", () => {
     expect(envelope.ok).toBe(true);
     expect(envelope.result.schema).toBe("officegen.schema.definition@1.2");
     expect(envelope.result.id).toBe("officegen.ir.document@1.2");
+  });
+
+  it("denies absolute benchmark manifest option paths with benchmark path policy code", async () => {
+    const cwd = await tempWorkspace();
+    const manifestPath = await writeBenchmarkManifest(cwd, { documents: [] });
+    const captured = await run(["benchmark", "--manifest", manifestPath, "--json"], cwd);
+    const envelope = parseEnvelope(captured);
+
+    expect(envelope.ok).toBe(false);
+    expect(envelope.error.code).toBe("BENCHMARK_MANIFEST_PATH_DENIED");
+    expect(envelope.error.details.field).toBe("--manifest");
+    expect(process.exitCode).toBe(4);
+  });
+
+  it("denies benchmark storageRoot traversal with benchmark path policy code", async () => {
+    const cwd = await tempWorkspace();
+    await writeBenchmarkManifest(cwd, { storageRoot: "../benchmark-corpus", documents: [] });
+    const captured = await run(["benchmark", "--json"], cwd);
+    const envelope = parseEnvelope(captured);
+
+    expect(envelope.ok).toBe(false);
+    expect(envelope.error.code).toBe("BENCHMARK_MANIFEST_PATH_DENIED");
+    expect(envelope.error.details.field).toBe("storageRoot");
+    expect(process.exitCode).toBe(4);
+  });
+
+  it("denies benchmark document absolute and traversal paths with benchmark path policy code", async () => {
+    for (const documentPath of [path.resolve("outside.pptx"), "../../outside.pptx"]) {
+      const cwd = await tempWorkspace();
+      await writeBenchmarkManifest(cwd, {
+        storageRoot: ".officegen/benchmark-corpus",
+        documents: [{ id: "bad", kind: "pptx", path: documentPath }]
+      });
+      const captured = await run(["benchmark", "--json"], cwd);
+      const envelope = parseEnvelope(captured);
+
+      expect(envelope.ok).toBe(false);
+      expect(envelope.error.code).toBe("BENCHMARK_MANIFEST_PATH_DENIED");
+      expect(envelope.error.details.field).toBe("documents[0].path");
+      expect(process.exitCode).toBe(4);
+    }
   });
 
   it("writes scaffold IR while still returning a JSON envelope", async () => {
@@ -276,7 +325,9 @@ describe("officegen CLI command surface", () => {
 
     expect(envelope.ok).toBe(true);
     expect(envelope.result.schema).toBe("officegen.progressive-disclosure@1.2");
-    expect(envelope.truncated).toBeUndefined();
+    expect(envelope.truncated).toBe(true);
+    expect(envelope.partial).toBe(true);
+    expect(envelope.readiness).toBe("partial");
     expect(validateSchema("officegen.envelope@1.2", envelope).ok).toBe(true);
     expect(envelope.warnings).toEqual(expect.arrayContaining([
       expect.objectContaining({ code: "AGENT_JSON_BUDGET_EXCEEDED" })
@@ -438,11 +489,12 @@ describe("officegen CLI command surface", () => {
     const envelope = parseEnvelope(captured);
 
     expect(envelope.ok).toBe(true);
-    expect(envelope.result.schema).toBe("officegen.run.result@2.3");
+    expect(envelope.result.schema).toBe("officegen.run.result@2.4");
     expect(envelope.result.steps).toHaveLength(3);
     expect(envelope.result.logJsonl).toContain("run-log.jsonl");
     expect(envelope.result.manifestOut).toContain("run-manifest.json");
-    expect(envelope.result.manifestPath).toContain("manifest.json");
+    expect(envelope.result.runManifestPath).toContain("run-manifest.json");
+    expect(envelope.result.coreManifestPath).toContain("manifest.json");
     const runManifest = JSON.parse(await readFile(path.join(cwd, ".officegen", "run-manifest.json"), "utf8"));
     expect(runManifest.missingExpectedArtifacts).toHaveLength(0);
     expect(await readFile(path.join(cwd, ".officegen", "outputs", "deck.pptx"))).toBeInstanceOf(Buffer);
@@ -492,6 +544,55 @@ describe("officegen CLI command surface", () => {
 
     expect(envelope.ok).toBe(false);
     expect(envelope.error.code).toBe("SECURITY_PATH_OUTSIDE_ROOT");
+    expect(process.exitCode).toBe(4);
+  });
+
+  it("blocks mutating risky OOXML packages by default", async () => {
+    const cwd = await tempWorkspace();
+    const zip = new JSZip();
+    zip.file("[Content_Types].xml", "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/word/document.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml\"/></Types>");
+    zip.file("_rels/.rels", "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"word/document.xml\"/></Relationships>");
+    zip.file("word/document.xml", "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r><w:t>Hello</w:t></w:r></w:p></w:body></w:document>");
+    zip.file("word/vbaProject.bin", new Uint8Array([1, 2, 3]));
+    await writeFile(path.join(cwd, "risky.docx"), await zip.generateAsync({ type: "uint8array" }));
+    await writeFile(path.join(cwd, "ops.json"), `${JSON.stringify({
+      schema: "officegen.edit.ops@1.2",
+      target: "docx",
+      ops: [{ op: "replaceText", from: "Hello", to: "Hi" }]
+    })}\n`, "utf8");
+
+    const captured = await run(["edit", "risky.docx", "--ops", "ops.json", "--out", "edited.docx", "--json"], cwd);
+    const envelope = parseEnvelope(captured);
+
+    expect(envelope.ok).toBe(false);
+    expect(envelope.error.code).toBe("SECURITY_RISKY_OOXML_DETECTED");
+    await expect(readFile(path.join(cwd, "edited.docx"))).rejects.toMatchObject({ code: "ENOENT" });
+    expect(process.exitCode).toBe(4);
+  });
+
+  it("blocks run edit default-output mutation for risky OOXML packages", async () => {
+    const cwd = await tempWorkspace();
+    const zip = new JSZip();
+    zip.file("[Content_Types].xml", "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/word/document.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml\"/></Types>");
+    zip.file("_rels/.rels", "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"word/document.xml\"/></Relationships>");
+    zip.file("word/document.xml", "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r><w:t>Hello</w:t></w:r></w:p></w:body></w:document>");
+    zip.file("word/vbaProject.bin", new Uint8Array([1, 2, 3]));
+    await writeFile(path.join(cwd, "risky.docx"), await zip.generateAsync({ type: "uint8array" }));
+    await writeFile(path.join(cwd, "ops.json"), `${JSON.stringify({
+      schema: "officegen.edit.ops@1.2",
+      target: "docx",
+      ops: [{ op: "replaceText", from: "Hello", to: "Hi" }]
+    })}\n`, "utf8");
+    await writeFile(path.join(cwd, "plan.json"), `${JSON.stringify({
+      steps: [{ id: "edit-risky", command: "edit", input: "risky.docx", ops: "ops.json" }]
+    })}\n`, "utf8");
+
+    const captured = await run(["run", "plan.json", "--json"], cwd);
+    const envelope = parseEnvelope(captured);
+
+    expect(envelope.ok).toBe(false);
+    expect(envelope.error.code).toBe("SECURITY_RISKY_OOXML_DETECTED");
+    expect(envelope.result.runManifestPath).toContain("run-manifest.json");
     expect(process.exitCode).toBe(4);
   });
 

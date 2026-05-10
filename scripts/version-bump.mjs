@@ -62,6 +62,9 @@ async function assertCurrentVersions(expectedVersion, foundIssues) {
   if (!coreTypes.includes(`OFFICEGEN_CLI_VERSION = "${expectedVersion}"`)) {
     foundIssues.push(`${coreTypesPath}: OFFICEGEN_CLI_VERSION is not ${expectedVersion}`);
   }
+  await assertVersionText(coreDistTypesPath, expectedVersion, foundIssues, "OFFICEGEN_CLI_VERSION");
+  await assertVersionText(coreDistDtsPath, expectedVersion, foundIssues, "OFFICEGEN_CLI_VERSION");
+  await assertVersionText(readmePath, expectedVersion, foundIssues, "README release URLs");
 }
 
 async function updatePackageManifests(version) {
@@ -125,6 +128,15 @@ async function readJson(filePath) {
 
 async function readText(filePath) {
   return readFile(path.resolve(filePath), "utf8");
+}
+
+async function assertVersionText(filePath, expectedVersion, foundIssues, label) {
+  try {
+    const text = await readText(filePath);
+    if (!text.includes(expectedVersion)) foundIssues.push(`${filePath}: ${label} does not include ${expectedVersion}`);
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
 }
 
 async function writeJson(filePath, value) {

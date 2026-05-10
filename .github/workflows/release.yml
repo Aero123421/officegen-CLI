@@ -56,6 +56,12 @@ jobs:
       - name: Remediation matrix check
         run: npm run remediation:check
 
+      - name: Contract check
+        run: npm run contract:check
+
+      - name: Schema coverage check
+        run: npm run schema:coverage
+
       - name: npm audit
         run: npm audit --audit-level=moderate
 
@@ -64,6 +70,12 @@ jobs:
 
       - name: Test
         run: npm test
+
+      - name: Security fixtures
+        run: npm run security:fixtures
+
+      - name: Benchmark local fixtures
+        run: npm run benchmark:local-fixtures
 
       - name: Build
         run: npm run build

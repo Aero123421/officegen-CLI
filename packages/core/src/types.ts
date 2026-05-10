@@ -1,5 +1,5 @@
 export const OFFICEGEN_SCHEMA_VERSION = "1.2";
-export const OFFICEGEN_CLI_VERSION = "2.3.0";
+export const OFFICEGEN_CLI_VERSION = "2.4.0";
 export const SCHEMA_REGISTRY_VERSION = "1.2.0";
 
 export type JsonPrimitive = string | number | boolean | null;
@@ -129,9 +129,11 @@ export type ErrorSeverity = "info" | "warning" | "error" | "critical";
 
 export type OfficegenErrorCode =
   | "FEATURE_DISABLED"
+  | "FEATURE_NOT_IMPLEMENTED"
   | "FEATURE_HIDDEN_FROM_AGENT"
   | "UNKNOWN_COMMAND"
   | "UNKNOWN_OPTION"
+  | "OPTION_NOT_EFFECTIVE"
   | "CAPABILITIES_STALE"
   | "INPUT_NOT_FOUND"
   | "INPUT_PARSE_ERROR"
@@ -147,6 +149,8 @@ export type OfficegenErrorCode =
   | "SECURITY_ZIP_BOMB_DETECTED"
   | "SECURITY_XML_ENTITY_DENIED"
   | "SECURITY_MACRO_DETECTED"
+  | "SECURITY_RISKY_OOXML_DETECTED"
+  | "BENCHMARK_MANIFEST_PATH_DENIED"
   | "PLUGIN_NOT_TRUSTED"
   | "PLUGIN_HASH_MISMATCH"
   | "PLUGIN_PERMISSION_DENIED"
@@ -154,6 +158,11 @@ export type OfficegenErrorCode =
   | "SELECTOR_NOT_FOUND"
   | "SELECTOR_AMBIGUOUS"
   | "EDIT_TRANSACTION_FAILED"
+  | "EXPECTED_ARTIFACT_MISSING"
+  | "REPAIR_NO_SAFE_OPS"
+  | "RUN_STEP_FAILED"
+  | "TIMEOUT"
+  | "OOXML_VALIDATION_FAILED"
   | "IDEMPOTENCY_REPLAY"
   | "TEXT_OVERFLOW"
   | "IMAGE_MISSING"

@@ -3,7 +3,7 @@ import { OFFICEGEN_CLI_VERSION } from "@officegen/core";
 import { commandFromArgv, positionalArgs } from "../shared/argv.js";
 import { makeEnvelope, writeResult } from "../shared/envelope.js";
 import { COMMAND_METADATA, metadataFor } from "../shared/metadata.js";
-import type { FeatureKey, RuntimeContext } from "../shared/types.js";
+import { CliFailure, type FeatureKey, type RuntimeContext } from "../shared/types.js";
 import {
   agentPayload,
   assetPayload,
@@ -326,11 +326,11 @@ function registerConfig(program: Command, context: RuntimeContext, stdout: (text
     writeResult(context, makeEnvelope(context, commandFromArgv(context.argv), configPayload(context), now), stdout);
   }));
   config.addCommand(baseCommand("set", "set config value").action(async () => {
-    writeResult(context, makeEnvelope(context, commandFromArgv(context.argv), {
-      schema: "officegen.config.result@1.2",
-      status: "wired",
-      message: "config set is registered; persistent writes are delegated to the core config API."
-    }, now), stdout);
+    throw new CliFailure({
+      code: "FEATURE_NOT_IMPLEMENTED",
+      command: "config set",
+      message: "config set does not persist configuration yet. Use config show to inspect active settings."
+    }, 5);
   }));
   program.addCommand(config);
 }

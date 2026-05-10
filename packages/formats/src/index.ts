@@ -10,6 +10,7 @@ export * from "./diagnose.js";
 export * from "./repair.js";
 export * from "./diff.js";
 export * from "./verify.js";
+export * from "./ooxml/validator.js";
 export {
   getLoadedZipSafetyReport,
   inspectInputZipSafety,

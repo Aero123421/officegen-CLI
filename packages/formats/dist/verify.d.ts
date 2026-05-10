@@ -28,6 +28,7 @@ export interface VerifyResult {
         ok: boolean;
         message?: string;
         artifact?: string;
+        repairDialogExpected?: boolean;
     };
     visual?: {
         fidelity: "approximate" | "native";

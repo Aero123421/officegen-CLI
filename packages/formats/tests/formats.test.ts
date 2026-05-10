@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import JSZip from "jszip";
 import { PDFDocument } from "pdf-lib";
 import { getBuiltinConfig } from "@officegen/core";
-import { diffDocuments, diagnose, edit, exportDocument, extractAssets, inspect, inspectInputZipSafety, render, renderChart, renderDiagram, replaceAsset, resolveEditSelectors, verify, view } from "../src/index.js";
+import { DEFAULT_NATIVE_RENDERER_TIMEOUT_MS, MIN_NATIVE_RENDERER_TIMEOUT_MS, diffDocuments, diagnose, edit, exportDocument, extractAssets, inspect, inspectInputZipSafety, render, renderChart, renderDiagram, replaceAsset, resolveEditSelectors, resolveNativeRendererTimeoutMs, verify, view } from "../src/index.js";
 
 describe("@officegen/formats MVP", () => {
   it("renders and inspects a basic PPTX with untrusted text separation", async () => {
@@ -262,6 +262,23 @@ describe("@officegen/formats MVP", () => {
     expect(valuesByRef.get("A2")).toBe("123.45");
     expect(valuesByRef.get("B2")).toBe("TRUE");
     expect(valuesByRef.get("C2")).toBe("");
+  });
+
+  it("preserves XLSX styled cell attributes when setting a scalar value", async () => {
+    const rendered = await render({ title: "Styled", sheets: [{ rows: [["Old"]] }] }, { target: "xlsx" });
+    const zip = await JSZip.loadAsync(rendered.bytes as Uint8Array);
+    const sheetXml = await zip.file("xl/worksheets/sheet1.xml")?.async("string");
+    zip.file("xl/worksheets/sheet1.xml", String(sheetXml).replace('<c r="A1"', '<c r="A1" s="7"'));
+    const styledBytes = await zip.generateAsync({ type: "uint8array" });
+
+    const edited = await edit(
+      { data: styledBytes, format: "xlsx" },
+      [{ op: "xlsx.setCell", sheet: 1, cell: "A1", value: "New" }]
+    );
+    const editedZip = await JSZip.loadAsync(edited.bytes as Uint8Array);
+    const editedSheetXml = await editedZip.file("xl/worksheets/sheet1.xml")?.async("string");
+
+    expect(editedSheetXml).toContain('<c r="A1" t="inlineStr" s="7"><is><t>New</t></is></c>');
   });
 
   it("sets XLSX formulas and exposes them as valid Office XML", async () => {
@@ -937,6 +954,13 @@ describe("@officegen/formats MVP", () => {
     ).rejects.toMatchObject({
       payload: { code: "EXPORT_UNSUPPORTED" }
     });
+  });
+
+  it("normalizes native renderer timeouts to a bounded default", () => {
+    expect(resolveNativeRendererTimeoutMs()).toBe(DEFAULT_NATIVE_RENDERER_TIMEOUT_MS);
+    expect(resolveNativeRendererTimeoutMs(Number.NaN)).toBe(DEFAULT_NATIVE_RENDERER_TIMEOUT_MS);
+    expect(resolveNativeRendererTimeoutMs(10)).toBe(MIN_NATIVE_RENDERER_TIMEOUT_MS);
+    expect(resolveNativeRendererTimeoutMs(1500.9)).toBe(1500);
   });
 
   it("rejects export target and output extension mismatches", async () => {

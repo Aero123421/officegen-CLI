@@ -8,6 +8,7 @@ import {
   listErrors,
   listSchemas,
   OFFICEGEN_CLI_VERSION,
+  redactJson,
   sha256File,
   type JsonValue,
   updateManifest,
@@ -15,6 +16,7 @@ import {
 } from "@officegen/core";
 import {
   diagnose,
+  detectOoxmlRiskyParts,
   diffDocuments,
   edit,
   exportDocument,
@@ -27,6 +29,7 @@ import {
   renderDiagram,
   repair,
   replaceAsset,
+  validateOoxml,
   verify,
   view,
   type RenderTarget
@@ -89,9 +92,7 @@ export function capabilitiesPayload(context: RuntimeContext): unknown {
     enabled: enabled.map((entry) => entry.feature),
     disabled: context.registry.filter((entry) => !entry.enabled).map((entry) => entry.feature),
     agentCommands: agentVisible.map((entry) => entry.commandGroup),
-    visibleCommands: enabled
-      .filter((entry) => !context.agent || entry.visibleToAgents)
-      .map((entry) => entry.commandGroup),
+    visibleCommands: coreCapabilities.visibleCommands,
     hiddenFromAgents: enabled.filter((entry) => !entry.visibleToAgents).map((entry) => entry.feature),
     jsonBudgetBytes: context.jsonBudgetBytes ?? context.config.agent.defaultJsonBudgetBytes,
     commands: enabled
@@ -468,17 +469,18 @@ function designStrategyOption(context: RuntimeContext): "theme-only" | "inspired
 }
 
 async function maybeWriteReport(context: RuntimeContext, payload: unknown, sourceCommand: string): Promise<unknown> {
-  const reportOut = optionValue(context.argv, "--report-out");
+  const reportOut = optionValue(context.argv, "--report-out") ?? (sourceCommand === "verify" ? optionValue(context.argv, "--out") : undefined);
   const limited = applyOutputProjection(context, payload);
   if (!reportOut) return limited;
   const reportPath = await validateOutputPath(context, reportOut);
+  const safeReport = redactJson(limited as JsonValue, context.config).value;
   await fs.mkdir(path.dirname(reportPath), { recursive: true });
-  await fs.writeFile(reportPath, `${JSON.stringify(limited, null, 2)}\n`, "utf8");
+  await fs.writeFile(reportPath, `${JSON.stringify(safeReport, null, 2)}\n`, "utf8");
   return {
-    ...(asRecord(limited)),
+    ...(asRecord(safeReport)),
     reportOut: reportPath,
     artifacts: [
-      ...asArray(asRecord(limited).artifacts),
+      ...asArray(asRecord(safeReport).artifacts),
       { path: reportPath, exists: true, kind: "report", format: "json", sourceCommand }
     ]
   };
@@ -569,8 +571,11 @@ export async function editPayload(context: RuntimeContext): Promise<unknown> {
       details: { errors: editOpsValidation.errors }
     }, 3);
   }
-  return edit(await validateInputPath(context, input), operations, withFormatConfig(context, {
-    out: await validatedOutOption(context),
+  const inputPath = await validateInputPath(context, input);
+  const out = await validatedOutOption(context);
+  if (!hasFlag(context.argv, "--dry-run")) await assertSafeOoxmlMutationInput(inputPath, "edit");
+  const result = await edit(inputPath, operations, withFormatConfig(context, {
+    out,
     dryRun: hasFlag(context.argv, "--dry-run"),
     resolveSelectors: hasFlag(context.argv, "--resolve-selectors"),
     atomic: booleanOption(editOptions, "atomic"),
@@ -578,6 +583,7 @@ export async function editPayload(context: RuntimeContext): Promise<unknown> {
     continueOnError: booleanOption(editOptions, "continueOnError"),
     idempotencyKey: typeof editOptions.idempotencyKey === "string" ? editOptions.idempotencyKey : undefined
   }));
+  return withOutputArtifact(result, out, "edit", inputPath);
 }
 
 async function hydrateEditOperationAssets(context: RuntimeContext, operations: ReturnType<typeof normalizeEditOperations>): Promise<ReturnType<typeof normalizeEditOperations>> {
@@ -638,10 +644,12 @@ export async function renderPayload(context: RuntimeContext): Promise<unknown> {
     }, 3);
   }
   const sanitizedIr = await sanitizeRenderAssetPaths(context, ir);
-  return render(sanitizedIr as Parameters<typeof render>[0], withFormatConfig(context, {
-    out: await validatedOutOption(context),
+  const out = await validatedOutOption(context);
+  const result = await render(sanitizedIr as Parameters<typeof render>[0], withFormatConfig(context, {
+    out,
     target: optionValue(context.argv, "--target") as RenderTarget | undefined
   }));
+  return withOutputArtifact(result, out, "render");
 }
 
 async function sanitizeRenderAssetPaths(context: RuntimeContext, ir: unknown): Promise<unknown> {
@@ -666,11 +674,15 @@ function asArray(value: unknown): unknown[] {
 export async function exportPayload(context: RuntimeContext): Promise<unknown> {
   const input = requireInput(context, 3, "export");
   const to = (optionValue(context.argv, "--to") ?? "pdf") as "pdf" | "svg" | "html" | "pptx" | "docx" | "xlsx";
-  return exportDocument(await validateInputPath(context, input), withFormatConfig(context, {
+  const inputPath = await validateInputPath(context, input);
+  const out = await validatedOutOption(context);
+  const result = await exportDocument(inputPath, withFormatConfig(context, {
     to,
-    out: await validatedOutOption(context),
-    mode: (optionValue(context.argv, "--mode") as "fast" | "internal" | "native" | undefined) ?? "fast"
+    out,
+    mode: (optionValue(context.argv, "--mode") as "fast" | "internal" | "native" | undefined) ?? "fast",
+    timeoutMs: numberOption(context, "--timeout-ms")
   }));
+  return withOutputArtifact(result, out, "export", inputPath);
 }
 
 export async function diagnosePayload(context: RuntimeContext): Promise<unknown> {
@@ -698,11 +710,15 @@ export async function repairPayload(context: RuntimeContext): Promise<unknown> {
   const input = requireInput(context, 3, "repair");
   const issuesPath = optionValue(context.argv, "--issues");
   const issues = issuesPath ? await readInputJson(context, issuesPath) : undefined;
-  return repair(await validateInputPath(context, input), withFormatConfig(context, {
-    out: await validatedOutOption(context),
+  const inputPath = await validateInputPath(context, input);
+  const out = await validatedOutOption(context);
+  if (!hasFlag(context.argv, "--dry-run")) await assertSafeOoxmlMutationInput(inputPath, "repair");
+  const result = await repair(inputPath, withFormatConfig(context, {
+    out,
     dryRun: hasFlag(context.argv, "--dry-run"),
     issues: issues as never
   }));
+  return withOutputArtifact(result, out, "repair", inputPath);
 }
 
 export async function diffPayload(context: RuntimeContext): Promise<unknown> {
@@ -825,17 +841,22 @@ function severityPenalty(severity: string): number {
   return 0.03;
 }
 
+const DEFAULT_BENCHMARK_MANIFEST_PATH = "benchmarks/office-corpus/manifest.json";
+const DEFAULT_BENCHMARK_STORAGE_ROOT = ".officegen/benchmark-corpus";
+const BENCHMARK_MANIFEST_PATH_DENIED = "BENCHMARK_MANIFEST_PATH_DENIED";
+
 export async function benchmarkPayload(context: RuntimeContext, subcommand?: string): Promise<unknown> {
   if (subcommand === "compare") return benchmarkComparePayload(context);
-  const manifestPath = optionValue(context.argv, "--manifest") ?? "benchmarks/office-corpus/manifest.json";
+  const manifestPath = optionValue(context.argv, "--manifest") ?? DEFAULT_BENCHMARK_MANIFEST_PATH;
+  assertBenchmarkManifestPathAllowed(context, manifestPath, "--manifest");
   const manifest = asRecord(await readInputJson(context, manifestPath));
-  const storageRoot = path.resolve(context.cwd, String(manifest.storageRoot ?? ".officegen/benchmark-corpus"));
+  const storageRoot = resolveBenchmarkStorageRoot(context, manifest.storageRoot);
   const entries = Array.isArray(manifest.documents) ? manifest.documents : Array.isArray(manifest.files) ? manifest.files : Array.isArray(manifest.items) ? manifest.items : [];
   const results = [];
-  for (const item of entries.map(asRecord)) {
+  for (const [index, item] of entries.map(asRecord).entries()) {
     const ext = typeof item.kind === "string" ? `.${item.kind}` : "";
     const relative = String(item.path ?? item.fileName ?? `${String(item.id ?? "")}${ext}`);
-    const filePath = path.resolve(storageRoot, relative);
+    const filePath = resolveBenchmarkDocumentPath(context, storageRoot, relative, `documents[${index}].path`);
     const startedAt = new Date().toISOString();
     try {
       await fs.stat(filePath);
@@ -856,6 +877,53 @@ export async function benchmarkPayload(context: RuntimeContext, subcommand?: str
     results
   };
   return maybeWriteReport(context, result, "benchmark run");
+}
+
+function resolveBenchmarkStorageRoot(context: RuntimeContext, storageRoot: unknown): string {
+  return resolveBenchmarkRelativePath(context, context.cwd, String(storageRoot ?? DEFAULT_BENCHMARK_STORAGE_ROOT), "storageRoot");
+}
+
+function resolveBenchmarkDocumentPath(context: RuntimeContext, storageRoot: string, relativePath: string, field: string): string {
+  return resolveBenchmarkRelativePath(context, storageRoot, relativePath, field);
+}
+
+function assertBenchmarkManifestPathAllowed(context: RuntimeContext, value: string, field: string): void {
+  const reason = benchmarkPathDenyReason(value);
+  if (reason) throw benchmarkPathDenied(context, value, field, reason);
+}
+
+function resolveBenchmarkRelativePath(context: RuntimeContext, root: string, value: string, field: string): string {
+  const reason = benchmarkPathDenyReason(value);
+  if (reason) throw benchmarkPathDenied(context, value, field, reason);
+  const absoluteRoot = path.resolve(root);
+  const absolutePath = path.resolve(absoluteRoot, value);
+  if (!isPathWithinRoot(absoluteRoot, absolutePath)) {
+    throw benchmarkPathDenied(context, value, field, "storageRoot escape");
+  }
+  return absolutePath;
+}
+
+function benchmarkPathDenyReason(value: string): string | undefined {
+  if (!value || value.includes("\0")) return "empty or invalid path";
+  if (path.isAbsolute(value) || path.win32.isAbsolute(value) || path.posix.isAbsolute(value) || /^[A-Za-z]:/.test(value)) return "absolute path";
+  if (value.split(/[\\/]+/).includes("..")) return "../../ traversal";
+  return undefined;
+}
+
+function isPathWithinRoot(root: string, candidate: string): boolean {
+  const relative = path.relative(root, candidate);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function benchmarkPathDenied(context: RuntimeContext, requestedPath: string, field: string, reason: string): CliFailure {
+  return new CliFailure({
+    code: BENCHMARK_MANIFEST_PATH_DENIED,
+    category: "security",
+    severity: "error",
+    command: commandFromArgv(context.argv),
+    message: "Benchmark manifest paths must be relative and stay inside the benchmark storageRoot.",
+    details: { field, requestedPath, reason }
+  }, 4);
 }
 
 async function critiqueResultForBenchmark(context: RuntimeContext, filePath: string): Promise<Record<string, unknown>> {
@@ -919,7 +987,8 @@ export async function runPayload(context: RuntimeContext): Promise<unknown> {
   const manifestOut = optionValue(context.argv, "--manifest") ? await validateOutputPath(context, optionValue(context.argv, "--manifest")!) : undefined;
   const summaryOut = optionValue(context.argv, "--summary") ? await validateOutputPath(context, optionValue(context.argv, "--summary")!) : undefined;
   const outputRoot = optionValue(context.argv, "--output-root") ? await validateOutputPath(context, optionValue(context.argv, "--output-root")!, { directory: true }) : undefined;
-  const denyOutsideOutputRoot = hasFlag(context.argv, "--deny-outside-output-root");
+  const denyOutsideOutputRoot = hasFlag(context.argv, "--deny-outside-output-root") || (context.agent && Boolean(outputRoot));
+  const globalTimeoutMs = numberOption(context, "--timeout-ms");
   if (logJsonl) await fs.mkdir(path.dirname(logJsonl), { recursive: true });
   if (manifestOut) await fs.mkdir(path.dirname(manifestOut), { recursive: true });
   if (summaryOut) await fs.mkdir(path.dirname(summaryOut), { recursive: true });
@@ -935,6 +1004,7 @@ export async function runPayload(context: RuntimeContext): Promise<unknown> {
     manifest.inputs.push({ path: validatedPlanPath });
   });
 
+  let failed = false;
   for (const [index, step] of steps.entries()) {
     const id = String(step.id ?? `step-${index + 1}`);
     const command = String(step.command ?? step.type ?? "");
@@ -943,10 +1013,16 @@ export async function runPayload(context: RuntimeContext): Promise<unknown> {
     await appendTrace(folder, { event: "step.start", id, command, startedAt });
     const resultPath = path.join(folder.logsDir, `${String(index + 1).padStart(2, "0")}-${safeFileToken(id)}.result.json`);
     try {
-      const result = await executeRunStep(context, folder, step, stepOutputs, index, outputRoot, denyOutsideOutputRoot);
+      const stepTimeoutMs = typeof step.timeoutMs === "number" ? step.timeoutMs : globalTimeoutMs;
+      const result = await withTimeout(
+        executeRunStep(context, folder, step, stepOutputs, index, outputRoot, denyOutsideOutputRoot, stepTimeoutMs),
+        stepTimeoutMs,
+        `run step ${id} (${command})`
+      );
       await fs.writeFile(resultPath, `${JSON.stringify(result, null, 2)}\n`, "utf8");
       const resultOut = typeof (result as Record<string, unknown>).out === "string" ? String((result as Record<string, unknown>).out) : undefined;
       const resultArtifacts = await collectResultArtifacts(result, command, inputArtifactForStep(step));
+      await assertRunStepOutcome(command, result, resultArtifacts, step);
       artifacts.push(...resultArtifacts);
       if (resultOut) {
         stepOutputs.set(id, resultOut);
@@ -970,56 +1046,57 @@ export async function runPayload(context: RuntimeContext): Promise<unknown> {
       const failure = runStepFailurePayload(id, command, error);
       await fs.writeFile(resultPath, `${JSON.stringify(failure, null, 2)}\n`, "utf8");
       const finishedAt = new Date().toISOString();
-      results.push({ id, command, resultPath, ok: false, exitCode: 1, envelopeOk: false, startedAt, finishedAt });
+      results.push({ id, command, resultPath, ok: false, exitCode: error instanceof CliFailure ? error.exitCode : 1, envelopeOk: false, startedAt, finishedAt, error: failure.error });
       await appendRunJsonl(logJsonl, { event: "step.end", id, command, ok: false, exitCode: 1, envelopeOk: false, resultPath, error: failure.error as JsonValue, finishedAt });
       await appendTrace(folder, { event: "step.end", id, command, ok: false, resultPath, error: failure.error as JsonValue, finishedAt });
-      throw error;
+      failed = true;
+      break;
     }
   }
   const missingExpected = await missingExpectedArtifacts(expectedArtifacts);
   const afterOutputRoot = outputRoot ? await snapshotFiles(outputRoot) : new Set<string>();
   const unexpectedArtifacts = outputRoot ? [...afterOutputRoot].filter((file) => !beforeOutputRoot.has(file) && !expectedArtifacts.some((artifact) => path.resolve(String(artifact.path)) === file)) : [];
+  let finalError: Record<string, unknown> | undefined;
   if (denyOutsideOutputRoot && outputRoot) {
     const outside = artifacts.filter((artifact) => typeof artifact.path === "string" && isOutside(outputRoot, String(artifact.path)));
     if (outside.length) {
-      throw new CliFailure({
+      finalError = {
         code: "SECURITY_PATH_OUTSIDE_ROOT",
         command: "run",
         message: "Run produced artifacts outside --output-root.",
         details: { artifacts: outside }
-      }, 4);
+      };
+      failed = true;
     }
   }
   const runManifest = {
-    schema: "officegen.run.manifest@2.3",
+    schema: "officegen.run.manifest@2.4",
     runId: folder.runId,
     planPath: validatedPlanPath,
     root: folder.root,
     outputRoot,
+    status: failed || missingExpected.length || finalError ? "failed" : "completed",
     steps: results,
     artifacts,
     expectedArtifacts,
     missingExpectedArtifacts: missingExpected,
     unexpectedArtifacts,
+    error: finalError,
     logJsonl,
     tracePath: folder.tracePath
   };
+  const runManifestPath = path.join(folder.logsDir, "run-manifest.json");
+  await fs.writeFile(runManifestPath, `${JSON.stringify(runManifest, null, 2)}\n`, "utf8");
   if (manifestOut) await fs.writeFile(manifestOut, `${JSON.stringify(runManifest, null, 2)}\n`, "utf8");
   if (summaryOut) await fs.writeFile(summaryOut, runSummaryMarkdown(runManifest), "utf8");
-  if (missingExpected.length) {
-    throw new CliFailure({
-      code: "EDIT_TRANSACTION_FAILED",
-      command: "run",
-      message: "Run completed steps but one or more expected artifacts were not created.",
-      details: { artifacts: missingExpected, manifestPath: manifestOut ?? folder.manifestPath }
-    }, 3);
-  }
 
   return {
-    schema: "officegen.run.result@2.3",
+    schema: "officegen.run.result@2.4",
     runId: folder.runId,
     root: folder.root,
-    manifestPath: folder.manifestPath,
+    runManifestPath,
+    coreManifestPath: folder.manifestPath,
+    userManifestOut: manifestOut,
     manifestOut,
     summaryOut,
     logJsonl,
@@ -1027,7 +1104,11 @@ export async function runPayload(context: RuntimeContext): Promise<unknown> {
     steps: results,
     artifacts,
     expectedArtifacts,
+    missingExpectedArtifacts: missingExpected,
     unexpectedArtifacts,
+    error: finalError,
+    readiness: failed || missingExpected.length || finalError ? "blocked" : "pass",
+    partial: false,
     caveats: ["Run executes deterministic built-in steps and can invoke native verification/export only when the active security policy enables renderers."]
   };
 }
@@ -1039,7 +1120,8 @@ async function executeRunStep(
   stepOutputs: Map<string, string>,
   index: number,
   outputRoot?: string,
-  denyOutsideOutputRoot = false
+  denyOutsideOutputRoot = false,
+  timeoutMs?: number
 ): Promise<unknown> {
   const command = String(step.command ?? step.type ?? "");
   const input = await resolveRunInput(context, step.input, stepOutputs);
@@ -1049,7 +1131,8 @@ async function executeRunStep(
   if (command === "verify") return verify(requireRunInput(command, input), withFormatConfig(context, {
     native: step.native === true,
     visual: step.visual === true,
-    out: out ?? path.join(folder.logsDir, `${String(index + 1).padStart(2, "0")}-verify.json`)
+    out: out ?? path.join(folder.logsDir, `${String(index + 1).padStart(2, "0")}-verify.json`),
+    timeoutMs
   }));
   if (command === "view") {
     const result = await view(requireRunInput(command, input), withFormatConfig(context, { format: "svg" as const, maxPages: typeof step.maxPages === "number" ? step.maxPages : undefined }));
@@ -1061,14 +1144,36 @@ async function executeRunStep(
   }
   if (command === "render") {
     const ir = await readInputJson(context, requireRunInput(command, input));
-    return render(ir as Parameters<typeof render>[0], withFormatConfig(context, { out: out ?? path.join(folder.outputDir, `${String(index + 1).padStart(2, "0")}-render.${String(step.target ?? "pptx")}`), target: step.target as RenderTarget | undefined }));
+    const validation = validateSchema("officegen.ir.document@1.2", ir);
+    if (!validation.ok) {
+      throw new CliFailure({
+        code: "SCHEMA_INVALID",
+        command: "run",
+        message: "run render step input must conform to officegen.ir.document@1.2.",
+        details: { step: step.id, errors: validation.errors }
+      }, 3);
+    }
+    const sanitizedIr = await sanitizeRenderAssetPaths(context, ir);
+    return render(sanitizedIr as Parameters<typeof render>[0], withFormatConfig(context, { out: out ?? path.join(folder.outputDir, `${String(index + 1).padStart(2, "0")}-render.${String(step.target ?? "pptx")}`), target: step.target as RenderTarget | undefined }));
   }
   if (command === "edit") {
+    const editInput = requireRunInput(command, input);
+    const effectiveOut = out ?? path.join(folder.outputDir, `${String(index + 1).padStart(2, "0")}-edited.${path.extname(editInput).replace(".", "") || "pptx"}`);
     const opsInput = await resolveRunInput(context, step.ops, stepOutputs);
     const rawOps = await readInputJson(context, requireRunInput(command, opsInput));
     const operations = await hydrateEditOperationAssets(context, normalizeEditOperations(rawOps));
-    return edit(requireRunInput(command, input), operations, withFormatConfig(context, {
-      out: out ?? path.join(folder.outputDir, `${String(index + 1).padStart(2, "0")}-edited.${path.extname(requireRunInput(command, input)).replace(".", "") || "pptx"}`),
+    const editOpsValidation = validateSchema("officegen.edit.ops@1.2", editOpsValidationPayload(rawOps, operations, editInput));
+    if (!editOpsValidation.ok) {
+      throw new CliFailure({
+        code: "SCHEMA_INVALID",
+        command: "run",
+        message: "run edit step operations must conform to officegen.edit.ops@1.2.",
+        details: { step: step.id, errors: editOpsValidation.errors }
+      }, 3);
+    }
+    if (effectiveOut && step.dryRun !== true) await assertSafeOoxmlMutationInput(editInput, "run edit");
+    return edit(editInput, operations, withFormatConfig(context, {
+      out: effectiveOut,
       dryRun: step.dryRun === true,
       resolveSelectors: step.resolveSelectors === true
     }));
@@ -1077,7 +1182,8 @@ async function executeRunStep(
     return exportDocument(requireRunInput(command, input), withFormatConfig(context, {
       to: (step.to as "pdf" | "svg" | "html" | "pptx" | "docx" | "xlsx" | undefined) ?? "pdf",
       mode: (step.mode as "fast" | "internal" | "native" | undefined) ?? "fast",
-      out: out ?? path.join(folder.outputDir, `${String(index + 1).padStart(2, "0")}-export.${String(step.to ?? "pdf")}`)
+      out: out ?? path.join(folder.outputDir, `${String(index + 1).padStart(2, "0")}-export.${String(step.to ?? "pdf")}`),
+      timeoutMs
     }));
   }
   if (command === "diff") {
@@ -1094,6 +1200,87 @@ async function executeRunStep(
     message: `Unsupported run step command: ${command}`,
     details: { command, supported: ["inspect", "view", "diagnose", "verify", "render", "edit", "export", "diff"] }
   }, 2);
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number | undefined, label: string): Promise<T> {
+  if (!timeoutMs) return promise;
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => {
+          reject(new CliFailure({
+            code: "TIMEOUT",
+            command: "run",
+            message: `${label} exceeded ${timeoutMs}ms.`,
+            details: { timeoutMs, label }
+          }, 3));
+        }, timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function assertRunStepOutcome(command: string, result: unknown, artifacts: Array<Record<string, unknown>>, step: Record<string, unknown>): Promise<void> {
+  const record = asRecord(result);
+  const artifactMissing = artifacts.find((artifact) => artifact.exists === false);
+  if (artifactMissing) {
+    throw new CliFailure({
+      code: "EXPECTED_ARTIFACT_MISSING",
+      command: "run",
+      message: `run step ${String(step.id ?? command)} did not create a required artifact.`,
+      details: { step: step.id, command, artifact: artifactMissing }
+    }, 3);
+  }
+
+  if (command === "verify") {
+    const readiness = String(record.readiness ?? "pass");
+    if (record.partial === true || readiness === "blocked" || readiness === "partial") {
+      throw new CliFailure({
+        code: record.partial === true ? "TIMEOUT" : "RUN_STEP_FAILED",
+        command: "run",
+        message: `run verify step ${String(step.id ?? command)} did not reach passing readiness.`,
+        details: { step: step.id, readiness, partial: record.partial }
+      }, 3);
+    }
+  }
+
+  const dryRun = step.dryRun === true || record.planOnly === true || record.dryRun === true;
+  if ((command === "edit" || command === "repair") && !dryRun) {
+    const errors = asArray(record.errors);
+    if (command === "edit" && errors.length) {
+      const code = runEditFailureCode(errors);
+      throw new CliFailure({
+        code,
+        command: "run",
+        message: `run edit step ${String(step.id ?? command)} failed selector or transaction validation.`,
+        details: { step: step.id, errors }
+      }, 3);
+    }
+    const changed = record.changed === true;
+    const applied = Number(record.applied ?? 0);
+    const hasOutputArtifact = artifacts.some((artifact) => artifact.kind === "output" && artifact.exists === true);
+    const outputArtifact = artifacts.find((artifact) => artifact.kind === "output" && artifact.exists === true && typeof artifact.path === "string");
+    if (outputArtifact) await assertValidOoxmlMutationOutput(String(outputArtifact.path), `run ${command}`);
+    if (!changed || applied <= 0 || !hasOutputArtifact) {
+      throw new CliFailure({
+        code: command === "repair" ? "REPAIR_NO_SAFE_OPS" : "EDIT_TRANSACTION_FAILED",
+        command: "run",
+        message: `run ${command} step ${String(step.id ?? command)} did not satisfy mutation success conditions.`,
+        details: { step: step.id, command, changed: record.changed, applied: record.applied, artifacts }
+      }, 3);
+    }
+  }
+}
+
+function runEditFailureCode(errors: unknown[]): "SELECTOR_NOT_FOUND" | "SELECTOR_AMBIGUOUS" | "EDIT_TRANSACTION_FAILED" {
+  const text = errors.map((error) => JSON.stringify(error)).join("\n").toLowerCase();
+  if (text.includes("ambiguous")) return "SELECTOR_AMBIGUOUS";
+  if (text.includes("not-found") || text.includes("not found") || text.includes("missing")) return "SELECTOR_NOT_FOUND";
+  return "EDIT_TRANSACTION_FAILED";
 }
 
 async function resolveRunInput(context: RuntimeContext, value: unknown, stepOutputs: Map<string, string>): Promise<string | undefined> {
@@ -1179,6 +1366,55 @@ async function collectResultArtifacts(result: unknown, command: string, input?: 
     artifacts.push(await artifactRecord(record.out, "output", String(record.format ?? path.extname(record.out).slice(1)), command, input));
   }
   return artifacts;
+}
+
+async function withOutputArtifact(result: unknown, requestedOut: string | undefined, command: string, input?: string): Promise<unknown> {
+  if (!requestedOut) return result;
+  if (command === "edit" || command === "repair" || command === "asset replace") await assertValidOoxmlMutationOutput(requestedOut, command);
+  const record = asRecord(result);
+  const existing = asArray(record.artifacts).map(asRecord);
+  if (existing.some((artifact) => artifact.path === requestedOut)) return result;
+  const artifact = await artifactRecord(requestedOut, "output", String(record.format ?? path.extname(requestedOut).slice(1)), command, input);
+  return {
+    ...record,
+    artifacts: [...existing, artifact]
+  };
+}
+
+async function assertSafeOoxmlMutationInput(inputPath: string, command: string): Promise<void> {
+  const extension = path.extname(inputPath).toLowerCase().slice(1);
+  if (extension !== "pptx" && extension !== "docx" && extension !== "xlsx") return;
+  const riskyParts = await detectOoxmlRiskyParts(inputPath, { format: extension });
+  if (!riskyParts.length) return;
+  throw new CliFailure({
+    code: "SECURITY_RISKY_OOXML_DETECTED",
+    command,
+    message: "Mutation is blocked because the Office package contains macros, embedded objects, or external relationships.",
+    details: {
+      policy: "inspect may warn, but mutating commands block risky OOXML by default in v2.4.0.",
+      riskyParts
+    }
+  }, 4);
+}
+
+async function assertValidOoxmlMutationOutput(outputPath: string, command: string): Promise<void> {
+  const extension = path.extname(outputPath).toLowerCase().slice(1);
+  if (extension !== "pptx" && extension !== "docx" && extension !== "xlsx") return;
+  const exists = await fs.stat(outputPath).then((stats) => stats.isFile()).catch(() => false);
+  if (!exists) return;
+  const validation = await validateOoxml(outputPath, { format: extension });
+  if (validation.ok) return;
+  await fs.unlink(outputPath).catch(() => undefined);
+  throw new CliFailure({
+    code: "OOXML_VALIDATION_FAILED",
+    command,
+    message: "Mutation output failed OOXML validation and was removed.",
+    details: {
+      outputPath,
+      issues: validation.issues,
+      riskyParts: validation.riskyParts
+    }
+  }, 3);
 }
 
 async function artifactRecord(filePath: string, kind: string, format: string, createdByCommand: string, input?: string): Promise<Record<string, unknown>> {
@@ -1273,14 +1509,23 @@ export async function assetPayload(context: RuntimeContext, subcommand?: string)
     const assetPath = optionValue(context.argv, "--asset") ?? optionValue(context.argv, "--selector") ?? "";
     const replacementPath = positionalArgs(context.argv, 5)[0] ?? positionalArgs(context.argv, 4)[1];
     if (!assetPath || !replacementPath) throw new Error("asset replace requires --asset <zip-path> and replacement file.");
-    return replaceAsset(await validateInputPath(context, input), withFormatConfig(context, {
+    const inputPath = await validateInputPath(context, input);
+    const out = await validatedOutOption(context);
+    await assertSafeOoxmlMutationInput(inputPath, "asset replace");
+    const result = await replaceAsset(inputPath, withFormatConfig(context, {
       assetPath,
       replacement: await readInputFile(context, replacementPath),
       replacementPath,
-      out: await validatedOutOption(context)
+      out
     }));
+    return withOutputArtifact(result, out, "asset replace", inputPath);
   }
-  return { schema: "officegen.asset.result@1.2", status: "wired", subcommand };
+  throw new CliFailure({
+    code: "FEATURE_NOT_IMPLEMENTED",
+    command: `asset ${subcommand ?? ""}`.trim(),
+    message: `asset ${subcommand ?? "command"} is not implemented. Supported subcommands are inspect, extract, and replace.`,
+    details: { subcommand, supported: ["inspect", "extract", "replace"] }
+  }, 5);
 }
 
 export async function chartPayload(context: RuntimeContext): Promise<unknown> {
@@ -1463,15 +1708,13 @@ export async function pluginPayload(context: RuntimeContext, subcommand?: string
 }
 
 export function wiredPayload(feature: FeatureKey): (context: RuntimeContext) => unknown {
-  return (context) => ({
-    schema: `officegen.${feature}.result@1.2`,
-    feature,
-    status: "wired",
-    input: positionalArgs(context.argv, 3)[0],
-    out: optionValue(context.argv, "--out"),
-    summary: `${feature} command is registered and gated by the core capability registry.`,
-    warnings: ["Backend execution is delegated to core/formats/optional packages during final integration."]
-  });
+  return () => {
+    throw new CliFailure({
+      code: "FEATURE_NOT_IMPLEMENTED",
+      command: feature,
+      message: `${feature} is registered but has no implemented handler.`
+    }, 5);
+  };
 }
 
 export async function scaffoldPayload(context: RuntimeContext): Promise<unknown> {
@@ -1524,16 +1767,12 @@ export async function scaffoldPayload(context: RuntimeContext): Promise<unknown>
 
 export function groupPayload(context: RuntimeContext, subcommand?: string): unknown {
   const feature = getTopCommand(context.argv) as FeatureKey;
-  return {
-    schema: `officegen.${feature}.result@1.2`,
-    feature,
-    subcommand,
-    status: "wired",
-    args: positionalArgs(context.argv, subcommand ? 4 : 3),
-    out: optionValue(context.argv, "--out"),
-    summary: `${feature}${subcommand ? ` ${subcommand}` : ""} command is registered and feature gated.`,
-    warnings: ["Backend execution is delegated to core/formats/optional packages during final integration."]
-  };
+  throw new CliFailure({
+    code: "FEATURE_NOT_IMPLEMENTED",
+    command: `${feature}${subcommand ? ` ${subcommand}` : ""}`,
+    message: `${feature}${subcommand ? ` ${subcommand}` : ""} is not implemented for this release.`,
+    details: { feature, subcommand, args: positionalArgs(context.argv, subcommand ? 4 : 3) }
+  }, 5);
 }
 
 export async function agentPayload(context: RuntimeContext, subcommand?: string): Promise<unknown> {

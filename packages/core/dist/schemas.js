@@ -26,6 +26,12 @@ const envelopeSchema = {
         capabilitiesHash: { type: "string", pattern: "^sha256:" },
         pathsRedacted: { type: "boolean" },
         truncated: { type: "boolean" },
+        executionOk: { type: "boolean" },
+        objectiveOk: { type: "boolean" },
+        mutationStatus: { type: "string" },
+        artifactStatus: { type: "string" },
+        readiness: { type: "string" },
+        partial: { type: "boolean" },
         result: {},
         error: {
             type: "object",
@@ -124,7 +130,9 @@ function editOperationSchemas() {
         tableName: { type: "string" },
         styleId: { type: "string" },
         font: { type: "string" },
-        bold: { type: "boolean" }
+        bold: { type: "boolean" },
+        kind: { enum: ["header", "footer"] },
+        selected: { type: "array", minItems: 1, items: { type: "string" } }
     };
     const pickFields = (allowed) => Object.fromEntries(allowed.map((field) => [field, fields[field]]));
     const op = (name, required, allowed, extra = {}, constraints = {}) => ({
@@ -154,6 +162,11 @@ function editOperationSchemas() {
         op("docx.setStyle", ["styleId"], ["styleId", "font", "size", "bold"]),
         op("docx.addComment", ["selector", "text"], ["selector", "text", "author"]),
         op("docx.addRedline", ["selector", "text"], ["selector", "text", "author"]),
+        op("docx.redline.insert", ["selector", "text"], ["selector", "text", "author"]),
+        op("docx.redline.delete", ["selector"], ["selector", "author"]),
+        op("docx.redline.replace", ["selector", "text"], ["selector", "text", "author"]),
+        op("docx.applyStyle", ["selector", "styleId"], ["selector", "styleId"]),
+        op("docx.headerFooter.setText", ["kind", "text"], ["kind", "text"]),
         op("xlsx.insertRows", ["rowIndex", "rows"], ["sheet", "rowIndex", "rows"]),
         op("xlsx.appendRows", ["rows"], ["sheet", "rows"]),
         op("xlsx.setCell", ["cell", "value"], ["sheet", "cell", "value"]),
@@ -163,6 +176,8 @@ function editOperationSchemas() {
         op("xlsx.table.resize", ["selector", "ref"], ["selector", "ref"]),
         op("xlsx.chart.setData", ["selector", "categories", "values"], ["selector", "categories", "values", "seriesName"]),
         op("xlsx.pivot.refreshDefinition", ["selector"], ["selector"]),
+        op("xlsx.pivot.refreshAll", [], []),
+        op("xlsx.slicer.setSelection", ["selector", "selected"], ["selector", "selected"]),
         op("pdf.textOverlay", ["page", "text", "x", "y"], ["page", "text", "x", "y", "size", "color"]),
         op("pdf.annotation", ["page", "text", "x", "y"], ["page", "text", "x", "y", "width", "height"])
     ];
@@ -401,15 +416,76 @@ const diagnosticsSchema = {
         }
     }
 };
+function looseSchema(id) {
+    return {
+        $id: id,
+        type: "object",
+        required: ["schema"],
+        additionalProperties: true,
+        properties: {
+            schema: schemaField(id)
+        }
+    };
+}
 const entries = [
     entry("officegen.envelope@1.2", envelopeSchema, undefined),
+    entry("officegen.capabilities@1.2", looseSchema("officegen.capabilities@1.2"), "capabilities"),
     entry("officegen.edit.ops@1.2", editOpsSchema, "edit"),
     entry("officegen.ir.document@1.2", documentIrSchema, "render"),
+    entry("officegen.manifest@1.2", looseSchema("officegen.manifest@1.2"), "run"),
     entry("officegen.asset.spec@1.2", assetSpecSchema, "asset"),
     entry("officegen.design.pack@1.2", designPackSchema, "design"),
     entry("officegen.template.map@1.2", templateMapSchema, "template"),
     entry("officegen.view.objectMap@1.2", viewObjectMapSchema, "view"),
-    entry("officegen.diagnostics@1.2", diagnosticsSchema, "diagnose")
+    entry("officegen.diagnostics@1.2", diagnosticsSchema, "diagnose"),
+    entry("officegen.help@1.2", looseSchema("officegen.help@1.2"), "help"),
+    entry("officegen.config@1.2", looseSchema("officegen.config@1.2"), "config"),
+    entry("officegen.config.result@1.2", looseSchema("officegen.config.result@1.2"), "config"),
+    entry("officegen.doctor@1.2", looseSchema("officegen.doctor@1.2"), "doctor"),
+    entry("officegen.schema.list@1.2", looseSchema("officegen.schema.list@1.2"), "schema"),
+    entry("officegen.schema.definition@1.2", looseSchema("officegen.schema.definition@1.2"), "schema"),
+    entry("officegen.validation.result@1.2", looseSchema("officegen.validation.result@1.2"), "validate"),
+    entry("officegen.schema.migration.result@1.2", looseSchema("officegen.schema.migration.result@1.2"), "schema"),
+    entry("officegen.errors@1.2", looseSchema("officegen.errors@1.2"), "errors"),
+    entry("officegen.error@1.2", looseSchema("officegen.error@1.2"), "errors"),
+    entry("officegen.progressive-disclosure@1.2", looseSchema("officegen.progressive-disclosure@1.2"), undefined),
+    entry("officegen.projected-result@2.3", looseSchema("officegen.projected-result@2.3"), undefined),
+    entry("officegen.inspect.result@1.2", looseSchema("officegen.inspect.result@1.2"), "inspect"),
+    entry("officegen.view.result@1.2", looseSchema("officegen.view.result@1.2"), "view"),
+    entry("officegen.edit.selectors@1.2", looseSchema("officegen.edit.selectors@1.2"), "edit"),
+    entry("officegen.edit.result@1.2", looseSchema("officegen.edit.result@1.2"), "edit"),
+    entry("officegen.render.result@1.2", looseSchema("officegen.render.result@1.2"), "render"),
+    entry("officegen.export.result@1.2", looseSchema("officegen.export.result@1.2"), "export"),
+    entry("officegen.diagnose.result@1.2", looseSchema("officegen.diagnose.result@1.2"), "diagnose"),
+    entry("officegen.verify.result@1.2", looseSchema("officegen.verify.result@1.2"), "verify"),
+    entry("officegen.repair.result@1.2", looseSchema("officegen.repair.result@1.2"), "repair"),
+    entry("officegen.diff.result@1.2", looseSchema("officegen.diff.result@1.2"), "diff"),
+    entry("officegen.scaffold.result@1.2", looseSchema("officegen.scaffold.result@1.2"), "scaffold"),
+    entry("officegen.chart.render.result@1.2", looseSchema("officegen.chart.render.result@1.2"), "chart"),
+    entry("officegen.diagram.render.result@1.2", looseSchema("officegen.diagram.render.result@1.2"), "diagram"),
+    entry("officegen.asset.info@1.2", looseSchema("officegen.asset.info@1.2"), "asset"),
+    entry("officegen.asset.extract.result@1.2", looseSchema("officegen.asset.extract.result@1.2"), "asset"),
+    entry("officegen.asset.replace.result@1.2", looseSchema("officegen.asset.replace.result@1.2"), "asset"),
+    entry("officegen.asset.result@1.2", looseSchema("officegen.asset.result@1.2"), "asset"),
+    entry("officegen.critique.result@2.3", looseSchema("officegen.critique.result@2.3"), "critique"),
+    entry("officegen.improve.plan@2.3", looseSchema("officegen.improve.plan@2.3"), "improve"),
+    entry("officegen.benchmark.run.result@2.3", looseSchema("officegen.benchmark.run.result@2.3"), "benchmark"),
+    entry("officegen.benchmark.compare.result@2.3", looseSchema("officegen.benchmark.compare.result@2.3"), "benchmark"),
+    entry("officegen.run.plan@1.2", looseSchema("officegen.run.plan@1.2"), "run"),
+    entry("officegen.run.manifest@2.3", looseSchema("officegen.run.manifest@2.3"), "run"),
+    entry("officegen.run.result@2.3", looseSchema("officegen.run.result@2.3"), "run"),
+    entry("officegen.run.manifest@2.4", looseSchema("officegen.run.manifest@2.4"), "run"),
+    entry("officegen.run.result@2.4", looseSchema("officegen.run.result@2.4"), "run"),
+    entry("officegen.run.step-error@1.2", looseSchema("officegen.run.step-error@1.2"), "run"),
+    entry("officegen.ooxml.validation@1", looseSchema("officegen.ooxml.validation@1"), "validate"),
+    entry("officegen.mcp.tools@1.2", looseSchema("officegen.mcp.tools@1.2"), "mcp"),
+    entry("officegen.renderer.doctor@2.2", looseSchema("officegen.renderer.doctor@2.2"), "renderer"),
+    entry("officegen.template.fill-validation@2.2", looseSchema("officegen.template.fill-validation@2.2"), "template"),
+    entry("officegen.design.signals.trusted@1.2", looseSchema("officegen.design.signals.trusted@1.2"), "design"),
+    entry("officegen.design.signals.untrusted@1.2", looseSchema("officegen.design.signals.untrusted@1.2"), "design"),
+    entry("officegen.design.contact-sheet@2.2", looseSchema("officegen.design.contact-sheet@2.2"), "design"),
+    entry("officegen.design.evidence@1.2", looseSchema("officegen.design.evidence@1.2"), "design"),
+    entry("officegen.template.schema-candidates@1.2", looseSchema("officegen.template.schema-candidates@1.2"), "template")
 ];
 function entry(id, schema, feature) {
     return {

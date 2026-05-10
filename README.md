@@ -21,13 +21,13 @@ Requires Node.js 24 or later.
 Recommended install is the checked release tarball:
 
 ```bash
-npm install -g https://github.com/Aero123421/officegen-CLI/releases/download/v2.3.0/officegen-v2.3.0.tgz
+npm install -g https://github.com/Aero123421/officegen-CLI/releases/download/v2.4.0/officegen-v2.4.0.tgz
 ```
 
 GitHub direct install is also smoke-tested, but use the tarball when an agent or CI needs the most deterministic path:
 
 ```bash
-npm install -g github:Aero123421/officegen-CLI#v2.3.0
+npm install -g github:Aero123421/officegen-CLI#v2.4.0
 ```
 
 The `officegen` package name is not published from this project to the public npm registry, because that name is owned separately on npm.
@@ -181,7 +181,7 @@ Enterprise/optional commands are disabled unless enabled by policy:
 
 ## Current Capability Level
 
-Officegen v2.3.0 is a practical v2 authoring substrate. It is strongest when an agent needs structured, auditable Office automation rather than free-form binary generation.
+Officegen v2.4.0 is a practical v2 authoring substrate. It is strongest when an agent needs structured, auditable Office automation rather than free-form binary generation.
 
 PPTX:
 
@@ -222,7 +222,7 @@ Use `--json` for machine-readable output. Responses use the `officegen.envelope@
   "ok": true,
   "command": "capabilities",
   "runId": "...",
-  "cliVersion": "2.3.0",
+  "cliVersion": "2.4.0",
   "capabilitiesHash": "sha256:...",
   "pathsRedacted": true,
   "result": {},
@@ -333,8 +333,8 @@ Optional public corpus benchmark:
 ```bash
 npm run benchmark:fetch
 npm run benchmark:review
-officegen benchmark run --report-out .officegen/benchmark-results/v2.3.0.json --agent --json
-officegen benchmark compare old.json .officegen/benchmark-results/v2.3.0.json --json
+officegen benchmark run --report-out .officegen/benchmark-results/v2.4.0.json --agent --json
+officegen benchmark compare old.json .officegen/benchmark-results/v2.4.0.json --json
 ```
 
 The benchmark downloads public corpus files into `.officegen/benchmark-corpus/`; Office/PDF binaries are not committed to the repository.
@@ -344,7 +344,7 @@ Version bump:
 ```bash
 npm run version:bump -- patch
 npm run version:bump -- minor
-npm run version:bump -- 2.3.0
+npm run version:bump -- 2.4.0
 npm run version:check
 ```
 

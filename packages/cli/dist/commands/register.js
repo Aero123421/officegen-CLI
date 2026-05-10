@@ -3,6 +3,7 @@ import { OFFICEGEN_CLI_VERSION } from "../../../core/dist/index.js";
 import { commandFromArgv, positionalArgs } from "../shared/argv.js";
 import { makeEnvelope, writeResult } from "../shared/envelope.js";
 import { COMMAND_METADATA, metadataFor } from "../shared/metadata.js";
+import { CliFailure } from "../shared/types.js";
 import { agentPayload, assetPayload, capabilitiesPayload, chartPayload, configPayload, designPayload, diagnosePayload, diffPayload, critiquePayload, improvePayload, benchmarkPayload, diagramPayload, doctorPayload, editPayload, errorInspectPayload, errorsListPayload, exportPayload, groupPayload, helpPayload, inspectPayload, layoutPayload, mcpPayload, pluginPayload, renderPayload, rendererPayload, repairPayload, runPayload, scaffoldPayload, schemaGetPayload, schemaListPayload, schemaMigratePayload, templatePayload, validatePayload, verifyPayload, viewPayload } from "./payloads.js";
 const leafPayloads = {
     capabilities: capabilitiesPayload,
@@ -261,11 +262,11 @@ function registerConfig(program, context, stdout, now) {
         writeResult(context, makeEnvelope(context, commandFromArgv(context.argv), configPayload(context), now), stdout);
     }));
     config.addCommand(baseCommand("set", "set config value").action(async () => {
-        writeResult(context, makeEnvelope(context, commandFromArgv(context.argv), {
-            schema: "officegen.config.result@1.2",
-            status: "wired",
-            message: "config set is registered; persistent writes are delegated to the core config API."
-        }, now), stdout);
+        throw new CliFailure({
+            code: "FEATURE_NOT_IMPLEMENTED",
+            command: "config set",
+            message: "config set does not persist configuration yet. Use config show to inspect active settings."
+        }, 5);
     }));
     program.addCommand(config);
 }

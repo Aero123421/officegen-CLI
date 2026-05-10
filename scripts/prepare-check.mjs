@@ -5,6 +5,7 @@ import { spawnSync } from "node:child_process";
 const requiredDist = [
   "packages/core/dist/index.js",
   "packages/formats/dist/index.js",
+  "packages/formats/dist/ooxml/validator.js",
   "packages/optional/dist/index.js",
   "packages/cli/dist/main.js"
 ];

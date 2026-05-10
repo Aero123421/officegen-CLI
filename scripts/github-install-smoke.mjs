@@ -10,8 +10,9 @@ const temp = await mkdtemp(path.join(os.tmpdir(), "officegen-github-install-"));
 const cwd = process.cwd();
 const remote = process.argv.includes("--remote");
 const rootPackage = JSON.parse(await readFile(path.join(cwd, "package.json"), "utf8"));
+const repository = process.env.GITHUB_REPOSITORY ?? "Aero123421/officegen-CLI";
 const defaultSpec = process.env.OFFICEGEN_GITHUB_INSTALL_SPEC ?? (remote
-  ? `github:Aero123421/officegen-CLI#v${rootPackage.version}`
+  ? `github:${repository}#v${rootPackage.version}`
   : pathToFileURL(cwd).href);
 try {
   const npmCli = process.env.npm_execpath;

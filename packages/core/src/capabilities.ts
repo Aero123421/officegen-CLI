@@ -3,39 +3,52 @@ import { FEATURE_NAMES } from "./config.js";
 import { SCHEMA_REGISTRY_VERSION, OFFICEGEN_CLI_VERSION } from "./types.js";
 import type { CapabilitiesDocument, CapabilityFeature, FeatureName, OfficegenConfig } from "./types.js";
 
-const commandMap: Record<FeatureName, string[]> = {
-  capabilities: ["capabilities"],
-  help: ["help", "help workflow", "help error"],
-  config: ["config show", "config set"],
-  doctor: ["doctor"],
-  inspect: ["inspect"],
-  view: ["view"],
-  edit: ["edit"],
-  render: ["render"],
-  scaffold: ["scaffold"],
-  export: ["export"],
-  validate: ["validate"],
-  verify: ["verify"],
-  diagnose: ["diagnose"],
-  repair: ["repair"],
-  diff: ["diff"],
-  run: ["run"],
-  critique: ["critique"],
-  improve: ["improve"],
-  benchmark: ["benchmark run", "benchmark compare"],
-  asset: ["asset add", "asset inspect", "asset extract", "asset replace"],
-  chart: ["chart render"],
-  diagram: ["diagram render"],
-  schema: ["schema list", "schema get", "schema fetch", "schema validate", "schema migrate"],
-  errors: ["errors list", "errors inspect"],
-  template: ["template list", "template inspect", "template candidates", "template create", "template apply-map", "template validate", "template fill"],
-  design: ["design list", "design inspect", "design init", "design edit", "design update", "design validate", "design capture", "design apply"],
-  layout: ["layout apply"],
-  agent: ["agent install", "agent refresh"],
-  mcp: ["mcp serve"],
-  renderer: ["renderer list", "renderer inspect", "renderer trust"],
-  plugin: ["plugin list", "plugin inspect", "plugin install", "plugin trust"]
-};
+export interface CommandSpec {
+  feature: FeatureName;
+  commands: readonly string[];
+}
+
+export const COMMAND_SPECS = [
+  spec("capabilities", ["capabilities"]),
+  spec("help", ["help", "help workflow", "help error"]),
+  spec("config", ["config show", "config set"]),
+  spec("doctor", ["doctor"]),
+  spec("inspect", ["inspect"]),
+  spec("view", ["view"]),
+  spec("edit", ["edit"]),
+  spec("render", ["render"]),
+  spec("scaffold", ["scaffold"]),
+  spec("export", ["export"]),
+  spec("validate", ["validate"]),
+  spec("verify", ["verify"]),
+  spec("diagnose", ["diagnose"]),
+  spec("repair", ["repair"]),
+  spec("diff", ["diff"]),
+  spec("run", ["run"]),
+  spec("critique", ["critique"]),
+  spec("improve", ["improve"]),
+  spec("benchmark", ["benchmark run", "benchmark compare"]),
+  spec("asset", ["asset add", "asset inspect", "asset extract", "asset replace"]),
+  spec("chart", ["chart render"]),
+  spec("diagram", ["diagram render"]),
+  spec("schema", ["schema list", "schema get", "schema fetch", "schema validate", "schema migrate"]),
+  spec("errors", ["errors list", "errors inspect"]),
+  spec("template", ["template list", "template inspect", "template candidates", "template create", "template apply-map", "template validate", "template fill"]),
+  spec("design", ["design list", "design inspect", "design init", "design edit", "design update", "design validate", "design capture", "design apply"]),
+  spec("layout", ["layout apply"]),
+  spec("agent", ["agent install", "agent refresh"]),
+  spec("mcp", ["mcp serve"]),
+  spec("renderer", ["renderer list", "renderer inspect", "renderer trust", "renderer doctor"]),
+  spec("plugin", ["plugin list", "plugin inspect", "plugin install", "plugin trust"])
+] as const satisfies readonly CommandSpec[];
+
+export const commandMap = Object.fromEntries(
+  COMMAND_SPECS.map((entry) => [entry.feature, [...entry.commands]])
+) as Record<FeatureName, string[]>;
+
+function spec(feature: FeatureName, commands: readonly string[]): CommandSpec {
+  return { feature, commands };
+}
 
 export function buildFeatureRegistry(config: OfficegenConfig): CapabilityFeature[] {
   return FEATURE_NAMES.map((name) => ({
@@ -43,7 +56,7 @@ export function buildFeatureRegistry(config: OfficegenConfig): CapabilityFeature
     enabled: config.features[name].enabled,
     visibleInHelp: config.features[name].visibleInHelp,
     visibleToAgents: config.features[name].visibleToAgents,
-    commands: commandMap[name],
+    commands: [...commandMap[name]],
     requires: []
   }));
 }

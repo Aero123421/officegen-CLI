@@ -109,7 +109,7 @@ export function setCell(xml, ref, value) {
     const existing = cells.find((cell) => cell.ref.toUpperCase() === ref.toUpperCase());
     if (existing) {
         const pattern = new RegExp(`<c\\b[^>]*\\br=["']${escapeRegExp(existing.ref)}["'][^>]*?(?:\\/>|>[\\s\\S]*?<\\/c>)`);
-        const next = xml.replace(pattern, inlineCellXml(existing.ref, value));
+        const next = xml.replace(pattern, inlineCellXml(existing.ref, value, existing.attrs));
         return { changed: next !== xml, xml: next };
     }
     const rowNo = rowFromRef(ref);
@@ -184,14 +184,25 @@ function extractCellTags(xml, rowNumber) {
         };
     });
 }
-function inlineCellXml(ref, value) {
+function inlineCellXml(ref, value, existingAttrs = "") {
+    const preservedAttrs = preserveCellAttrs(existingAttrs);
+    const open = (type) => `<c r="${ref}"${type ? ` t="${type}"` : ""}${preservedAttrs}>`;
     if (value === null || value === undefined)
-        return `<c r="${ref}"/>`;
+        return `<c r="${ref}"${preservedAttrs}/>`;
     if (typeof value === "number" && Number.isFinite(value))
-        return `<c r="${ref}"><v>${value}</v></c>`;
+        return `${open()}<v>${value}</v></c>`;
     if (typeof value === "boolean")
-        return `<c r="${ref}" t="b"><v>${value ? 1 : 0}</v></c>`;
-    return `<c r="${ref}" t="inlineStr"><is><t>${escapeXmlText(String(value))}</t></is></c>`;
+        return `${open("b")}<v>${value ? 1 : 0}</v></c>`;
+    return `${open("inlineStr")}<is><t>${escapeXmlText(String(value))}</t></is></c>`;
+}
+function preserveCellAttrs(attrs) {
+    const preserved = [];
+    for (const name of ["s", "cm", "vm", "ph"]) {
+        const value = xmlAttr(attrs, name);
+        if (value !== undefined)
+            preserved.push(`${name}="${escapeXmlText(value)}"`);
+    }
+    return preserved.length ? ` ${preserved.join(" ")}` : "";
 }
 function boundsFromRef(ref) {
     const match = /^([A-Z]+)(\d+)$/i.exec(ref);

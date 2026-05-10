@@ -29,7 +29,7 @@ export interface VerifyResult {
   format: string;
   openable: boolean;
   noRepairDialogExpected: boolean;
-  nativeRenderer?: { attempted: boolean; ok: boolean; message?: string; artifact?: string };
+  nativeRenderer?: { attempted: boolean; ok: boolean; message?: string; artifact?: string; repairDialogExpected?: boolean };
   visual?: { fidelity: "approximate" | "native"; pagesChecked: number; blankPages: number };
   blockingIssues: string[];
   warnings: string[];
@@ -86,7 +86,7 @@ export async function verify(input: InputLike, options: VerifyOptions = {}): Pro
       }
     }
   }
-  const noRepairDialogExpected = ![...(diagnosed?.issues ?? [])].some((issue) => issue.code.startsWith("OFFICE_REPAIR_RISK"));
+  let noRepairDialogExpected = ![...(diagnosed?.issues ?? [])].some((issue) => issue.code.startsWith("OFFICE_REPAIR_RISK"));
 
   const visual = options.visual && inspected
     ? await timedPhase("visual", phaseTimings, options.timeoutMs, () => verifyVisual({ data: normalized.bytes, format: normalized.format }, options.config)).catch((error) => {
@@ -102,7 +102,7 @@ export async function verify(input: InputLike, options: VerifyOptions = {}): Pro
   if (visual?.blankPages) warnings.push(`VISUAL_BLANK_PAGE: ${visual.blankPages} blank preview pages detected.`);
 
   const nativeRenderer = options.native
-    ? await timedPhase("native", phaseTimings, options.timeoutMs, () => verifyNative(normalized, options, artifacts)).catch((error) => {
+    ? await timedPhase("native", phaseTimings, options.timeoutMs, () => verifyNative(normalized, options, artifacts)).catch((error): NonNullable<VerifyResult["nativeRenderer"]> => {
         if (isTimeout(error)) {
           partial = true;
           warnings.push(`VERIFY_TIMEOUT: native verification exceeded ${options.timeoutMs}ms.`);
@@ -112,6 +112,10 @@ export async function verify(input: InputLike, options: VerifyOptions = {}): Pro
       })
     : undefined;
   if (nativeRenderer && !nativeRenderer.ok) warnings.push(nativeRenderer.message ?? "Native renderer verification did not complete.");
+  if (nativeRenderer?.repairDialogExpected === true) {
+    noRepairDialogExpected = false;
+    blockingIssues.push("OFFICE_REPAIR_DIALOG_EXPECTED_NATIVE");
+  }
   if (!options.native && ["pptx", "docx", "xlsx"].includes(normalized.format)) {
     warnings.push("NATIVE_RENDERER_NOT_RUN: native repair-dialog/openability verification is optional-gated; use --native under an enabled renderer policy.");
   }
@@ -278,10 +282,16 @@ async function verifyNative(input: Awaited<ReturnType<typeof normalizeInput>>, o
   const dir = await mkdtemp(path.join(os.tmpdir(), "officegen-verify-"));
   const pdfPath = path.join(dir, "native.pdf");
   try {
-    const exported = await exportDocument(input.path, { to: "pdf", mode: "native", out: pdfPath, config: options.config });
+    const exported = await exportDocument(input.path, { to: "pdf", mode: "native", out: pdfPath, config: options.config, timeoutMs: options.timeoutMs });
     const pdf = await PDFDocument.load(await import("node:fs/promises").then((fs) => fs.readFile(pdfPath)), { ignoreEncryption: true });
     artifacts.nativePdf = pdfPath;
-    return { attempted: true, ok: true, artifact: pdfPath, message: `Native renderer produced ${pdf.getPageCount()} PDF page(s) with ${exported.renderer?.id ?? "renderer"}.` };
+    return {
+      attempted: true,
+      ok: true,
+      artifact: pdfPath,
+      repairDialogExpected: exported.renderer?.repairDialogExpected,
+      message: `Native renderer produced ${pdf.getPageCount()} PDF page(s) with ${exported.renderer?.id ?? "renderer"}.`
+    };
   } catch (error) {
     await rm(dir, { recursive: true, force: true });
     return { attempted: true, ok: false, message: error instanceof Error ? error.message : String(error) };
