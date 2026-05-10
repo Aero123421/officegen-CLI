@@ -14,7 +14,7 @@ const specArg = valueArg("--spec");
 const ref = valueArg("--ref");
 const expectedVersionArg = valueArg("--expected-version");
 const rootPackage = JSON.parse(await readFile(path.join(cwd, "package.json"), "utf8"));
-const expectedVersion = expectedVersionArg === "current" ? undefined : expectedVersionArg;
+const expectedVersion = expectedVersionArg === "current" ? rootPackage.version : expectedVersionArg;
 const repository = process.env.GITHUB_REPOSITORY ?? "Aero123421/officegen-CLI";
 const defaultSpec = specArg ?? process.env.OFFICEGEN_GITHUB_INSTALL_SPEC ?? (ref
   ? `github:${repository}#${ref}`
@@ -25,7 +25,7 @@ const defaultSpec = specArg ?? process.env.OFFICEGEN_GITHUB_INSTALL_SPEC ?? (ref
   : pathToFileURL(cwd).href);
 try {
   const npmCli = process.env.npm_execpath;
-  const installArgs = ["install", "-g", defaultSpec, "--prefix", temp, "--install-links"];
+  const installArgs = ["install", "-g", defaultSpec, "--prefix", temp, "--no-audit", "--no-fund", "--force", "--prefer-online"];
   const install = npmCli
     ? spawnSync(process.execPath, [npmCli, ...installArgs], { stdio: "inherit", shell: false })
     : spawnSync("npm", installArgs, {
