@@ -88,6 +88,7 @@ export function gateTopLevelCommand(command: string, context: RuntimeContext): C
   }
   if (entry.commandGroup === "help") return undefined;
   if (entry.commandGroup === "run" && second !== "prepare-reference") return undefined;
+  if (entry.commandGroup === "manifest" && second !== "inspect" && second !== "verify") return undefined;
   if (second && entry.commands.length > 1) {
     const allowed = new Set(entry.commands.map((registered) => registered.split(" ")[1]).filter(Boolean));
     if (allowed.size > 0 && !allowed.has(second)) {

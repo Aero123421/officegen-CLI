@@ -4,7 +4,7 @@ import { commandFromArgv, positionalArgs } from "../shared/argv.js";
 import { makeEnvelope, writeResult } from "../shared/envelope.js";
 import { COMMAND_METADATA, metadataFor } from "../shared/metadata.js";
 import { CliFailure } from "../shared/types.js";
-import { agentPayload, assetPayload, capabilitiesPayload, chartPayload, configPayload, designPayload, diagnosePayload, diffPayload, critiquePayload, improvePayload, benchmarkPayload, diagramPayload, doctorPayload, editPayload, errorInspectPayload, errorsListPayload, exportPayload, groupPayload, helpPayload, inspectPayload, layoutPayload, mcpPayload, pluginPayload, renderPayload, rendererPayload, repairPayload, runPayload, scaffoldPayload, schemaGetPayload, schemaListPayload, schemaMigratePayload, templatePayload, validatePayload, verifyPayload, viewPayload } from "./payloads.js";
+import { agentPayload, assetPayload, capabilitiesPayload, chartPayload, configPayload, designPayload, diagnosePayload, diffPayload, manifestPayload, selectPayload, planPayload, rollbackPayload, lockPayload, mergePayload, critiquePayload, improvePayload, benchmarkPayload, diagramPayload, doctorPayload, editPayload, errorInspectPayload, errorsListPayload, exportPayload, groupPayload, helpPayload, inspectPayload, layoutPayload, mcpPayload, pluginPayload, renderPayload, rendererPayload, repairPayload, runPayload, scaffoldPayload, schemaGetPayload, schemaListPayload, schemaMigratePayload, templatePayload, validatePayload, verifyPayload, viewPayload } from "./payloads.js";
 const leafPayloads = {
     capabilities: capabilitiesPayload,
     help: (ctx) => helpPayload(ctx, positionalArgs(ctx.argv, 3)),
@@ -20,6 +20,12 @@ const leafPayloads = {
     diagnose: diagnosePayload,
     repair: repairPayload,
     diff: diffPayload,
+    manifest: (ctx) => manifestPayload(ctx),
+    select: selectPayload,
+    plan: planPayload,
+    rollback: rollbackPayload,
+    lock: lockPayload,
+    merge: mergePayload,
     run: runPayload,
     critique: critiquePayload,
     improve: improvePayload
@@ -409,6 +415,12 @@ function baseCommand(name, description) {
         .option("--mode <mode>", "export mode")
         .option("--issues <path>", "repair issues JSON")
         .option("--gates <path>", "verification gates JSON")
+        .option("--verify <list>", "verification gates for integrated workflows")
+        .option("--goal <path>", "natural-language goal or constraints file")
+        .option("--input <path>", "input file for integrated workflows")
+        .option("--tx <path>", "transaction record JSON")
+        .option("--tx-out <path>", "write transaction record JSON")
+        .option("--lock <path>", "lock file JSON")
         .option("--images", "extract image assets")
         .option("--embedded", "inspect embedded media in Office packages")
         .option("--visual", "include approximate visual diff/regression output")

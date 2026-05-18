@@ -21,6 +21,7 @@ import { escapeXmlText, pxToEmu, replaceAllXmlText, setFirstTextInBlock } from "
 import { nextRelationshipId } from "./ooxml/relationships.js";
 import { PDFDocument, rgb } from "pdf-lib";
 import JSZip from "jszip";
+import { createHash } from "node:crypto";
 
 export type EditSelector = {
   stableObjectId?: string;
@@ -32,6 +33,10 @@ export type EditSelector = {
   shapeName?: string;
   contentControlTag?: string;
   namedRange?: string;
+  sheetName?: string;
+  cell?: string;
+  tableName?: string;
+  chartPath?: string;
   textMatch?: { text: string; exact?: boolean };
   textHash?: string;
   positionHash?: string;
@@ -84,6 +89,7 @@ export type EditOperation =
   | { op: "xlsx.appendRows"; sheet?: number; rows: unknown[][]; selector?: EditSelector }
   | { op: "xlsx.setCell"; sheet?: number; cell: string; value: unknown; selector?: EditSelector }
   | { op: "xlsx.setFormula"; sheet?: number; cell: string; formula: string; selector?: EditSelector }
+  | { op: "xlsx.setRange"; sheet?: number; startCell: string; values: unknown[][]; selector?: EditSelector }
   | { op: "xlsx.updateTable"; sheet?: number; startCell: string; rows: unknown[][]; selector?: EditSelector }
   | { op: "xlsx.writeTable"; sheet?: number; startCell: string; rows: unknown[][]; tableName?: string; selector?: EditSelector }
   | { op: "xlsx.table.resize"; selector: EditSelector; ref: string }
@@ -107,6 +113,8 @@ export interface EditOptions {
   atomic?: boolean;
   validateFirst?: boolean;
   idempotencyKey?: string;
+  expectedInputSha256?: string;
+  expectedObjectMapHash?: string;
   continueOnError?: boolean;
   config?: OfficegenConfig;
 }
@@ -133,6 +141,8 @@ export interface EditSelectorResolution {
 export interface ResolveEditSelectorsResult {
   schema: "officegen.edit.selectors@1.2";
   format: string;
+  inputSha256: string;
+  objectMapHash: string;
   resolutions: EditSelectorResolution[];
   objectMap: ObjectMapEntry[];
   caveats: string[];
@@ -142,13 +152,17 @@ export interface EditOperationResult {
   operationIndex: number;
   op: string;
   applied: boolean;
-  reason?: "not-found" | "ambiguous" | "unsupported" | "validation-failed" | "idempotency-replay" | "skipped-after-error";
+  reason?: "not-found" | "ambiguous" | "unsupported" | "validation-failed" | "idempotency-replay" | "skipped-after-error" | "stale-plan";
   message?: string;
 }
 
 export interface EditResult {
   schema: "officegen.edit.result@1.2";
   format: string;
+  dryRun?: boolean;
+  inputSha256?: string;
+  objectMapHash?: string;
+  rolledBack?: boolean;
   changed: boolean;
   applied: number;
   skipped: number;
@@ -202,6 +216,8 @@ async function resolveEditSelectorsForNormalized(
   return {
     schema: "officegen.edit.selectors@1.2",
     format: inspected.trusted.format,
+    inputSha256: sha256Bytes(normalized.bytes),
+    objectMapHash: objectMapHash(inspected.objectMap),
     resolutions,
     objectMap: inspected.objectMap,
     caveats: ["Selector resolution is based on the current inspect objectMap stableObjectId values."]
@@ -227,6 +243,9 @@ async function editOfficeXml(
       return {
         schema: "officegen.edit.result@1.2",
         format: input.format,
+        dryRun: options.dryRun,
+        inputSha256: selectorResult?.inputSha256,
+        objectMapHash: selectorResult?.objectMapHash,
         changed: false,
         applied: 0,
         skipped: operations.length,
@@ -242,6 +261,26 @@ async function editOfficeXml(
     }
   }
 
+  const staleErrors = stalePlanFailures(selectorResult, options, operations);
+  if (staleErrors.length) {
+    return {
+      schema: "officegen.edit.result@1.2",
+      format: input.format,
+      dryRun: options.dryRun,
+      inputSha256: selectorResult?.inputSha256,
+      objectMapHash: selectorResult?.objectMapHash,
+      changed: false,
+      applied: 0,
+      skipped: operations.length,
+      opResults: staleErrors,
+      errors: staleErrors,
+      caveats: [
+        "EDIT_STALE_PLAN: expected input or object map hash does not match the current file.",
+        ...zipSafetyCaveats(getLoadedZipSafetyReport(zip))
+      ]
+    };
+  }
+
   const dynamicPptxSelectors = input.format === "pptx" && hasSelectorAfterPptxCreator(operations);
   const runtimeResolutions = dynamicPptxSelectors
     ? (selectorResult?.resolutions.filter((resolution) => !hasPriorPptxCreator(operations, resolution.operationIndex)) ?? [])
@@ -253,7 +292,7 @@ async function editOfficeXml(
     return editAbortResult(input.format, operations.length, validationErrors, [
       "Atomic edit aborted before writing because selector validation failed.",
       ...zipSafetyCaveats(getLoadedZipSafetyReport(zip))
-    ]);
+    ], selectorResult, options.dryRun);
   }
 
   for (const [index, operation] of operations.entries()) {
@@ -302,7 +341,7 @@ async function editOfficeXml(
     return editAbortResult(input.format, skipped, opResults, [
       "Atomic edit aborted; no output bytes were written.",
       ...zipSafetyCaveats(getLoadedZipSafetyReport(zip))
-    ]);
+    ], selectorResult, options.dryRun);
   }
 
   if (options.idempotencyKey && applied > 0) zip.file(idempotencyMarkerPath(options.idempotencyKey), new Date().toISOString());
@@ -311,6 +350,9 @@ async function editOfficeXml(
   return {
     schema: "officegen.edit.result@1.2",
     format: input.format,
+    dryRun: options.dryRun,
+    inputSha256: selectorResult?.inputSha256,
+    objectMapHash: selectorResult?.objectMapHash,
     changed: applied > 0,
     applied,
     skipped,
@@ -447,6 +489,10 @@ async function applyOfficeOperation(
   if (format === "xlsx" && op === "xlsx.setFormula") {
     const formulaOp = operation as { sheet?: number; cell: string; formula: string };
     return editXlsxSetFormula(zip, formulaOp.sheet, formulaOp.cell, formulaOp.formula);
+  }
+  if (format === "xlsx" && op === "xlsx.setRange") {
+    const rangeOp = operation as { sheet?: number; startCell: string; values: unknown[][] };
+    return editXlsxSetRange(zip, rangeOp.sheet, rangeOp.startCell, rangeOp.values);
   }
   if (format === "xlsx" && (op === "xlsx.updateTable" || op === "xlsx.writeTable")) {
     const tableOp = operation as { sheet?: number; startCell: string; rows: unknown[][]; tableName?: string };
@@ -824,6 +870,20 @@ async function editXlsxSetCell(zip: Awaited<ReturnType<typeof loadZip>>, sheet: 
   const next = setCell(xml, ref, value);
   if (next.changed) zip.file(path, next.xml);
   return next.changed;
+}
+
+async function editXlsxSetRange(zip: Awaited<ReturnType<typeof loadZip>>, sheet: number | undefined, startCell: string, values: unknown[][]): Promise<boolean> {
+  const start = /^([A-Z]+)(\d+)$/i.exec(startCell);
+  if (!start || !values.length) throw new Error("SELECTOR_NOT_FOUND: xlsx.setRange requires a valid startCell and non-empty values.");
+  const startCol = columnIndex(start[1] ?? "A");
+  const startRow = Number(start[2]);
+  let changed = false;
+  for (const [rowOffset, row] of values.entries()) {
+    for (const [colOffset, value] of row.entries()) {
+      changed = (await editXlsxSetCell(zip, sheet, `${columnName(startCol + colOffset)}${startRow + rowOffset}`, value)) || changed;
+    }
+  }
+  return changed;
 }
 
 async function editXlsxSetFormula(zip: Awaited<ReturnType<typeof loadZip>>, sheet: number | undefined, ref: string, formula: string): Promise<boolean> {
@@ -1440,6 +1500,30 @@ function validationFailures(selectorResult: ResolveEditSelectorsResult | undefin
     }));
 }
 
+function stalePlanFailures(selectorResult: ResolveEditSelectorsResult | undefined, options: EditOptions, operations: EditOperation[]): EditOperationResult[] {
+  if (!selectorResult) return [];
+  const failures: EditOperationResult[] = [];
+  if (options.expectedInputSha256 && options.expectedInputSha256 !== selectorResult.inputSha256) {
+    failures.push({
+      operationIndex: -1,
+      op: "stalePlan",
+      applied: false,
+      reason: "stale-plan",
+      message: `EDIT_STALE_PLAN: expectedInputSha256 ${options.expectedInputSha256} does not match current ${selectorResult.inputSha256}.`
+    });
+  }
+  if (options.expectedObjectMapHash && options.expectedObjectMapHash !== selectorResult.objectMapHash) {
+    failures.push({
+      operationIndex: -1,
+      op: "stalePlan",
+      applied: false,
+      reason: "stale-plan",
+      message: `EDIT_STALE_PLAN: expectedObjectMapHash ${options.expectedObjectMapHash} does not match current ${selectorResult.objectMapHash}.`
+    });
+  }
+  return failures.length ? failures.map((failure) => ({ ...failure, message: `${failure.message} ${operations.length} operations were not applied.` })) : [];
+}
+
 async function inspectCurrentObjectMap(
   zip: Awaited<ReturnType<typeof loadZip>>,
   format: "pptx" | "docx" | "xlsx",
@@ -1448,6 +1532,28 @@ async function inspectCurrentObjectMap(
   const bytes = await zipToBytes(zip);
   const inspected = await inspect({ data: bytes, format }, { config });
   return inspected.objectMap;
+}
+
+function sha256Bytes(bytes: Uint8Array): string {
+  return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+}
+
+function objectMapHash(objectMap: ObjectMapEntry[]): string {
+  return `sha256:${createHash("sha256").update(stableStringify(objectMap.map((entry) => ({
+    stableObjectId: entry.stableObjectId,
+    kind: entry.kind,
+    label: entry.label,
+    text: entry.text ?? entry.textPreview,
+    bbox: entry.bbox,
+    selectorHints: entry.selectorHints
+  })))).digest("hex")}`;
+}
+
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`).join(",")}}`;
 }
 
 function hasSelectorAfterPptxCreator(operations: EditOperation[]): boolean {
@@ -1470,11 +1576,23 @@ function selectorTargetsExplicitSlide(selector: EditSelector | undefined): boole
   return typeof selector.largestTextOnSlide === "number";
 }
 
-function editAbortResult(format: string, skipped: number, opResults: EditOperationResult[], caveats: string[]): EditResult {
+function editAbortResult(
+  format: string,
+  skipped: number,
+  opResults: EditOperationResult[],
+  caveats: string[],
+  selectorResult?: ResolveEditSelectorsResult,
+  dryRun?: boolean
+): EditResult {
   const errors = opResults.filter((result) => result.reason && result.reason !== "unsupported");
+  const rolledBack = opResults.some((result) => result.applied);
   return {
     schema: "officegen.edit.result@1.2",
     format,
+    dryRun,
+    inputSha256: selectorResult?.inputSha256,
+    objectMapHash: selectorResult?.objectMapHash,
+    rolledBack: rolledBack || undefined,
     changed: false,
     applied: 0,
     skipped,
@@ -1515,6 +1633,15 @@ function resolveMatches(objectMap: ObjectMapEntry[], selector: EditSelector): Ob
   if (selector.positionHash) candidates = candidates.filter((entry) => entry.selectorHints?.positionHash === selector.positionHash);
   if (selector.contentControlTag) candidates = candidates.filter((entry) => entry.selectorHints?.contentControlTag === selector.contentControlTag || entry.selectorHints?.tag === selector.contentControlTag);
   if (selector.namedRange) candidates = candidates.filter((entry) => entry.selectorHints?.namedRange === selector.namedRange || entry.label === selector.namedRange);
+  if (selector.sheetName) candidates = candidates.filter((entry) => {
+    const expected = selector.sheetName?.toLowerCase();
+    const hinted = String(entry.selectorHints?.sheetName ?? "").toLowerCase();
+    const fallback = entry.selectorHints?.sheet ? `sheet${entry.selectorHints.sheet}`.toLowerCase() : "";
+    return hinted === expected || fallback === expected;
+  });
+  if (selector.cell) candidates = candidates.filter((entry) => String(entry.selectorHints?.cell ?? entry.label ?? "").toUpperCase() === selector.cell?.toUpperCase());
+  if (selector.tableName) candidates = candidates.filter((entry) => String(entry.selectorHints?.tableName ?? entry.label ?? "") === selector.tableName);
+  if (selector.chartPath) candidates = candidates.filter((entry) => String(entry.selectorHints?.chartPath ?? entry.xmlPath ?? "") === selector.chartPath);
   const text = selector.textMatch?.text ?? selector.contains;
   if (text) candidates = candidates.filter((entry) => selector.textMatch?.exact ? entry.text === text : entry.text?.includes(text));
   if (selector.nearestTo) return nearestMatches(candidates, selector);

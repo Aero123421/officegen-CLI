@@ -147,6 +147,12 @@ describe("officegen CLI command surface", () => {
       "diagnose",
       "repair",
       "diff",
+      "manifest",
+      "select",
+      "plan",
+      "rollback",
+      "lock",
+      "merge",
       "run",
       "critique",
       "improve",
@@ -169,6 +175,7 @@ describe("officegen CLI command surface", () => {
     for (const command of commands) {
       expect(envelope.availableCommands, command).toContain(command);
     }
+    expect(envelope.result.visibleCommands).toContain("run office-edit");
   });
 
   it("accepts schema fetch as an alias for schema get", async () => {
@@ -642,6 +649,70 @@ describe("officegen CLI command surface", () => {
     expect(await readFile(path.join(cwd, ".officegen", "prep", "manifest.json"), "utf8")).toContain("officegen.prepare-reference.manifest@1.2");
     expect(await readFile(path.join(cwd, ".officegen", "prep", "reference-view", "contact-sheet.html"), "utf8")).toContain("officegen contact sheet");
     expect(JSON.parse(await readFile(path.join(cwd, ".officegen", "prep", "edit-ops.schema.json"), "utf8")).$id).toBe("officegen.edit.ops@1.2");
+  });
+
+  it("resolves selectors through the select command", async () => {
+    const cwd = await tempWorkspace();
+    await writeFile(path.join(cwd, "deck.pptx"), await minimalPptxWithImage(false));
+    await writeFile(path.join(cwd, "selector.json"), `${JSON.stringify({ contains: "Title" })}\n`, "utf8");
+
+    const captured = await run(["select", "deck.pptx", "--selector", "selector.json", "--json"], cwd);
+    const envelope = parseEnvelope(captured);
+
+    expect(envelope.ok).toBe(true);
+    expect(envelope.result.schema).toBe("officegen.edit.selectors@1.2");
+    expect(envelope.result.inputSha256).toMatch(/^sha256:/);
+    expect(envelope.result.objectMapHash).toMatch(/^sha256:/);
+    expect(envelope.result.resolution.matched).toBe(true);
+  });
+
+  it("creates and verifies manifests and scoped locks", async () => {
+    const cwd = await tempWorkspace();
+    await writeFile(path.join(cwd, "deck.pptx"), await minimalPptxWithImage(false));
+
+    const manifest = parseEnvelope(await run(["manifest", "deck.pptx", "--out", ".officegen/manifest.json", "--json"], cwd));
+    const lock = parseEnvelope(await run(["lock", "deck.pptx", "--scope", "slide:1", "--name", "agent-a", "--out", ".officegen/lock.json", "--json"], cwd));
+    const verified = parseEnvelope(await run(["manifest", "verify", ".officegen/manifest.json", "--json"], cwd));
+
+    expect(manifest.ok).toBe(true);
+    expect(manifest.result.schema).toBe("officegen.artifact.manifest@1.2");
+    expect(lock.ok).toBe(true);
+    expect(lock.result.scope).toBe("slide:1");
+    expect(verified.ok).toBe(true);
+    expect(verified.result.schema).toBe("officegen.manifest.verify.result@1.2");
+  });
+
+  it("does not attach output artifacts to dry-run edits with --out", async () => {
+    const cwd = await tempWorkspace();
+    await writeFile(path.join(cwd, "deck.pptx"), await minimalPptxWithImage(false));
+    await writeFile(path.join(cwd, "edited.pptx"), "stale", "utf8");
+    await writeFile(path.join(cwd, "ops.json"), `${JSON.stringify({
+      schema: "officegen.edit.ops@1.2",
+      target: "pptx",
+      ops: [{ op: "setText", selector: { contains: "Title" }, text: "New Title" }]
+    })}\n`, "utf8");
+
+    const captured = await run(["edit", "deck.pptx", "--ops", "ops.json", "--dry-run", "--out", "edited.pptx", "--json"], cwd);
+    const envelope = parseEnvelope(captured);
+
+    expect(envelope.ok).toBe(true);
+    expect(envelope.mutationStatus).toBe("plan_only");
+    expect(envelope.artifacts).toEqual([]);
+    expect(await readFile(path.join(cwd, "edited.pptx"), "utf8")).toBe("stale");
+  });
+
+  it("runs office-edit from a deterministic replacement goal", async () => {
+    const cwd = await tempWorkspace();
+    await writeFile(path.join(cwd, "deck.pptx"), await minimalPptxWithImage(false));
+    await writeFile(path.join(cwd, "goal.md"), "replace \"Title\" with \"Updated\"\n", "utf8");
+
+    const captured = await run(["run", "office-edit", "--input", "deck.pptx", "--goal", "goal.md", "--out", ".officegen/edited.pptx", "--json", "--json-budget-bytes", "120000"], cwd);
+    const envelope = parseEnvelope(captured);
+
+    expect(envelope.ok).toBe(true);
+    expect(envelope.result.schema).toBe("officegen.office-edit.result@1.2");
+    expect(envelope.result.edit.changed).toBe(true);
+    expect(await readFile(path.join(cwd, ".officegen", "edited.pptx"))).toBeInstanceOf(Buffer);
   });
 
   it("enforces output-root for prepare-reference artifacts", async () => {

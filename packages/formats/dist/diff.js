@@ -6,6 +6,7 @@ import { PDFDocument } from "pdf-lib";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { createHash } from "node:crypto";
 export async function diffDocuments(before, after, options = {}) {
     const beforeInspect = await inspect(before, { depth: "shallow", config: options.config });
     const afterInspect = await inspect(after, { depth: "shallow", config: options.config });
@@ -15,7 +16,10 @@ export async function diffDocuments(before, after, options = {}) {
     const visualRegressionScore = visual?.pageScores.length
         ? Number((visual.pageScores.reduce((sum, page) => sum + page.score, 0) / visual.pageScores.length).toFixed(4))
         : undefined;
-    const changed = semantic.added.length > 0 || semantic.removed.length > 0 || semantic.changedText.length > 0 || (semantic.partChanges?.length ?? 0) > 0 || (visualRegressionScore ?? 0) > 0;
+    const beforePages = pageLikeCount(beforeInspect);
+    const afterPages = pageLikeCount(afterInspect);
+    const pageCountChanged = beforePages !== afterPages;
+    const changed = semantic.added.length > 0 || semantic.removed.length > 0 || semantic.changedText.length > 0 || semantic.changedGeometry.length > 0 || (semantic.partChanges?.length ?? 0) > 0 || pageCountChanged || (visualRegressionScore ?? 0) > 0;
     return {
         schema: "officegen.diff.result@1.2",
         formatBefore: beforeInspect.trusted.format,
@@ -25,6 +29,10 @@ export async function diffDocuments(before, after, options = {}) {
             addedObjects: semantic.added.length,
             removedObjects: semantic.removed.length,
             changedTextObjects: semantic.changedText.length,
+            changedGeometryObjects: semantic.changedGeometry.length,
+            beforePages,
+            afterPages,
+            pageCountChanged,
             changedParts: semantic.partChanges?.length ?? 0,
             visualRegressionScore
         },
@@ -58,7 +66,28 @@ function semanticDiff(before, after) {
         };
     })
         .filter((entry) => Boolean(entry));
-    return { added, removed, changedText };
+    const changedGeometry = [...beforeMap.entries()]
+        .map(([stableObjectId, beforeEntry]) => {
+        const afterEntry = afterMap.get(stableObjectId);
+        const beforeBbox = normalizedBbox(beforeEntry);
+        const afterBbox = afterEntry ? normalizedBbox(afterEntry) : undefined;
+        if (!afterEntry || !beforeBbox || !afterBbox || bboxEqual(beforeBbox, afterBbox))
+            return undefined;
+        return {
+            stableObjectId,
+            kind: beforeEntry.kind,
+            beforeBbox,
+            afterBbox,
+            delta: {
+                x: Number((afterBbox[0] - beforeBbox[0]).toFixed(2)),
+                y: Number((afterBbox[1] - beforeBbox[1]).toFixed(2)),
+                width: Number((afterBbox[2] - beforeBbox[2]).toFixed(2)),
+                height: Number((afterBbox[3] - beforeBbox[3]).toFixed(2))
+            }
+        };
+    })
+        .filter((entry) => Boolean(entry));
+    return { added, removed, changedText, changedGeometry };
 }
 async function semanticPartDiff(before, after, formatBefore, formatAfter) {
     if (formatBefore !== formatAfter || !["pptx", "docx", "xlsx"].includes(formatBefore))
@@ -85,6 +114,20 @@ async function semanticPartDiff(before, after, formatBefore, formatAfter) {
         });
     }
     return changes;
+}
+function normalizedBbox(entry) {
+    if (entry.bbox && entry.bbox.length === 4)
+        return entry.bbox;
+    if (!entry.bounds)
+        return undefined;
+    return [entry.bounds.x, entry.bounds.y, entry.bounds.width, entry.bounds.height];
+}
+function bboxEqual(left, right) {
+    return left.every((value, index) => Math.abs(value - (right[index] ?? 0)) < 0.01);
+}
+function pageLikeCount(inspected) {
+    const summary = inspected.trusted.summary;
+    return Number(summary.pages ?? summary.slides ?? summary.sheets ?? (inspected.trusted.format === "docx" ? 1 : 0));
 }
 async function packagePartHashes(zip) {
     const map = new Map();
@@ -122,12 +165,7 @@ function classifyPackagePart(file) {
     return "packagePart";
 }
 function bytesHash(bytes) {
-    let hash = 2166136261;
-    for (const byte of bytes) {
-        hash ^= byte;
-        hash = Math.imul(hash, 16777619);
-    }
-    return (hash >>> 0).toString(16).padStart(8, "0");
+    return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
 }
 async function visualDiff(beforeInput, afterInput, before, after, options) {
     if (options.native)
@@ -151,6 +189,9 @@ async function visualDiff(beforeInput, afterInput, before, after, options) {
     return {
         fidelity: "approximate",
         pagesCompared,
+        beforePages: beforeView.pages.length,
+        afterPages: afterView.pages.length,
+        pageCountChanged: beforeView.pages.length !== afterView.pages.length,
         pageScores
     };
 }
@@ -174,6 +215,9 @@ async function pdfByteVisualDiff(beforeInput, afterInput, options) {
     return {
         fidelity: "approximate",
         pagesCompared,
+        beforePages: beforeDoc.getPageCount(),
+        afterPages: afterDoc.getPageCount(),
+        pageCountChanged: beforeDoc.getPageCount() !== afterDoc.getPageCount(),
         pageScores,
         renderer: "pdf-bytes"
     };
@@ -204,6 +248,9 @@ async function nativeVisualDiff(beforeInput, afterInput, options) {
         return {
             fidelity: "native",
             pagesCompared,
+            beforePages: beforeDoc.getPageCount(),
+            afterPages: afterDoc.getPageCount(),
+            pageCountChanged: beforeDoc.getPageCount() !== afterDoc.getPageCount(),
             pageScores,
             renderer: beforeExport.renderer?.id ?? "native"
         };
@@ -236,12 +283,7 @@ function normalizedStringDistance(before, after) {
     return Number(Math.min(1, changed / max).toFixed(4));
 }
 function textHash(value) {
-    let hash = 2166136261;
-    for (const char of value) {
-        hash ^= char.charCodeAt(0);
-        hash = Math.imul(hash, 16777619);
-    }
-    return (hash >>> 0).toString(16).padStart(8, "0");
+    return `sha256:${createHash("sha256").update(value).digest("hex")}`;
 }
 export const diff = diffDocuments;
 //# sourceMappingURL=diff.js.map

@@ -9,6 +9,10 @@ export type EditSelector = {
     shapeName?: string;
     contentControlTag?: string;
     namedRange?: string;
+    sheetName?: string;
+    cell?: string;
+    tableName?: string;
+    chartPath?: string;
     textMatch?: {
         text: string;
         exact?: boolean;
@@ -241,6 +245,12 @@ export type EditOperation = {
     formula: string;
     selector?: EditSelector;
 } | {
+    op: "xlsx.setRange";
+    sheet?: number;
+    startCell: string;
+    values: unknown[][];
+    selector?: EditSelector;
+} | {
     op: "xlsx.updateTable";
     sheet?: number;
     startCell: string;
@@ -287,6 +297,8 @@ export interface EditOptions {
     atomic?: boolean;
     validateFirst?: boolean;
     idempotencyKey?: string;
+    expectedInputSha256?: string;
+    expectedObjectMapHash?: string;
     continueOnError?: boolean;
     config?: OfficegenConfig;
 }
@@ -311,6 +323,8 @@ export interface EditSelectorResolution {
 export interface ResolveEditSelectorsResult {
     schema: "officegen.edit.selectors@1.2";
     format: string;
+    inputSha256: string;
+    objectMapHash: string;
     resolutions: EditSelectorResolution[];
     objectMap: ObjectMapEntry[];
     caveats: string[];
@@ -319,12 +333,16 @@ export interface EditOperationResult {
     operationIndex: number;
     op: string;
     applied: boolean;
-    reason?: "not-found" | "ambiguous" | "unsupported" | "validation-failed" | "idempotency-replay" | "skipped-after-error";
+    reason?: "not-found" | "ambiguous" | "unsupported" | "validation-failed" | "idempotency-replay" | "skipped-after-error" | "stale-plan";
     message?: string;
 }
 export interface EditResult {
     schema: "officegen.edit.result@1.2";
     format: string;
+    dryRun?: boolean;
+    inputSha256?: string;
+    objectMapHash?: string;
+    rolledBack?: boolean;
     changed: boolean;
     applied: number;
     skipped: number;

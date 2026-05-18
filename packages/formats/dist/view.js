@@ -32,7 +32,7 @@ function toPages(inspected, options) {
         return slides.map((slide, index) => buildSlidePage(slide, index + 1, format, inspected.objectMap));
     }
     if (inspected.trusted.format === "docx") {
-        return [buildDocxPage((inspected.untrusted.paragraphs ?? []).slice(0, 200), format)];
+        return [buildDocxPage((inspected.untrusted.paragraphs ?? []).slice(0, 200), format, inspected.objectMap)];
     }
     if (inspected.trusted.format === "xlsx") {
         const sheets = (inspected.untrusted.sheets ?? []).slice(0, maxPages);
@@ -41,7 +41,7 @@ function toPages(inspected, options) {
     if (inspected.trusted.format === "pdf") {
         const pdfMaxPages = options.maxPages ?? 10;
         const pages = (inspected.untrusted.pages ?? []).slice(0, pdfMaxPages);
-        return pages.map((page, index) => buildPdfPage(page, index + 1, format));
+        return pages.map((page, index) => buildPdfPage(page, index + 1, format, inspected.objectMap));
     }
     return [];
 }
@@ -99,16 +99,22 @@ function renderSlideSvgObject(object) {
         : `<rect x="${bounds.x}" y="${bounds.y}" width="${bounds.width}" height="${bounds.height}" fill="${object.kind === "chart" ? "#f6f8fa" : "#fff"}" stroke="#8c959f"/>`;
     return `<g data-stable-object-id="${escapeXml(object.stableObjectId)}" data-kind="${escapeXml(object.kind)}">${box}<text x="${bounds.x + 6}" y="${bounds.y + Math.min(bounds.height - 6, fontSize + 8)}" font-family="Arial, sans-serif" font-size="${fontSize}" fill="#111">${escapeXml(text)}</text></g>`;
 }
-function buildDocxPage(paragraphs, format) {
-    const objects = paragraphs
+function buildDocxPage(paragraphs, format, objectMap = []) {
+    const mapped = objectMap.filter((entry) => entry.kind === "paragraph");
+    const fallback = paragraphs
         .filter((paragraph) => paragraph.text)
         .map((paragraph, index) => ({
         stableObjectId: String(paragraph.stableObjectId),
         kind: "paragraph",
         text: String(paragraph.text ?? ""),
         bounds: { x: 72, y: 72 + index * 28, width: 468, height: 24 },
+        trust: { level: "untrusted", reason: "document-content" },
         untrusted: true
     }));
+    const objects = (mapped.length ? mapped : fallback).map((entry, index) => {
+        const bounds = entry.bounds ?? { x: 72, y: 72 + index * 28, width: 468, height: 24 };
+        return { ...entry, bounds, bbox: entry.bbox ?? [bounds.x, bounds.y, bounds.width, bounds.height] };
+    });
     if (format === "html") {
         return {
             page: 1,
@@ -128,14 +134,20 @@ function buildDocxPage(paragraphs, format) {
 }
 function buildSheetPage(sheet, page, format, objectMap = []) {
     const cells = (sheet.cells ?? []).slice(0, 120);
-    const objects = cells.map((cell, index) => ({
+    const mappedCells = objectMap.filter((entry) => entry.kind === "cell" && Number(entry.selectorHints?.sheet) === page).slice(0, 120);
+    const fallbackCells = cells.map((cell, index) => ({
         stableObjectId: String(cell.stableObjectId),
         kind: "cell",
         label: String(cell.ref ?? ""),
         text: String(cell.value ?? ""),
         bounds: { x: 32 + (index % 6) * 120, y: 48 + Math.floor(index / 6) * 32, width: 120, height: 32 },
+        trust: { level: "untrusted", reason: "document-content" },
         untrusted: true
     }));
+    const objects = (mappedCells.length ? mappedCells : fallbackCells).map((entry, index) => {
+        const bounds = entry.bounds ?? { x: 32 + (index % 6) * 120, y: 48 + Math.floor(index / 6) * 32, width: 120, height: 32 };
+        return { ...entry, bounds, bbox: entry.bbox ?? [bounds.x, bounds.y, bounds.width, bounds.height] };
+    });
     const workbookObjects = page === 1
         ? objectMap
             .filter((entry) => entry.kind !== "cell")
@@ -167,26 +179,31 @@ function buildSheetPage(sheet, page, format, objectMap = []) {
         objectMap: pageObjects
     };
 }
-function buildPdfPage(pageInfo, page, format) {
+function buildPdfPage(pageInfo, page, format, objectMap = []) {
     const width = Number(pageInfo.width ?? 612);
     const height = Number(pageInfo.height ?? 792);
     const stableObjectId = String(pageInfo.stableObjectId ?? makeStableObjectId("pdf", "document", "page", page));
-    const objectMap = [];
+    const pageObjects = objectMap
+        .filter((entry) => Number(entry.selectorHints?.page) === page)
+        .map((entry, index) => {
+        const bounds = entry.bounds ?? { x: 24, y: 56 + index * 24, width: Math.max(120, width - 48), height: 20 };
+        return { ...entry, bounds, bbox: entry.bbox ?? [bounds.x, bounds.y, bounds.width, bounds.height] };
+    });
     if (format === "html") {
         return {
             page,
             stableObjectId,
             format,
             content: `<section data-stable-object-id="${escapeHtml(stableObjectId)}" style="width:${width}px;height:${height}px;border:1px solid #d0d7de;background:#fff;font-family:Arial,sans-serif"><p style="padding:24px;color:#57606a">PDF page ${page}</p></section>`,
-            objectMap
+            objectMap: pageObjects
         };
     }
     return {
         page,
         stableObjectId,
         format,
-        content: `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" data-stable-object-id="${escapeXml(stableObjectId)}"><rect width="${width}" height="${height}" fill="#fff" stroke="#d0d7de"/><text x="24" y="40" font-family="Arial, sans-serif" font-size="16" fill="#57606a">PDF page ${page}</text></svg>`,
-        objectMap
+        content: `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" data-stable-object-id="${escapeXml(stableObjectId)}"><rect width="${width}" height="${height}" fill="#fff" stroke="#d0d7de"/><text x="24" y="40" font-family="Arial, sans-serif" font-size="16" fill="#57606a">PDF page ${page}</text>${pageObjects.map((object) => `<text x="${object.bounds?.x ?? 24}" y="${(object.bounds?.y ?? 56) + 14}" font-family="Arial, sans-serif" font-size="10" fill="#24292f" data-stable-object-id="${escapeXml(object.stableObjectId)}">${escapeXml(object.textPreview ?? object.text ?? "")}</text>`).join("")}</svg>`,
+        objectMap: pageObjects
     };
 }
 //# sourceMappingURL=view.js.map

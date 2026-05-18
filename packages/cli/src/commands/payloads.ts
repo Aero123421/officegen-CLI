@@ -24,12 +24,14 @@ import {
   inspect,
   inspectAsset,
   inspectEmbeddedAssets,
+  mergePdfs,
   nativeRendererDoctor,
   render,
   renderChart,
   renderDiagram,
   repair,
   replaceAsset,
+  resolveEditSelectors,
   validateOoxml,
   verify,
   view,
@@ -465,6 +467,8 @@ export function errorLookup(code: string | undefined): unknown {
 
 function supportedFormatsForFeature(feature: FeatureKey): string[] {
   if (feature === "inspect" || feature === "view" || feature === "diagnose" || feature === "verify") return ["pptx", "docx", "xlsx", "pdf"];
+  if (feature === "manifest" || feature === "select" || feature === "plan" || feature === "rollback" || feature === "lock") return ["pptx", "docx", "xlsx", "pdf", "json"];
+  if (feature === "merge") return ["pdf"];
   if (feature === "critique" || feature === "improve") return ["pptx", "docx", "xlsx"];
   if (feature === "benchmark") return ["json", "pptx", "docx", "xlsx", "pdf"];
   if (feature === "render") return ["pptx", "docx", "xlsx", "pdf"];
@@ -641,11 +645,13 @@ async function writeViewArtifacts(context: RuntimeContext, outDir: string, resul
 
 async function writeGeneratedJson(context: RuntimeContext, filePath: string, value: unknown): Promise<void> {
   await validateGeneratedOutputFile(context, filePath);
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
   await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
 }
 
 async function writeGeneratedText(context: RuntimeContext, filePath: string, value: string): Promise<void> {
   await validateGeneratedOutputFile(context, filePath);
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
   await fs.writeFile(filePath, value, "utf8");
 }
 
@@ -705,18 +711,25 @@ export async function editPayload(context: RuntimeContext): Promise<unknown> {
     }, 3);
   }
   const inputPath = await validateInputPath(context, input);
-  const out = await validatedOutOption(context);
-  if (!hasFlag(context.argv, "--dry-run")) await assertSafeOoxmlMutationInput(inputPath, "edit");
+  const dryRun = hasFlag(context.argv, "--dry-run");
+  const out = dryRun ? optionValue(context.argv, "--out") : await validatedOutOption(context);
+  await assertMutationLock(context, inputPath);
+  if (!dryRun) await assertSafeOoxmlMutationInput(inputPath, "edit");
   const result = await edit(inputPath, operations, withFormatConfig(context, {
     out,
-    dryRun: hasFlag(context.argv, "--dry-run"),
+    dryRun,
     resolveSelectors: hasFlag(context.argv, "--resolve-selectors"),
     atomic: booleanOption(editOptions, "atomic"),
     validateFirst: booleanOption(editOptions, "validateFirst"),
     continueOnError: booleanOption(editOptions, "continueOnError"),
-    idempotencyKey: typeof editOptions.idempotencyKey === "string" ? editOptions.idempotencyKey : undefined
+    idempotencyKey: typeof editOptions.idempotencyKey === "string" ? editOptions.idempotencyKey : undefined,
+    expectedInputSha256: typeof editOptions.expectedInputSha256 === "string" ? editOptions.expectedInputSha256 : undefined,
+    expectedObjectMapHash: typeof editOptions.expectedObjectMapHash === "string" ? editOptions.expectedObjectMapHash : undefined
   }));
-  return withOutputArtifact(result, out, "edit", inputPath);
+  if (!dryRun && optionValue(context.argv, "--tx-out") && result.changed && out) {
+    await writeEditTransaction(context, optionValue(context.argv, "--tx-out")!, inputPath, out);
+  }
+  return dryRun ? result : withOutputArtifact(result, out, "edit", inputPath);
 }
 
 async function hydrateEditOperationAssets(context: RuntimeContext, operations: ReturnType<typeof normalizeEditOperations>): Promise<ReturnType<typeof normalizeEditOperations>> {
@@ -732,6 +745,45 @@ async function hydrateEditOperationAssets(context: RuntimeContext, operations: R
     hydrated.push(operation);
   }
   return hydrated as ReturnType<typeof normalizeEditOperations>;
+}
+
+async function assertMutationLock(context: RuntimeContext, inputPath: string): Promise<void> {
+  const lockPath = optionValue(context.argv, "--lock");
+  if (!lockPath) return;
+  const lock = asRecord(await readInputJson(context, lockPath));
+  const expectedInput = typeof lock.input === "string" ? path.resolve(lock.input) : undefined;
+  const actualInput = path.resolve(inputPath);
+  const expectedSha = typeof lock.inputSha256 === "string" ? lock.inputSha256 : undefined;
+  const actualSha = await sha256File(inputPath);
+  const agent = optionValue(context.argv, "--name") ?? "agent";
+  if ((expectedInput && expectedInput !== actualInput) || (expectedSha && expectedSha !== actualSha) || (lock.agent && lock.agent !== agent)) {
+    throw new CliFailure({
+      code: "EDIT_TRANSACTION_FAILED",
+      command: commandFromArgv(context.argv),
+      message: "Mutation lock does not match the requested input, hash, or agent.",
+      details: { lockPath, expectedInput, actualInput, expectedSha, actualSha, expectedAgent: lock.agent, agent }
+    }, 3);
+  }
+}
+
+async function writeEditTransaction(context: RuntimeContext, txOut: string, inputPath: string, outputPath: string): Promise<void> {
+  const txPath = await validateOutputPath(context, txOut);
+  const backupDir = path.join(context.cwd, ".officegen", "transactions");
+  await fs.mkdir(backupDir, { recursive: true });
+  const backupPath = path.join(backupDir, `${path.basename(inputPath)}.${Date.now()}.bak`);
+  await fs.copyFile(inputPath, backupPath);
+  const tx = {
+    schema: "officegen.transaction@1.2",
+    inputPath,
+    outputPath,
+    backupPath,
+    inputSha256: await sha256File(inputPath),
+    outputSha256: await sha256File(outputPath).catch(() => undefined),
+    createdAt: new Date().toISOString(),
+    rollbackCommand: `officegen rollback --tx ${quoteCommandValue(txPath)} --out ${quoteCommandValue(inputPath)} --json`
+  };
+  await fs.mkdir(path.dirname(txPath), { recursive: true });
+  await fs.writeFile(txPath, `${JSON.stringify(tx, null, 2)}\n`, "utf8");
 }
 
 function editOpsValidationPayload(raw: unknown, operations: ReturnType<typeof normalizeEditOperations>, input: string): unknown {
@@ -925,6 +977,201 @@ export async function diffPayload(context: RuntimeContext): Promise<unknown> {
     })
   );
   return maybeWriteReport(context, result, "diff");
+}
+
+export async function manifestPayload(context: RuntimeContext, subcommand?: string): Promise<unknown> {
+  const args = positionalArgs(context.argv, 3);
+  const effectiveSubcommand = subcommand ?? (args[0] === "inspect" || args[0] === "verify" ? args[0] : undefined);
+  const input = effectiveSubcommand ? args[1] : args[0];
+  if (!input) throw new CliFailure({ code: "SCHEMA_INVALID", command: `manifest${effectiveSubcommand ? ` ${effectiveSubcommand}` : ""}`, message: "manifest requires an input file." }, 2);
+  if (effectiveSubcommand === "inspect" || effectiveSubcommand === "verify") {
+    const manifestPath = await validateInputPath(context, input);
+    const manifest = asRecord(await readInputJson(context, input));
+    const artifacts = Array.isArray(manifest.artifacts) ? manifest.artifacts.map(asRecord) : [];
+    const checks: Array<Record<string, unknown> & { exists?: boolean; sha256Matches?: boolean }> = [];
+    for (const artifact of artifacts) {
+      const artifactPath = typeof artifact.path === "string" ? artifact.path : undefined;
+      if (!artifactPath) continue;
+      const absolute = path.isAbsolute(artifactPath) ? artifactPath : path.resolve(context.cwd, artifactPath);
+      const record = await artifactRecord(absolute, String(artifact.kind ?? "artifact"), String(artifact.format ?? (path.extname(absolute).slice(1) || "unknown")), "manifest verify");
+      const expectedSha = typeof artifact.sha256 === "string" ? artifact.sha256 : undefined;
+      checks.push({
+        ...record,
+        expectedSha256: expectedSha,
+        sha256Matches: expectedSha ? record.sha256 === expectedSha || `sha256:${record.sha256}` === expectedSha : undefined
+      });
+    }
+    const failed = checks.filter((check) => !check.exists || check.sha256Matches === false);
+    return maybeWriteReport(context, {
+      schema: "officegen.manifest.verify.result@1.2",
+      manifestPath,
+      manifestSchema: manifest.schema,
+      artifactCount: checks.length,
+      ok: failed.length === 0,
+      failed,
+      artifacts: checks
+    }, `manifest ${effectiveSubcommand}`);
+  }
+
+  const inputPath = await validateInputPath(context, input);
+  const [inspected, viewed] = await Promise.all([
+    inspect(inputPath, withFormatConfig(context, { depth: "summary" as const, structure: true })),
+    view(inputPath, withFormatConfig(context, { format: "svg" as const, maxPages: numberOption(context, "--max-pages") }))
+  ]);
+  const out = optionValue(context.argv, "--out");
+  const manifest = {
+    schema: "officegen.artifact.manifest@1.2",
+    source: {
+      path: inputPath,
+      format: inspected.trusted.format,
+      sha256: await sha256File(inputPath)
+    },
+    renderer: "officegen-approximate-svg-html",
+    generatedAt: new Date().toISOString(),
+    summary: inspected.trusted.summary,
+    pageCount: viewed.pages.length,
+    objectMapEntries: inspected.objectMap.length,
+    warnings: inspected.trusted.caveats,
+    commandHistory: [commandFromArgv(context.argv)]
+  };
+  const outPath = out ? await validateOutputPath(context, out) : undefined;
+  if (outPath) await writeGeneratedJson(context, outPath, manifest);
+  return maybeWriteReport(context, { ...manifest, out: outPath }, "manifest");
+}
+
+export async function selectPayload(context: RuntimeContext): Promise<unknown> {
+  const input = requireInput(context, 3, "select");
+  const selector = await selectorFromCli(context);
+  const result = await resolveEditSelectors(await validateInputPath(context, input), [{ op: "setText", selector, text: "" }], withFormatConfig(context, {}));
+  return maybeWriteReport(context, {
+    ...result,
+    selector,
+    resolution: result.resolutions[0],
+    readiness: result.resolutions[0]?.reason ? "blocked" : "pass",
+    nextSuggestedCommands: [
+      `officegen edit ${quoteCommandValue(input)} --ops ${quoteCommandValue("ops.json")} --dry-run --resolve-selectors --agent --json`
+    ]
+  }, "select");
+}
+
+async function selectorFromCli(context: RuntimeContext): Promise<Record<string, unknown>> {
+  const rawSelector = optionValue(context.argv, "--selector") ?? positionalArgs(context.argv, 3)[1];
+  if (!rawSelector) {
+    throw new CliFailure({
+      code: "SCHEMA_INVALID",
+      command: "select",
+      message: "select requires --selector <selector.json|json>."
+    }, 2);
+  }
+  if (rawSelector.trim().startsWith("{")) return asRecord(JSON.parse(rawSelector));
+  return asRecord(await readInputJson(context, rawSelector));
+}
+
+function intentOpsFromGoal(goal: string, target: string): ReturnType<typeof normalizeEditOperations> {
+  const ops: Array<Record<string, unknown>> = [];
+  const quotedReplace = /(?:replace|置換)\s+["'“”「](.+?)["'“”」]\s+(?:with|to|を|=>)\s+["'“”「](.+?)["'“”」]/i.exec(goal);
+  const japaneseReplace = /(.+?)を(.+?)に置換/.exec(goal);
+  const from = quotedReplace?.[1] ?? japaneseReplace?.[1]?.trim();
+  const to = quotedReplace?.[2] ?? japaneseReplace?.[2]?.trim();
+  if (from && to && ["pptx", "docx", "xlsx"].includes(target)) {
+    ops.push({ op: "replaceText", from, to });
+  }
+  return normalizeEditOperations({
+    schema: "officegen.edit.ops@1.2",
+    target,
+    ops
+  });
+}
+
+export async function planPayload(context: RuntimeContext): Promise<unknown> {
+  const input = requireInput(context, 3, "plan");
+  const goalPath = optionValue(context.argv, "--goal");
+  if (!goalPath) {
+    throw new CliFailure({ code: "SCHEMA_INVALID", command: "plan", message: "plan requires --goal <goal.md>." }, 2);
+  }
+  const inputPath = await validateInputPath(context, input);
+  const goal = await readInputText(context, goalPath);
+  const inspected = await inspect(inputPath, withFormatConfig(context, { depth: "summary" as const, structure: true }));
+  const ops = intentOpsFromGoal(goal, targetFromInput(input));
+  const selectorProbe = ops.length ? await resolveEditSelectors(inputPath, ops, withFormatConfig(context, {})) : undefined;
+  const plan = {
+    schema: "officegen.plan.result@1.2",
+    input: inputPath,
+    goal: goalPath,
+    target: inspected.trusted.format,
+    planOnly: true,
+    ops: {
+      schema: "officegen.edit.ops@1.2",
+      target: targetFromInput(input),
+      options: {
+        atomic: true,
+        expectedInputSha256: selectorProbe?.inputSha256,
+        expectedObjectMapHash: selectorProbe?.objectMapHash
+      },
+      ops
+    },
+    selectorResolution: selectorProbe,
+    confidence: selectorProbe?.resolutions.length ? Math.min(...selectorProbe.resolutions.map((resolution) => resolution.confidence ?? 0.5)) : undefined,
+    warnings: ops.length ? [] : ["PLAN_INTENT_UNSUPPORTED: deterministic intent parser could not produce EditOps from the goal."],
+    nextSuggestedCommands: [
+      `officegen edit ${quoteCommandValue(inputPath)} --ops ${quoteCommandValue(optionValue(context.argv, "--out") ?? "plan.json")} --dry-run --resolve-selectors --agent --json`
+    ]
+  };
+  const out = optionValue(context.argv, "--out");
+  const outPath = out ? await validateOutputPath(context, out) : undefined;
+  if (outPath) await writeGeneratedJson(context, outPath, ops.length ? plan.ops : plan);
+  return maybeWriteReport(context, { ...plan, out: outPath }, "plan");
+}
+
+export async function rollbackPayload(context: RuntimeContext): Promise<unknown> {
+  const txPath = optionValue(context.argv, "--tx") ?? positionalArgs(context.argv, 3)[0];
+  if (!txPath) throw new CliFailure({ code: "SCHEMA_INVALID", command: "rollback", message: "rollback requires --tx <transaction.json>." }, 2);
+  const tx = asRecord(await readInputJson(context, txPath));
+  const backupPath = typeof tx.backupPath === "string" ? tx.backupPath : typeof tx.inputPath === "string" ? tx.inputPath : undefined;
+  if (!backupPath) throw new CliFailure({ code: "SCHEMA_INVALID", command: "rollback", message: "transaction record has no backupPath." }, 3);
+  const source = await validateInputPath(context, backupPath);
+  const out = await validatedOutOption(context);
+  if (!out) throw new CliFailure({ code: "SCHEMA_INVALID", command: "rollback", message: "rollback requires --out <restored-file>." }, 2);
+  await fs.mkdir(path.dirname(out), { recursive: true });
+  await fs.copyFile(source, out);
+  return withOutputArtifact({
+    schema: "officegen.rollback.result@1.2",
+    changed: true,
+    restoredFrom: source,
+    out,
+    transaction: txPath,
+    caveats: ["Rollback restores from an explicit transaction backup; it does not infer history from Office internals."]
+  }, out, "rollback", source);
+}
+
+export async function lockPayload(context: RuntimeContext): Promise<unknown> {
+  const input = requireInput(context, 3, "lock");
+  const inputPath = await validateInputPath(context, input);
+  const lock = {
+    schema: "officegen.lock@1.2",
+    input: inputPath,
+    inputSha256: await sha256File(inputPath),
+    scope: optionValue(context.argv, "--scope") ?? "document",
+    agent: optionValue(context.argv, "--name") ?? "agent",
+    createdAt: new Date().toISOString(),
+    mode: "exclusive"
+  };
+  const out = optionValue(context.argv, "--out");
+  const outPath = out ? await validateOutputPath(context, out) : undefined;
+  if (outPath) await writeGeneratedJson(context, outPath, lock);
+  return maybeWriteReport(context, { ...lock, out: outPath }, "lock");
+}
+
+export async function mergePayload(context: RuntimeContext): Promise<unknown> {
+  const args = positionalArgs(context.argv, 3);
+  const format = args[0] === "pdf" ? "pdf" : "pdf";
+  const inputs = (args[0] === "pdf" ? args.slice(1) : args).filter((value) => /\.pdf$/i.test(value));
+  if (format !== "pdf" || inputs.length < 2) {
+    throw new CliFailure({ code: "EXPORT_UNSUPPORTED", command: "merge", message: "merge currently supports: merge pdf <a.pdf> <b.pdf> --out merged.pdf." }, 3);
+  }
+  const out = await validatedOutOption(context);
+  const result = await mergePdfs(await Promise.all(inputs.map((input) => validateInputPath(context, input))), withFormatConfig(context, { out }));
+  return withOutputArtifact({ ...result, schema: "officegen.merge.result@1.2", inputs }, out, "merge");
 }
 
 export async function critiquePayload(context: RuntimeContext): Promise<unknown> {
@@ -1275,6 +1522,7 @@ function average(values: number[]): number {
 export async function runPayload(context: RuntimeContext): Promise<unknown> {
   const planPath = positionalArgs(context.argv, 3)[0];
   if (planPath === "prepare-reference") return prepareReferencePayload(context);
+  if (planPath === "office-edit") return officeEditPayload(context);
   if (!planPath) {
     throw new CliFailure({
       code: "SCHEMA_INVALID",
@@ -1419,6 +1667,79 @@ export async function runPayload(context: RuntimeContext): Promise<unknown> {
     readiness: failed || missingExpected.length || finalError ? "blocked" : "pass",
     partial: false,
     caveats: ["Run executes deterministic built-in steps and can invoke native verification/export only when the active security policy enables renderers."]
+  };
+}
+
+async function officeEditPayload(context: RuntimeContext): Promise<unknown> {
+  const input = optionValue(context.argv, "--input") ?? positionalArgs(context.argv, 4)[0];
+  const goalPath = optionValue(context.argv, "--goal");
+  const out = optionValue(context.argv, "--out");
+  if (!input || !goalPath || !out) {
+    throw new CliFailure({
+      code: "SCHEMA_INVALID",
+      command: "run office-edit",
+      message: "run office-edit requires --input <file>, --goal <goal.md>, and --out <file>."
+    }, 2);
+  }
+  const inputPath = await validateInputPath(context, input);
+  const outPath = await validateOutputPath(context, out);
+  const goal = await readInputText(context, goalPath);
+  const operations = intentOpsFromGoal(goal, targetFromInput(inputPath));
+  const folder = await createRunFolder(context.config);
+  const inspectResult = await inspect(inputPath, withFormatConfig(context, { depth: "summary" as const, structure: true }));
+  const viewResult = await view(inspectResult, withFormatConfig(context, { format: "svg" as const, maxPages: numberOption(context, "--max-pages") }));
+  const viewDir = path.join(folder.viewsDir, "input");
+  const viewArtifacts = await writeViewArtifacts(context, viewDir, viewResult, "run office-edit");
+  if (!operations.length) {
+    return {
+      schema: "officegen.office-edit.result@1.2",
+      input: inputPath,
+      goal: goalPath,
+      out: outPath,
+      readiness: "blocked",
+      planOnly: true,
+      artifacts: viewArtifacts,
+      warnings: ["PLAN_INTENT_UNSUPPORTED: no deterministic EditOps were produced; run plan first or provide explicit ops."],
+      nextSuggestedCommands: [`officegen plan ${quoteCommandValue(inputPath)} --goal ${quoteCommandValue(goalPath)} --out ${quoteCommandValue(path.join(folder.opsDir, "ops.json"))} --json`]
+    };
+  }
+  const selectorPlan = await resolveEditSelectors(inputPath, operations, withFormatConfig(context, {}));
+  const opsDocument = {
+    schema: "officegen.edit.ops@1.2",
+    target: targetFromInput(inputPath),
+    options: {
+      atomic: true,
+      expectedInputSha256: selectorPlan.inputSha256,
+      expectedObjectMapHash: selectorPlan.objectMapHash
+    },
+    ops: operations
+  };
+  const opsPath = path.join(folder.opsDir, "office-edit.ops.json");
+  await writeGeneratedJson(context, opsPath, opsDocument);
+  await assertSafeOoxmlMutationInput(inputPath, "run office-edit");
+  const edited = await edit(inputPath, operations, withFormatConfig(context, {
+    out: outPath,
+    resolveSelectors: true,
+    expectedInputSha256: selectorPlan.inputSha256,
+    expectedObjectMapHash: selectorPlan.objectMapHash
+  }));
+  const verifyResult = await verify(outPath, withFormatConfig(context, { visual: String(optionValue(context.argv, "--verify") ?? "").includes("visual") || hasFlag(context.argv, "--visual") }));
+  return {
+    schema: "officegen.office-edit.result@1.2",
+    input: inputPath,
+    goal: goalPath,
+    out: outPath,
+    readiness: edited.changed && asRecord(verifyResult).readiness !== "blocked" ? "pass" : "warning",
+    planOnly: false,
+    opsPath,
+    selectorPlan,
+    edit: edited,
+    verify: verifyResult,
+    artifacts: [
+      ...viewArtifacts,
+      await artifactRecord(outPath, "office-artifact", targetFromInput(outPath), "run office-edit", inputPath),
+      await artifactRecord(opsPath, "edit-ops", "json", "run office-edit", inputPath)
+    ]
   };
 }
 
@@ -1622,6 +1943,7 @@ async function executeRunStep(
     const after = await resolveRunInput(context, step.after, stepOutputs);
     return diffDocuments(requireRunInput("diff.before", before), requireRunInput("diff.after", after), withFormatConfig(context, {
       visual: step.visual === true,
+      native: step.native === true,
       maxPages: typeof step.maxPages === "number" ? step.maxPages : undefined
     }));
   }

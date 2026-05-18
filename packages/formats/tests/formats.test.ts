@@ -264,6 +264,26 @@ describe("@officegen/formats MVP", () => {
     expect(valuesByRef.get("C2")).toBe("");
   });
 
+  it("sets XLSX ranges and resolves sheet/cell selectors with fingerprints", async () => {
+    const rendered = await render({ title: "Range", sheets: [{ rows: [["A", "B"], ["old", "old"]] }] }, { target: "xlsx" });
+    const edited = await edit(
+      { data: rendered.bytes, format: "xlsx" },
+      [{ op: "xlsx.setRange", sheet: 1, startCell: "A2", values: [["North", 10], ["South", 20]] }]
+    );
+    const inspected = await inspect({ data: edited.bytes, format: "xlsx" });
+    const valuesByRef = new Map(inspected.objectMap.map((entry) => [entry.label, entry.text]));
+    const resolved = await resolveEditSelectors(
+      { data: edited.bytes, format: "xlsx" },
+      [{ op: "setText", selector: { sheetName: "Sheet1", cell: "B3" }, text: "21" }]
+    );
+
+    expect(valuesByRef.get("A2")).toBe("North");
+    expect(valuesByRef.get("B3")).toBe("20");
+    expect(resolved.inputSha256).toMatch(/^sha256:/);
+    expect(resolved.objectMapHash).toMatch(/^sha256:/);
+    expect(resolved.resolutions[0]?.matched).toBe(true);
+  });
+
   it("preserves XLSX styled cell attributes when setting a scalar value", async () => {
     const rendered = await render({ title: "Styled", sheets: [{ rows: [["Old"]] }] }, { target: "xlsx" });
     const zip = await JSZip.loadAsync(rendered.bytes as Uint8Array);
@@ -576,6 +596,23 @@ describe("@officegen/formats MVP", () => {
     expect(diff.changed).toBe(true);
     expect(diff.summary.changedTextObjects).toBe(1);
     expect(diff.summary.visualRegressionScore).toBeGreaterThan(0);
+  });
+
+  it("reports page count and geometry changes in semantic diffs", async () => {
+    const before = await render({ title: "Before", slides: [{ title: "Slide", body: "Alpha" }] }, { target: "pptx" });
+    const inspected = await inspect({ data: before.bytes, format: "pptx" });
+    const shapeId = inspected.objectMap.find((entry) => entry.text === "Alpha")?.stableObjectId;
+    const after = await edit(
+      { data: before.bytes, format: "pptx" },
+      [{ op: "pptx.setBounds", selector: { stableObjectId: shapeId }, bounds: { x: 120, y: 180, width: 300, height: 80 } }]
+    );
+    const diff = await diffDocuments({ data: before.bytes, format: "pptx" }, { data: after.bytes, format: "pptx" });
+
+    expect(diff.changed).toBe(true);
+    expect(diff.summary.beforePages).toBe(1);
+    expect(diff.summary.afterPages).toBe(1);
+    expect(diff.summary.changedGeometryObjects).toBeGreaterThan(0);
+    expect(diff.semantic.changedGeometry[0]?.afterBbox?.[0]).toBe(120);
   });
 
   it("does not treat different PDF drawing content as a zero visual diff", async () => {

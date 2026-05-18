@@ -6,6 +6,7 @@ import { PDFDocument } from "pdf-lib";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { createHash } from "node:crypto";
 
 export interface DiffOptions {
   config?: OfficegenConfig;
@@ -23,6 +24,10 @@ export interface DiffResult {
     addedObjects: number;
     removedObjects: number;
     changedTextObjects: number;
+    changedGeometryObjects: number;
+    beforePages: number;
+    afterPages: number;
+    pageCountChanged: boolean;
     changedParts?: number;
     visualRegressionScore?: number;
   };
@@ -35,11 +40,21 @@ export interface DiffResult {
       before?: string;
       after?: string;
     }>;
+    changedGeometry: Array<{
+      stableObjectId: string;
+      kind: string;
+      beforeBbox?: [number, number, number, number];
+      afterBbox?: [number, number, number, number];
+      delta: { x: number; y: number; width: number; height: number };
+    }>;
     partChanges?: Array<{ path: string; kind: string; beforeHash?: string; afterHash?: string; status: "added" | "removed" | "changed" }>;
   };
   visual?: {
     fidelity: "approximate" | "native";
     pagesCompared: number;
+    beforePages: number;
+    afterPages: number;
+    pageCountChanged: boolean;
     pageScores: Array<{ page: number; score: number; beforeHash: string; afterHash: string }>;
     renderer?: string;
   };
@@ -55,7 +70,10 @@ export async function diffDocuments(before: InputLike, after: InputLike, options
   const visualRegressionScore = visual?.pageScores.length
     ? Number((visual.pageScores.reduce((sum, page) => sum + page.score, 0) / visual.pageScores.length).toFixed(4))
     : undefined;
-  const changed = semantic.added.length > 0 || semantic.removed.length > 0 || semantic.changedText.length > 0 || (semantic.partChanges?.length ?? 0) > 0 || (visualRegressionScore ?? 0) > 0;
+  const beforePages = pageLikeCount(beforeInspect);
+  const afterPages = pageLikeCount(afterInspect);
+  const pageCountChanged = beforePages !== afterPages;
+  const changed = semantic.added.length > 0 || semantic.removed.length > 0 || semantic.changedText.length > 0 || semantic.changedGeometry.length > 0 || (semantic.partChanges?.length ?? 0) > 0 || pageCountChanged || (visualRegressionScore ?? 0) > 0;
   return {
     schema: "officegen.diff.result@1.2",
     formatBefore: beforeInspect.trusted.format,
@@ -65,6 +83,10 @@ export async function diffDocuments(before: InputLike, after: InputLike, options
       addedObjects: semantic.added.length,
       removedObjects: semantic.removed.length,
       changedTextObjects: semantic.changedText.length,
+      changedGeometryObjects: semantic.changedGeometry.length,
+      beforePages,
+      afterPages,
+      pageCountChanged,
       changedParts: semantic.partChanges?.length ?? 0,
       visualRegressionScore
     },
@@ -98,7 +120,27 @@ function semanticDiff(before: InspectResult, after: InspectResult): DiffResult["
       };
     })
     .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry));
-  return { added, removed, changedText };
+  const changedGeometry = [...beforeMap.entries()]
+    .map(([stableObjectId, beforeEntry]) => {
+      const afterEntry = afterMap.get(stableObjectId);
+      const beforeBbox = normalizedBbox(beforeEntry);
+      const afterBbox = afterEntry ? normalizedBbox(afterEntry) : undefined;
+      if (!afterEntry || !beforeBbox || !afterBbox || bboxEqual(beforeBbox, afterBbox)) return undefined;
+      return {
+        stableObjectId,
+        kind: beforeEntry.kind,
+        beforeBbox,
+        afterBbox,
+        delta: {
+          x: Number((afterBbox[0] - beforeBbox[0]).toFixed(2)),
+          y: Number((afterBbox[1] - beforeBbox[1]).toFixed(2)),
+          width: Number((afterBbox[2] - beforeBbox[2]).toFixed(2)),
+          height: Number((afterBbox[3] - beforeBbox[3]).toFixed(2))
+        }
+      };
+    })
+    .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry));
+  return { added, removed, changedText, changedGeometry };
 }
 
 async function semanticPartDiff(before: InputLike, after: InputLike, formatBefore: string, formatAfter: string): Promise<NonNullable<DiffResult["semantic"]["partChanges"]>> {
@@ -124,6 +166,21 @@ async function semanticPartDiff(before: InputLike, after: InputLike, formatBefor
     });
   }
   return changes;
+}
+
+function normalizedBbox(entry: ObjectMapEntry): [number, number, number, number] | undefined {
+  if (entry.bbox && entry.bbox.length === 4) return entry.bbox as [number, number, number, number];
+  if (!entry.bounds) return undefined;
+  return [entry.bounds.x, entry.bounds.y, entry.bounds.width, entry.bounds.height];
+}
+
+function bboxEqual(left: [number, number, number, number], right: [number, number, number, number]): boolean {
+  return left.every((value, index) => Math.abs(value - (right[index] ?? 0)) < 0.01);
+}
+
+function pageLikeCount(inspected: InspectResult): number {
+  const summary = inspected.trusted.summary as Record<string, unknown>;
+  return Number(summary.pages ?? summary.slides ?? summary.sheets ?? (inspected.trusted.format === "docx" ? 1 : 0));
 }
 
 async function packagePartHashes(zip: Awaited<ReturnType<typeof loadZip>>): Promise<Map<string, string>> {
@@ -158,12 +215,7 @@ function classifyPackagePart(file: string): string {
 }
 
 function bytesHash(bytes: Uint8Array): string {
-  let hash = 2166136261;
-  for (const byte of bytes) {
-    hash ^= byte;
-    hash = Math.imul(hash, 16777619);
-  }
-  return (hash >>> 0).toString(16).padStart(8, "0");
+  return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
 }
 
 async function visualDiff(
@@ -193,6 +245,9 @@ async function visualDiff(
   return {
     fidelity: "approximate",
     pagesCompared,
+    beforePages: beforeView.pages.length,
+    afterPages: afterView.pages.length,
+    pageCountChanged: beforeView.pages.length !== afterView.pages.length,
     pageScores
   };
 }
@@ -217,6 +272,9 @@ async function pdfByteVisualDiff(beforeInput: InputLike, afterInput: InputLike, 
   return {
     fidelity: "approximate",
     pagesCompared,
+    beforePages: beforeDoc.getPageCount(),
+    afterPages: afterDoc.getPageCount(),
+    pageCountChanged: beforeDoc.getPageCount() !== afterDoc.getPageCount(),
     pageScores,
     renderer: "pdf-bytes"
   };
@@ -248,6 +306,9 @@ async function nativeVisualDiff(beforeInput: InputLike, afterInput: InputLike, o
     return {
       fidelity: "native",
       pagesCompared,
+      beforePages: beforeDoc.getPageCount(),
+      afterPages: afterDoc.getPageCount(),
+      pageCountChanged: beforeDoc.getPageCount() !== afterDoc.getPageCount(),
       pageScores,
       renderer: beforeExport.renderer?.id ?? "native"
     };
@@ -279,12 +340,7 @@ function normalizedStringDistance(before: string, after: string): number {
 }
 
 function textHash(value: string): string {
-  let hash = 2166136261;
-  for (const char of value) {
-    hash ^= char.charCodeAt(0);
-    hash = Math.imul(hash, 16777619);
-  }
-  return (hash >>> 0).toString(16).padStart(8, "0");
+  return `sha256:${createHash("sha256").update(value).digest("hex")}`;
 }
 
 export const diff = diffDocuments;

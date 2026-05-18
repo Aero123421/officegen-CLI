@@ -3,7 +3,7 @@ export interface CommandSpec {
     feature: FeatureName;
     commands: readonly string[];
 }
-export declare const COMMAND_SPECS: readonly [CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec];
+export declare const COMMAND_SPECS: readonly [CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec, CommandSpec];
 export declare const commandMap: Record<FeatureName, string[]>;
 export declare function buildFeatureRegistry(config: OfficegenConfig): CapabilityFeature[];
 export declare function computeCapabilitiesHash(config: OfficegenConfig, cliVersion?: string): string;

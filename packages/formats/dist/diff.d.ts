@@ -14,6 +14,10 @@ export interface DiffResult {
         addedObjects: number;
         removedObjects: number;
         changedTextObjects: number;
+        changedGeometryObjects: number;
+        beforePages: number;
+        afterPages: number;
+        pageCountChanged: boolean;
         changedParts?: number;
         visualRegressionScore?: number;
     };
@@ -26,6 +30,18 @@ export interface DiffResult {
             before?: string;
             after?: string;
         }>;
+        changedGeometry: Array<{
+            stableObjectId: string;
+            kind: string;
+            beforeBbox?: [number, number, number, number];
+            afterBbox?: [number, number, number, number];
+            delta: {
+                x: number;
+                y: number;
+                width: number;
+                height: number;
+            };
+        }>;
         partChanges?: Array<{
             path: string;
             kind: string;
@@ -37,6 +53,9 @@ export interface DiffResult {
     visual?: {
         fidelity: "approximate" | "native";
         pagesCompared: number;
+        beforePages: number;
+        afterPages: number;
+        pageCountChanged: boolean;
         pageScores: Array<{
             page: number;
             score: number;

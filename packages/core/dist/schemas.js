@@ -66,6 +66,10 @@ const selectorSchema = {
         shapeName: { type: "string" },
         contentControlTag: { type: "string" },
         namedRange: { type: "string" },
+        sheetName: { type: "string" },
+        cell: { type: "string", pattern: "^[A-Za-z]+[1-9][0-9]*$" },
+        tableName: { type: "string" },
+        chartPath: { type: "string" },
         textHash: { type: "string" },
         positionHash: { type: "string" },
         nearestTo: {
@@ -170,6 +174,7 @@ function editOperationSchemas() {
         styleId: { type: "string" },
         font: { type: "string" },
         name: { type: "string" },
+        values2d: { type: "array", minItems: 1, items: { type: "array" } },
         fontSize: { type: "number", minimum: 1 },
         bold: { type: "boolean" },
         level: { type: "integer", minimum: 0, maximum: 8 },
@@ -251,6 +256,9 @@ function editOperationSchemas() {
         op("xlsx.appendRows", ["rows"], ["sheet", "rows"]),
         op("xlsx.setCell", ["cell", "value"], ["sheet", "cell", "value"]),
         op("xlsx.setFormula", ["cell", "formula"], ["sheet", "cell", "formula"]),
+        op("xlsx.setRange", ["startCell", "values"], ["sheet", "startCell"], {
+            values: { type: "array", minItems: 1, items: { type: "array" } }
+        }),
         op("xlsx.updateTable", ["startCell", "rows"], ["sheet", "startCell", "rows"]),
         op("xlsx.writeTable", ["startCell", "rows"], ["sheet", "startCell", "rows", "tableName"]),
         op("xlsx.table.resize", ["selector", "ref"], ["selector", "ref"]),
@@ -284,6 +292,8 @@ const editOpsSchema = {
                 continueOnError: { type: "boolean", default: false },
                 validateFirst: { type: "boolean", default: true },
                 idempotencyKey: { type: "string" },
+                expectedInputSha256: { type: "string", pattern: "^sha256:" },
+                expectedObjectMapHash: { type: "string", pattern: "^sha256:" },
                 preserveUnknownParts: { type: "boolean", default: true },
                 preserveAnimations: { type: "boolean" }
             }
@@ -542,6 +552,14 @@ const entries = [
     entry("officegen.verify.result@1.2", looseSchema("officegen.verify.result@1.2"), "verify"),
     entry("officegen.repair.result@1.2", looseSchema("officegen.repair.result@1.2"), "repair"),
     entry("officegen.diff.result@1.2", looseSchema("officegen.diff.result@1.2"), "diff"),
+    entry("officegen.artifact.manifest@1.2", looseSchema("officegen.artifact.manifest@1.2"), "manifest"),
+    entry("officegen.manifest.verify.result@1.2", looseSchema("officegen.manifest.verify.result@1.2"), "manifest"),
+    entry("officegen.plan.result@1.2", looseSchema("officegen.plan.result@1.2"), "plan"),
+    entry("officegen.rollback.result@1.2", looseSchema("officegen.rollback.result@1.2"), "rollback"),
+    entry("officegen.lock@1.2", looseSchema("officegen.lock@1.2"), "lock"),
+    entry("officegen.merge.result@1.2", looseSchema("officegen.merge.result@1.2"), "merge"),
+    entry("officegen.transaction@1.2", looseSchema("officegen.transaction@1.2"), "rollback"),
+    entry("officegen.office-edit.result@1.2", looseSchema("officegen.office-edit.result@1.2"), "run"),
     entry("officegen.scaffold.result@1.2", looseSchema("officegen.scaffold.result@1.2"), "scaffold"),
     entry("officegen.chart.render.result@1.2", looseSchema("officegen.chart.render.result@1.2"), "chart"),
     entry("officegen.diagram.render.result@1.2", looseSchema("officegen.diagram.render.result@1.2"), "diagram"),

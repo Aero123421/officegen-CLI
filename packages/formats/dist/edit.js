@@ -8,6 +8,7 @@ import { escapeXmlText, pxToEmu, replaceAllXmlText, setFirstTextInBlock } from "
 import { nextRelationshipId } from "./ooxml/relationships.js";
 import { PDFDocument, rgb } from "pdf-lib";
 import JSZip from "jszip";
+import { createHash } from "node:crypto";
 export async function edit(input, operations, options = {}) {
     const normalized = await normalizeInput(input, options.format ?? "unknown");
     const selectorResult = options.resolveSelectors || options.validateFirst !== false
@@ -41,6 +42,8 @@ async function resolveEditSelectorsForNormalized(normalized, operations, config)
     return {
         schema: "officegen.edit.selectors@1.2",
         format: inspected.trusted.format,
+        inputSha256: sha256Bytes(normalized.bytes),
+        objectMapHash: objectMapHash(inspected.objectMap),
         resolutions,
         objectMap: inspected.objectMap,
         caveats: ["Selector resolution is based on the current inspect objectMap stableObjectId values."]
@@ -59,6 +62,9 @@ async function editOfficeXml(input, operations, options, selectorResult) {
             return {
                 schema: "officegen.edit.result@1.2",
                 format: input.format,
+                dryRun: options.dryRun,
+                inputSha256: selectorResult?.inputSha256,
+                objectMapHash: selectorResult?.objectMapHash,
                 changed: false,
                 applied: 0,
                 skipped: operations.length,
@@ -73,6 +79,25 @@ async function editOfficeXml(input, operations, options, selectorResult) {
             };
         }
     }
+    const staleErrors = stalePlanFailures(selectorResult, options, operations);
+    if (staleErrors.length) {
+        return {
+            schema: "officegen.edit.result@1.2",
+            format: input.format,
+            dryRun: options.dryRun,
+            inputSha256: selectorResult?.inputSha256,
+            objectMapHash: selectorResult?.objectMapHash,
+            changed: false,
+            applied: 0,
+            skipped: operations.length,
+            opResults: staleErrors,
+            errors: staleErrors,
+            caveats: [
+                "EDIT_STALE_PLAN: expected input or object map hash does not match the current file.",
+                ...zipSafetyCaveats(getLoadedZipSafetyReport(zip))
+            ]
+        };
+    }
     const dynamicPptxSelectors = input.format === "pptx" && hasSelectorAfterPptxCreator(operations);
     const runtimeResolutions = dynamicPptxSelectors
         ? (selectorResult?.resolutions.filter((resolution) => !hasPriorPptxCreator(operations, resolution.operationIndex)) ?? [])
@@ -84,7 +109,7 @@ async function editOfficeXml(input, operations, options, selectorResult) {
         return editAbortResult(input.format, operations.length, validationErrors, [
             "Atomic edit aborted before writing because selector validation failed.",
             ...zipSafetyCaveats(getLoadedZipSafetyReport(zip))
-        ]);
+        ], selectorResult, options.dryRun);
     }
     for (const [index, operation] of operations.entries()) {
         if (opResults.some((result) => result.applied === false && result.reason && result.reason !== "unsupported") && !continueOnError) {
@@ -134,7 +159,7 @@ async function editOfficeXml(input, operations, options, selectorResult) {
         return editAbortResult(input.format, skipped, opResults, [
             "Atomic edit aborted; no output bytes were written.",
             ...zipSafetyCaveats(getLoadedZipSafetyReport(zip))
-        ]);
+        ], selectorResult, options.dryRun);
     }
     if (options.idempotencyKey && applied > 0)
         zip.file(idempotencyMarkerPath(options.idempotencyKey), new Date().toISOString());
@@ -144,6 +169,9 @@ async function editOfficeXml(input, operations, options, selectorResult) {
     return {
         schema: "officegen.edit.result@1.2",
         format: input.format,
+        dryRun: options.dryRun,
+        inputSha256: selectorResult?.inputSha256,
+        objectMapHash: selectorResult?.objectMapHash,
         changed: applied > 0,
         applied,
         skipped,
@@ -277,6 +305,10 @@ async function applyOfficeOperation(zip, format, operation, objectMap, index) {
     if (format === "xlsx" && op === "xlsx.setFormula") {
         const formulaOp = operation;
         return editXlsxSetFormula(zip, formulaOp.sheet, formulaOp.cell, formulaOp.formula);
+    }
+    if (format === "xlsx" && op === "xlsx.setRange") {
+        const rangeOp = operation;
+        return editXlsxSetRange(zip, rangeOp.sheet, rangeOp.startCell, rangeOp.values);
     }
     if (format === "xlsx" && (op === "xlsx.updateTable" || op === "xlsx.writeTable")) {
         const tableOp = operation;
@@ -647,6 +679,20 @@ async function editXlsxSetCell(zip, sheet, ref, value) {
     if (next.changed)
         zip.file(path, next.xml);
     return next.changed;
+}
+async function editXlsxSetRange(zip, sheet, startCell, values) {
+    const start = /^([A-Z]+)(\d+)$/i.exec(startCell);
+    if (!start || !values.length)
+        throw new Error("SELECTOR_NOT_FOUND: xlsx.setRange requires a valid startCell and non-empty values.");
+    const startCol = columnIndex(start[1] ?? "A");
+    const startRow = Number(start[2]);
+    let changed = false;
+    for (const [rowOffset, row] of values.entries()) {
+        for (const [colOffset, value] of row.entries()) {
+            changed = (await editXlsxSetCell(zip, sheet, `${columnName(startCol + colOffset)}${startRow + rowOffset}`, value)) || changed;
+        }
+    }
+    return changed;
 }
 async function editXlsxSetFormula(zip, sheet, ref, formula) {
     if (!ref)
@@ -1224,10 +1270,55 @@ function validationFailures(selectorResult) {
             : "SELECTOR_NOT_FOUND: selector matched no objects."
     }));
 }
+function stalePlanFailures(selectorResult, options, operations) {
+    if (!selectorResult)
+        return [];
+    const failures = [];
+    if (options.expectedInputSha256 && options.expectedInputSha256 !== selectorResult.inputSha256) {
+        failures.push({
+            operationIndex: -1,
+            op: "stalePlan",
+            applied: false,
+            reason: "stale-plan",
+            message: `EDIT_STALE_PLAN: expectedInputSha256 ${options.expectedInputSha256} does not match current ${selectorResult.inputSha256}.`
+        });
+    }
+    if (options.expectedObjectMapHash && options.expectedObjectMapHash !== selectorResult.objectMapHash) {
+        failures.push({
+            operationIndex: -1,
+            op: "stalePlan",
+            applied: false,
+            reason: "stale-plan",
+            message: `EDIT_STALE_PLAN: expectedObjectMapHash ${options.expectedObjectMapHash} does not match current ${selectorResult.objectMapHash}.`
+        });
+    }
+    return failures.length ? failures.map((failure) => ({ ...failure, message: `${failure.message} ${operations.length} operations were not applied.` })) : [];
+}
 async function inspectCurrentObjectMap(zip, format, config) {
     const bytes = await zipToBytes(zip);
     const inspected = await inspect({ data: bytes, format }, { config });
     return inspected.objectMap;
+}
+function sha256Bytes(bytes) {
+    return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+}
+function objectMapHash(objectMap) {
+    return `sha256:${createHash("sha256").update(stableStringify(objectMap.map((entry) => ({
+        stableObjectId: entry.stableObjectId,
+        kind: entry.kind,
+        label: entry.label,
+        text: entry.text ?? entry.textPreview,
+        bbox: entry.bbox,
+        selectorHints: entry.selectorHints
+    })))).digest("hex")}`;
+}
+function stableStringify(value) {
+    if (value === null || typeof value !== "object")
+        return JSON.stringify(value);
+    if (Array.isArray(value))
+        return `[${value.map(stableStringify).join(",")}]`;
+    const record = value;
+    return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`).join(",")}}`;
 }
 function hasSelectorAfterPptxCreator(operations) {
     return operations.some((operation, index) => Boolean(selectorForOperation(operation)) && hasPriorPptxCreator(operations, index));
@@ -1250,11 +1341,16 @@ function selectorTargetsExplicitSlide(selector) {
         return true;
     return typeof selector.largestTextOnSlide === "number";
 }
-function editAbortResult(format, skipped, opResults, caveats) {
+function editAbortResult(format, skipped, opResults, caveats, selectorResult, dryRun) {
     const errors = opResults.filter((result) => result.reason && result.reason !== "unsupported");
+    const rolledBack = opResults.some((result) => result.applied);
     return {
         schema: "officegen.edit.result@1.2",
         format,
+        dryRun,
+        inputSha256: selectorResult?.inputSha256,
+        objectMapHash: selectorResult?.objectMapHash,
+        rolledBack: rolledBack || undefined,
         changed: false,
         applied: 0,
         skipped,
@@ -1302,6 +1398,19 @@ function resolveMatches(objectMap, selector) {
         candidates = candidates.filter((entry) => entry.selectorHints?.contentControlTag === selector.contentControlTag || entry.selectorHints?.tag === selector.contentControlTag);
     if (selector.namedRange)
         candidates = candidates.filter((entry) => entry.selectorHints?.namedRange === selector.namedRange || entry.label === selector.namedRange);
+    if (selector.sheetName)
+        candidates = candidates.filter((entry) => {
+            const expected = selector.sheetName?.toLowerCase();
+            const hinted = String(entry.selectorHints?.sheetName ?? "").toLowerCase();
+            const fallback = entry.selectorHints?.sheet ? `sheet${entry.selectorHints.sheet}`.toLowerCase() : "";
+            return hinted === expected || fallback === expected;
+        });
+    if (selector.cell)
+        candidates = candidates.filter((entry) => String(entry.selectorHints?.cell ?? entry.label ?? "").toUpperCase() === selector.cell?.toUpperCase());
+    if (selector.tableName)
+        candidates = candidates.filter((entry) => String(entry.selectorHints?.tableName ?? entry.label ?? "") === selector.tableName);
+    if (selector.chartPath)
+        candidates = candidates.filter((entry) => String(entry.selectorHints?.chartPath ?? entry.xmlPath ?? "") === selector.chartPath);
     const text = selector.textMatch?.text ?? selector.contains;
     if (text)
         candidates = candidates.filter((entry) => selector.textMatch?.exact ? entry.text === text : entry.text?.includes(text));

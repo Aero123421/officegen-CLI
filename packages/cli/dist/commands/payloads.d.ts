@@ -19,6 +19,12 @@ export declare function diagnosePayload(context: RuntimeContext): Promise<unknow
 export declare function verifyPayload(context: RuntimeContext): Promise<unknown>;
 export declare function repairPayload(context: RuntimeContext): Promise<unknown>;
 export declare function diffPayload(context: RuntimeContext): Promise<unknown>;
+export declare function manifestPayload(context: RuntimeContext, subcommand?: string): Promise<unknown>;
+export declare function selectPayload(context: RuntimeContext): Promise<unknown>;
+export declare function planPayload(context: RuntimeContext): Promise<unknown>;
+export declare function rollbackPayload(context: RuntimeContext): Promise<unknown>;
+export declare function lockPayload(context: RuntimeContext): Promise<unknown>;
+export declare function mergePayload(context: RuntimeContext): Promise<unknown>;
 export declare function critiquePayload(context: RuntimeContext): Promise<unknown>;
 export declare function improvePayload(context: RuntimeContext): Promise<unknown>;
 export declare function benchmarkPayload(context: RuntimeContext, subcommand?: string): Promise<unknown>;
