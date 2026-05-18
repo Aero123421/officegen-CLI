@@ -2,7 +2,7 @@ import { getLoadedZipSafetyReport, isOfficeFormat, loadZip, normalizeInput, read
 import { inspect } from "./inspect.js";
 import { commentXml, insertParagraphAfter, insertedParagraphXml, replaceOrCreateHeaderFooter, setParagraphText } from "./ooxml/docx.js";
 import { embedPdfFonts } from "./pdfFonts.js";
-import { duplicateSlide, extractShapes, reorderSlides, replaceShapeBulletItems } from "./ooxml/pptx.js";
+import { addBlankSlide, addTextBox, duplicateSlide, extractShapes, reorderSlides, replaceShapeBulletItems } from "./ooxml/pptx.js";
 import { appendRows, insertRows, setCell, sheetPath } from "./ooxml/xlsx.js";
 import { escapeXmlText, pxToEmu, replaceAllXmlText, setFirstTextInBlock } from "./ooxml/xml.js";
 import { nextRelationshipId } from "./ooxml/relationships.js";
@@ -19,7 +19,7 @@ export async function edit(input, operations, options = {}) {
             ? await editPdf(normalized, operations, options)
             : undefined;
     if (result) {
-        if (selectorResult)
+        if (selectorResult && !(normalized.format === "pptx" && hasSelectorAfterPptxCreator(operations)))
             result.resolvedSelectors = selectorResult.resolutions;
         return result;
     }
@@ -36,18 +36,7 @@ async function resolveEditSelectorsForNormalized(normalized, operations, config)
         const selector = selectorForOperation(operation);
         if (!selector)
             return [];
-        const matches = resolveMatches(inspected.objectMap, selector);
-        return [
-            {
-                operationIndex: index,
-                selector,
-                stableObjectId: selector.stableObjectId,
-                matched: matches.length > 0,
-                matchCount: matches.length,
-                matches: matches.map(selectorMatch),
-                reason: matches.length === 0 ? "not-found" : matches.length > 1 ? "ambiguous" : undefined
-            }
-        ];
+        return [selectorResolutionForObjectMap(index, selector, inspected.objectMap)];
     });
     return {
         schema: "officegen.edit.selectors@1.2",
@@ -84,7 +73,13 @@ async function editOfficeXml(input, operations, options, selectorResult) {
             };
         }
     }
-    const validationErrors = options.validateFirst === false ? [] : validationFailures(selectorResult);
+    const dynamicPptxSelectors = input.format === "pptx" && hasSelectorAfterPptxCreator(operations);
+    const runtimeResolutions = dynamicPptxSelectors
+        ? (selectorResult?.resolutions.filter((resolution) => !hasPriorPptxCreator(operations, resolution.operationIndex)) ?? [])
+        : undefined;
+    const validationErrors = options.validateFirst === false
+        ? []
+        : validationFailures(selectorResult).filter((failure) => !dynamicPptxSelectors || !hasPriorPptxCreator(operations, failure.operationIndex));
     if (validationErrors.length && atomic) {
         return editAbortResult(input.format, operations.length, validationErrors, [
             "Atomic edit aborted before writing because selector validation failed.",
@@ -104,7 +99,14 @@ async function editOfficeXml(input, operations, options, selectorResult) {
             continue;
         }
         try {
-            const changed = await applyOfficeOperation(zip, input.format, operation, selectorResult?.objectMap ?? [], index);
+            const objectMap = dynamicPptxSelectors
+                ? await inspectCurrentObjectMap(zip, input.format, options.config)
+                : selectorResult?.objectMap ?? [];
+            const selector = selectorForOperation(operation);
+            if (dynamicPptxSelectors && selector && hasPriorPptxCreator(operations, index)) {
+                runtimeResolutions?.push(selectorResolutionForObjectMap(index, selector, objectMap));
+            }
+            const changed = await applyOfficeOperation(zip, input.format, operation, objectMap, index);
             if (changed) {
                 applied += 1;
                 opResults.push({ operationIndex: index, op: operationName(operation), applied: true });
@@ -148,6 +150,7 @@ async function editOfficeXml(input, operations, options, selectorResult) {
         out: options.dryRun ? undefined : options.out,
         bytes: options.dryRun || options.out ? undefined : bytes,
         opResults,
+        resolvedSelectors: runtimeResolutions,
         errors: errors.length ? errors : undefined,
         caveats: [
             "Office XML edits preserve unknown parts but do not recalculate native layout, formulas, or theme-derived rendering.",
@@ -166,12 +169,51 @@ async function applyOfficeOperation(zip, format, operation, objectMap, index) {
         await duplicateSlide(zip, duplicate.slide ?? slideNumberFromSelector(duplicate.selector, objectMap) ?? 1, duplicate.after);
         return true;
     }
+    if (format === "pptx" && op === "pptx.addSlide") {
+        await addBlankSlide(zip, operation.after);
+        return true;
+    }
     if (format === "pptx" && op === "pptx.reorderSlides") {
         await reorderSlides(zip, operation.order);
         return true;
     }
+    if (format === "pptx" && op === "pptx.addTextbox") {
+        const add = operation;
+        await addTextBox(zip, add.slide, add);
+        return true;
+    }
+    if (format === "pptx" && op === "pptx.formatTitle") {
+        return editPptxTextStyle(zip, operation, objectMap);
+    }
+    if (format === "pptx" && op === "pptx.replaceWithBulletList") {
+        return editPptxRichBullets(zip, operation, objectMap);
+    }
     if (format === "pptx" && (op === "pptx.insertBulletItems" || op === "pptx.replaceBulletItems")) {
         return editPptxBullets(zip, operation, objectMap, op === "pptx.insertBulletItems" ? "insert" : "replace");
+    }
+    if (format === "pptx" && op === "pptx.setFontSize") {
+        return editPptxTextStyle(zip, operation, objectMap);
+    }
+    if (format === "pptx" && op === "pptx.setBold") {
+        return editPptxTextStyle(zip, operation, objectMap);
+    }
+    if (format === "pptx" && op === "pptx.setBulletLevel") {
+        return editPptxParagraphStyle(zip, operation, objectMap);
+    }
+    if (format === "pptx" && op === "pptx.setNumbering") {
+        return editPptxParagraphStyle(zip, { ...operation, numbering: true }, objectMap);
+    }
+    if (format === "pptx" && op === "pptx.setLineSpacing") {
+        return editPptxParagraphStyle(zip, operation, objectMap);
+    }
+    if (format === "pptx" && op === "pptx.setSpaceBefore") {
+        return editPptxParagraphStyle(zip, operation, objectMap);
+    }
+    if (format === "pptx" && op === "pptx.setTextCase") {
+        return editPptxTextStyle(zip, operation, objectMap);
+    }
+    if (format === "pptx" && op === "pptx.setTableCellText") {
+        return editPptxSetTableCellText(zip, operation, objectMap);
     }
     if (format === "pptx" && op === "pptx.replaceImageByShape") {
         return editPptxReplaceImageByShape(zip, operation, objectMap);
@@ -325,6 +367,9 @@ async function setSelectedText(zip, format, operation, objectMap) {
         throw new Error("SELECTOR_NOT_FOUND: selected object has no sourcePath.");
     const xml = (await readZipText(zip, target.sourcePath)) ?? "";
     if (format === "pptx") {
+        if (target.kind === "tableCell") {
+            return editPptxSetTableCellText(zip, operation, objectMap);
+        }
         const shapes = extractShapes(xml, Number(target.selectorHints?.slide ?? 1), "", target.sourcePath);
         const ordinal = shapes.findIndex((shape) => shape.stableObjectId === target.stableObjectId) + 1;
         if (!ordinal)
@@ -359,6 +404,64 @@ async function editPptxBullets(zip, operation, objectMap, mode) {
     if (next.changed)
         zip.file(target.sourcePath, next.xml);
     return next.changed;
+}
+async function editPptxRichBullets(zip, operation, objectMap) {
+    const target = singleMatch(objectMap, operation.selector);
+    if (!target?.sourcePath || target.kind !== "shape")
+        throw new Error("SELECTOR_NOT_FOUND: selected object is not a PPTX text shape.");
+    const xml = (await readZipText(zip, target.sourcePath)) ?? "";
+    const next = updateSelectedPptxShape(xml, target, (shape) => replaceTextBodyParagraphs(shape, operation.items, operation.spaceBeforeForLevel1ExceptFirst));
+    if (next !== xml)
+        zip.file(target.sourcePath, next);
+    return next !== xml;
+}
+async function editPptxTextStyle(zip, operation, objectMap) {
+    const target = singleMatch(objectMap, operation.selector);
+    if (!target?.sourcePath || target.kind !== "shape")
+        throw new Error("SELECTOR_NOT_FOUND: selected object is not a PPTX text shape.");
+    const xml = (await readZipText(zip, target.sourcePath)) ?? "";
+    const next = updateSelectedPptxShape(xml, target, (shape) => {
+        let updated = shape;
+        if (operation.textCase)
+            updated = applyPptxTextCase(updated, operation.textCase);
+        if (operation.fontSize !== undefined || operation.bold !== undefined) {
+            updated = updateShapeRunProperties(updated, { fontSize: operation.fontSize, bold: operation.bold });
+        }
+        return updated;
+    });
+    if (next !== xml)
+        zip.file(target.sourcePath, next);
+    return next !== xml;
+}
+async function editPptxParagraphStyle(zip, operation, objectMap) {
+    const target = singleMatch(objectMap, operation.selector);
+    if (!target?.sourcePath || target.kind !== "shape")
+        throw new Error("SELECTOR_NOT_FOUND: selected object is not a PPTX text shape.");
+    const xml = (await readZipText(zip, target.sourcePath)) ?? "";
+    const next = updateSelectedPptxShape(xml, target, (shape) => updateShapeParagraphProperties(shape, operation));
+    if (next !== xml)
+        zip.file(target.sourcePath, next);
+    return next !== xml;
+}
+async function editPptxSetTableCellText(zip, operation, objectMap) {
+    const target = singleMatch(objectMap, operation.selector);
+    if (!target?.sourcePath || target.kind !== "tableCell")
+        throw new Error("SELECTOR_NOT_FOUND: selected object is not a PPTX table cell.");
+    const xml = (await readZipText(zip, target.sourcePath)) ?? "";
+    const ordinal = Number(target.selectorHints?.tableCell ?? stableOrdinal(target.stableObjectId));
+    let index = 0;
+    let changed = false;
+    const next = xml.replace(/<a:tc\b[\s\S]*?<\/a:tc>/g, (cell) => {
+        index += 1;
+        if (index !== ordinal)
+            return cell;
+        const replaced = setFirstTextInBlock(cell, "a:t", operation.text);
+        changed = replaced !== cell;
+        return replaced;
+    });
+    if (changed)
+        zip.file(target.sourcePath, next);
+    return changed;
 }
 async function editPptxReplaceImageByShape(zip, operation, objectMap) {
     const target = singleMatch(objectMap, operation.selector);
@@ -596,6 +699,133 @@ function replacePptxObjectBlock(xml, kind, shapeId, updater) {
             return block;
         return updater(block);
     });
+}
+function updateSelectedPptxShape(xml, target, updater) {
+    const shapeId = String(target.selectorHints?.shapeId ?? "");
+    const ordinal = Number(target.selectorHints?.shapeIndex ?? stableOrdinal(target.stableObjectId));
+    let index = 0;
+    return xml.replace(/<p:sp\b[\s\S]*?<\/p:sp>/g, (shape) => {
+        index += 1;
+        const cNvPr = /<p:cNvPr\b([^>]*)\/>/.exec(shape)?.[1] ?? "";
+        const candidateId = /\bid="([^"]+)"/.exec(cNvPr)?.[1];
+        if ((shapeId && candidateId !== shapeId) || (!shapeId && index !== ordinal))
+            return shape;
+        return updater(shape);
+    });
+}
+function replaceTextBodyParagraphs(shape, items, spaceBeforeForLevel1ExceptFirst) {
+    const paragraphs = items.map((item, index) => richBulletParagraphXml(item, index, spaceBeforeForLevel1ExceptFirst)).join("");
+    return shape.replace(/(<p:txBody\b[^>]*>)([\s\S]*?)(<\/p:txBody>)/, (_match, open, body, close) => {
+        const bodyPr = firstXmlElement(body, "a:bodyPr") ?? "<a:bodyPr/>";
+        const lstStyle = firstXmlElement(body, "a:lstStyle") ?? "<a:lstStyle/>";
+        return `${open}${bodyPr}${lstStyle}${paragraphs}${close}`;
+    });
+}
+function richBulletParagraphXml(item, index, spaceBeforeForLevel1ExceptFirst) {
+    const record = typeof item === "string" ? { text: item, level: 0, bold: false, numbering: false } : item;
+    const level = Math.max(0, Math.min(8, Math.round(Number(record.level ?? 0))));
+    const bold = record.bold ? ' b="1"' : "";
+    const bullet = record.numbering ? '<a:buAutoNum type="arabicPeriod"/>' : '<a:buChar char="&#8226;"/>';
+    const spaceBefore = level === 0 && index > 0 && spaceBeforeForLevel1ExceptFirst
+        ? `<a:spcBef><a:spcPts val="${Math.round(spaceBeforeForLevel1ExceptFirst * 100)}"/></a:spcBef>`
+        : "";
+    return `<a:p><a:pPr lvl="${level}">${spaceBefore}${bullet}</a:pPr><a:r><a:rPr${bold}/><a:t>${escapeXmlText(record.text)}</a:t></a:r></a:p>`;
+}
+function updateShapeRunProperties(shape, options) {
+    return shape.replace(/<a:r\b[^>]*>[\s\S]*?<\/a:r>/g, (run) => {
+        if (/<a:rPr\b/.test(run)) {
+            return run.replace(/<a:rPr\b([^>]*)\/>/, (_match, attrs) => `<a:rPr${runPropertyAttrs(attrs, options)}/>`)
+                .replace(/<a:rPr\b([^>]*)>/, (_match, attrs) => `<a:rPr${runPropertyAttrs(attrs, options)}>`);
+        }
+        return run.replace(/(<a:r\b[^>]*>)/, `$1<a:rPr${runPropertyAttrs("", options)}/>`);
+    });
+}
+function runPropertyAttrs(attrs, options) {
+    let next = attrs;
+    if (options.fontSize !== undefined)
+        next = upsertXmlAttr(next, "sz", String(Math.round(options.fontSize * 100)));
+    if (options.bold !== undefined)
+        next = upsertXmlAttr(next, "b", options.bold ? "1" : "0");
+    return next ? ` ${next.trim()}` : "";
+}
+function updateShapeParagraphProperties(shape, options) {
+    return shape.replace(/<a:p\b[^>]*>[\s\S]*?<\/a:p>/g, (paragraph) => {
+        if (/<a:pPr\b/.test(paragraph)) {
+            return paragraph.replace(/<a:pPr\b([^>]*)\/>/, (_match, attrs) => paragraphPropertiesXml(attrs, "", options))
+                .replace(/<a:pPr\b([^>]*)>([\s\S]*?)<\/a:pPr>/, (_match, attrs, body) => paragraphPropertiesXml(attrs, body, options));
+        }
+        return paragraph.replace(/(<a:p\b[^>]*>)/, `$1${paragraphPropertiesXml("", "", options)}`);
+    });
+}
+function paragraphPropertiesXml(attrs, body, options) {
+    let nextAttrs = attrs;
+    if (options.level !== undefined)
+        nextAttrs = upsertXmlAttr(nextAttrs, "lvl", String(Math.max(0, Math.min(8, Math.round(options.level)))));
+    let nextBody = body;
+    const existingLineSpacing = extractFirstParagraphChild(nextBody, "a:lnSpc");
+    nextBody = removeFirstParagraphChild(nextBody, "a:lnSpc");
+    const existingSpaceBefore = extractFirstParagraphChild(nextBody, "a:spcBef");
+    nextBody = removeFirstParagraphChild(nextBody, "a:spcBef");
+    const existingBullet = extractBulletParagraphChild(nextBody);
+    nextBody = removeBulletParagraphChildren(nextBody);
+    let lineSpacing = existingLineSpacing;
+    if (options.lineSpacing !== undefined) {
+        const val = Math.round((options.lineSpacing <= 10 ? options.lineSpacing * 100000 : options.lineSpacing * 1000));
+        lineSpacing = `<a:lnSpc><a:spcPct val="${val}"/></a:lnSpc>`;
+    }
+    let spaceBefore = existingSpaceBefore;
+    if (options.spaceBefore !== undefined) {
+        spaceBefore = `<a:spcBef><a:spcPts val="${Math.round(options.spaceBefore * 100)}"/></a:spcBef>`;
+    }
+    let bullet = existingBullet;
+    if (options.numbering) {
+        bullet = `<a:buAutoNum type="arabicPeriod"${options.startAt ? ` startAt="${Math.max(1, Math.round(options.startAt))}"` : ""}/>`;
+    }
+    nextBody = `${lineSpacing ?? ""}${spaceBefore ?? ""}${bullet ?? ""}${nextBody}`;
+    return `<a:pPr${nextAttrs ? ` ${nextAttrs.trim()}` : ""}>${nextBody}</a:pPr>`;
+}
+function firstXmlElement(body, tag) {
+    const escaped = escapeRegExp(tag);
+    const selfClosing = new RegExp(`<${escaped}\\b[^>]*/>`);
+    const selfClosingMatch = selfClosing.exec(body)?.[0];
+    if (selfClosingMatch)
+        return selfClosingMatch;
+    return new RegExp(`<${escaped}\\b[^>]*>[\\s\\S]*?<\\/${escaped}>`).exec(body)?.[0];
+}
+function extractFirstParagraphChild(body, tag) {
+    return firstXmlElement(body, tag);
+}
+function removeFirstParagraphChild(body, tag) {
+    const child = firstXmlElement(body, tag);
+    return child ? body.replace(child, "") : body;
+}
+function extractBulletParagraphChild(body) {
+    return /<a:bu(?:Char|AutoNum|None)\b[\s\S]*?\/>/.exec(body)?.[0] ?? /<a:buBlip\b[\s\S]*?<\/a:buBlip>/.exec(body)?.[0];
+}
+function removeBulletParagraphChildren(body) {
+    return body.replace(/<a:bu(?:Char|AutoNum|None)\b[\s\S]*?\/>/g, "").replace(/<a:buBlip\b[\s\S]*?<\/a:buBlip>/g, "");
+}
+function applyPptxTextCase(shape, textCase) {
+    return shape.replace(/<a:t(?:\s[^>]*)?>([\s\S]*?)<\/a:t>/g, (match, text) => match.replace(text, escapeXmlText(convertTextCase(decodeXmlText(text), textCase))));
+}
+function convertTextCase(value, textCase) {
+    if (textCase === "upper")
+        return value.toLocaleUpperCase();
+    if (textCase === "lower")
+        return value.toLocaleLowerCase();
+    if (textCase === "title")
+        return value.replace(/\p{L}[\p{L}\p{N}'-]*/gu, (word) => word.charAt(0).toLocaleUpperCase() + word.slice(1).toLocaleLowerCase());
+    const lower = value.toLocaleLowerCase();
+    return lower.replace(/(^\s*\p{L}|[.!?]\s+\p{L})/gu, (letter) => letter.toLocaleUpperCase());
+}
+function decodeXmlText(value) {
+    return value.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, "\"").replace(/&apos;/g, "'").replace(/&amp;/g, "&");
+}
+function upsertXmlAttr(attrs, name, value) {
+    const escaped = escapeRegExp(name);
+    const pattern = new RegExp(`(?:^|\\s)${escaped}="[^"]*"`);
+    const attr = `${name}="${escapeXmlText(value)}"`;
+    return pattern.test(attrs) ? attrs.replace(pattern, ` ${attr}`).trim() : `${attrs.trim()} ${attr}`.trim();
 }
 function setBlockBounds(block, bounds) {
     const off = `<a:off x="${pxToEmu(bounds.x)}" y="${pxToEmu(bounds.y)}"/>`;
@@ -994,6 +1224,32 @@ function validationFailures(selectorResult) {
             : "SELECTOR_NOT_FOUND: selector matched no objects."
     }));
 }
+async function inspectCurrentObjectMap(zip, format, config) {
+    const bytes = await zipToBytes(zip);
+    const inspected = await inspect({ data: bytes, format }, { config });
+    return inspected.objectMap;
+}
+function hasSelectorAfterPptxCreator(operations) {
+    return operations.some((operation, index) => Boolean(selectorForOperation(operation)) && hasPriorPptxCreator(operations, index));
+}
+function hasPriorPptxCreator(operations, index) {
+    const selector = selectorForOperation(operations[index]);
+    return operations.slice(0, index).some((operation) => {
+        const op = operationName(operation);
+        if (op === "pptx.addSlide" || op === "pptx.addTextbox")
+            return true;
+        return op === "pptx.duplicateSlide" && selectorTargetsExplicitSlide(selector);
+    });
+}
+function selectorTargetsExplicitSlide(selector) {
+    if (!selector)
+        return false;
+    if (selector.slide !== undefined || selector.nearestTo?.slide !== undefined || selector.nthBodyShape?.slide !== undefined)
+        return true;
+    if (typeof selector.rightOf === "object" && selector.rightOf.slide !== undefined)
+        return true;
+    return typeof selector.largestTextOnSlide === "number";
+}
 function editAbortResult(format, skipped, opResults, caveats) {
     const errors = opResults.filter((result) => result.reason && result.reason !== "unsupported");
     return {
@@ -1012,21 +1268,52 @@ function selectorForOperation(operation) {
         return operation.selector;
     return undefined;
 }
+function selectorResolutionForObjectMap(operationIndex, selector, objectMap) {
+    const matches = resolveMatches(objectMap, selector);
+    return {
+        operationIndex,
+        selector,
+        stableObjectId: selector.stableObjectId,
+        matched: matches.length > 0,
+        matchCount: matches.length,
+        confidence: matches.length === 1 ? selectorConfidence(matches[0], selector, matches) : undefined,
+        matches: matches.map((match) => selectorMatch(match, selector, matches)),
+        reason: matches.length === 0 ? "not-found" : matches.length > 1 ? "ambiguous" : undefined
+    };
+}
 function resolveMatches(objectMap, selector) {
     if (selector.stableObjectId)
         return objectMap.filter((entry) => entry.stableObjectId === selector.stableObjectId);
+    let candidates = objectMap;
+    if (selector.slide !== undefined)
+        candidates = candidates.filter((entry) => Number(entry.selectorHints?.slide) === selector.slide);
+    if (selector.shapeId)
+        candidates = candidates.filter((entry) => String(entry.selectorHints?.shapeId ?? "") === selector.shapeId);
     if (selector.shapeName)
-        return objectMap.filter((entry) => entry.label === selector.shapeName || entry.selectorHints?.shapeName === selector.shapeName || entry.selectorHints?.name === selector.shapeName);
-    if (selector.placeholderKey)
-        return objectMap.filter((entry) => entry.selectorHints?.placeholderKey === selector.placeholderKey || entry.selectorHints?.placeholder === selector.placeholderKey);
+        candidates = candidates.filter((entry) => entry.label === selector.shapeName || entry.selectorHints?.shapeName === selector.shapeName || entry.selectorHints?.name === selector.shapeName);
+    const placeholderKey = selector.placeholderKey ?? selector.placeholder;
+    if (placeholderKey)
+        candidates = candidates.filter((entry) => entry.selectorHints?.placeholderKey === placeholderKey || entry.selectorHints?.placeholder === placeholderKey);
+    if (selector.textHash)
+        candidates = candidates.filter((entry) => entry.selectorHints?.textHash === selector.textHash);
+    if (selector.positionHash)
+        candidates = candidates.filter((entry) => entry.selectorHints?.positionHash === selector.positionHash);
     if (selector.contentControlTag)
-        return objectMap.filter((entry) => entry.selectorHints?.contentControlTag === selector.contentControlTag || entry.selectorHints?.tag === selector.contentControlTag);
+        candidates = candidates.filter((entry) => entry.selectorHints?.contentControlTag === selector.contentControlTag || entry.selectorHints?.tag === selector.contentControlTag);
     if (selector.namedRange)
-        return objectMap.filter((entry) => entry.selectorHints?.namedRange === selector.namedRange || entry.label === selector.namedRange);
+        candidates = candidates.filter((entry) => entry.selectorHints?.namedRange === selector.namedRange || entry.label === selector.namedRange);
     const text = selector.textMatch?.text ?? selector.contains;
-    if (!text)
-        return [];
-    return objectMap.filter((entry) => selector.textMatch?.exact ? entry.text === text : entry.text?.includes(text));
+    if (text)
+        candidates = candidates.filter((entry) => selector.textMatch?.exact ? entry.text === text : entry.text?.includes(text));
+    if (selector.nearestTo)
+        return nearestMatches(candidates, selector);
+    if (selector.rightOf)
+        return rightOfMatches(objectMap, candidates, selector);
+    if (selector.largestTextOnSlide)
+        return largestTextMatches(candidates, selector);
+    if (selector.nthBodyShape)
+        return nthBodyShapeMatches(candidates, selector.nthBodyShape);
+    return candidates === objectMap ? [] : candidates;
 }
 function singleMatch(objectMap, selector) {
     const matches = resolveMatches(objectMap, selector);
@@ -1036,15 +1323,113 @@ function singleMatch(objectMap, selector) {
         throw new Error(`SELECTOR_AMBIGUOUS: selector matched ${matches.length} objects.`);
     return matches[0];
 }
-function selectorMatch(entry) {
+function selectorMatch(entry, selector, matches) {
     return {
         stableObjectId: entry.stableObjectId,
         kind: entry.kind,
+        confidence: selectorConfidence(entry, selector, matches),
         label: entry.label,
         text: entry.text,
         sourcePath: entry.sourcePath,
         xmlPath: entry.xmlPath
     };
+}
+function nearestMatches(objectMap, selector) {
+    const point = selector.nearestTo;
+    if (!point)
+        return [];
+    const ranked = objectMap
+        .filter((entry) => entry.bounds && (point.slide === undefined || Number(entry.selectorHints?.slide) === point.slide))
+        .map((entry) => ({ entry, distance: centerDistance(entry, point.x, point.y) }))
+        .sort((left, right) => left.distance - right.distance);
+    const best = ranked[0];
+    if (!best || best.distance > 1000)
+        return [];
+    const second = ranked[1];
+    if (second && (second.distance - best.distance <= 24 || second.distance <= best.distance * 1.15)) {
+        return ranked.filter((item) => item.distance - best.distance <= 24 || item.distance <= best.distance * 1.15).map((item) => item.entry);
+    }
+    return [best.entry];
+}
+function rightOfMatches(objectMap, candidates, selector) {
+    const spec = selector.rightOf;
+    const text = typeof spec === "string" ? spec : spec?.text;
+    const slide = typeof spec === "object" ? spec.slide : selector.slide;
+    if (!text)
+        return [];
+    const anchors = objectMap.filter((entry) => entry.bounds && entry.text?.includes(text) && (slide === undefined || Number(entry.selectorHints?.slide) === slide));
+    if (!anchors.length)
+        return [];
+    if (anchors.length > 1)
+        return anchors;
+    const anchor = anchors[0];
+    const anchorRight = (anchor.bounds?.x ?? 0) + (anchor.bounds?.width ?? 0);
+    const ranked = candidates
+        .filter((entry) => entry.bounds && entry.stableObjectId !== anchor.stableObjectId && Number(entry.selectorHints?.slide) === Number(anchor.selectorHints?.slide) && (entry.bounds?.x ?? 0) >= anchorRight)
+        .map((entry) => ({ entry, delta: (entry.bounds?.x ?? 0) - anchorRight }))
+        .sort((left, right) => left.delta - right.delta);
+    const best = ranked[0];
+    if (!best)
+        return [];
+    const close = ranked.filter((item) => item.delta - best.delta <= 24);
+    return close.map((item) => item.entry);
+}
+function largestTextMatches(objectMap, selector) {
+    const slide = typeof selector.largestTextOnSlide === "number" ? selector.largestTextOnSlide : selector.slide;
+    if (slide === undefined)
+        return [];
+    const ranked = objectMap
+        .filter((entry) => entry.kind === "shape" && entry.text && Number(entry.selectorHints?.slide) === slide)
+        .map((entry) => ({ entry, score: textProminenceScore(entry) }))
+        .sort((left, right) => right.score - left.score || String(right.entry.text ?? "").length - String(left.entry.text ?? "").length);
+    const best = ranked[0];
+    if (!best)
+        return [];
+    const close = ranked.filter((item) => best.score > 0 && item.score >= best.score * 0.95);
+    return close.map((item) => item.entry);
+}
+function nthBodyShapeMatches(objectMap, selector) {
+    const bodies = objectMap.filter((entry) => {
+        if (entry.kind !== "shape" || Number(entry.selectorHints?.slide) !== selector.slide)
+            return false;
+        const placeholder = String(entry.selectorHints?.placeholder ?? entry.selectorHints?.placeholderKey ?? "");
+        return placeholder !== "title" && placeholder !== "ctrTitle";
+    });
+    return bodies.slice(Math.max(0, selector.n - 1), Math.max(0, selector.n));
+}
+function centerDistance(entry, x, y) {
+    const bounds = entry.bounds;
+    if (!bounds)
+        return Number.MAX_SAFE_INTEGER;
+    const cx = bounds.x + bounds.width / 2;
+    const cy = bounds.y + bounds.height / 2;
+    return Math.hypot(cx - x, cy - y);
+}
+function textVisualArea(entry) {
+    const bounds = entry.bounds;
+    return bounds ? bounds.width * bounds.height : 0;
+}
+function textProminenceScore(entry) {
+    const bounds = entry.bounds;
+    if (!bounds)
+        return 0;
+    const placeholder = String(entry.selectorHints?.placeholder ?? entry.selectorHints?.placeholderKey ?? "");
+    const titleBoost = placeholder === "title" || placeholder === "ctrTitle" ? 2.25 : 1;
+    const textLength = Math.max(1, String(entry.text ?? "").trim().length);
+    return bounds.height * Math.sqrt(textLength) * titleBoost;
+}
+function selectorConfidence(entry, selector, matches) {
+    if (selector.stableObjectId || selector.shapeId || selector.textHash || selector.positionHash)
+        return 1;
+    if (selector.nearestTo) {
+        const distance = centerDistance(entry, selector.nearestTo.x, selector.nearestTo.y);
+        return Number(Math.max(0.55, Math.min(0.98, 1 - distance / 1000)).toFixed(2));
+    }
+    if (selector.rightOf || selector.largestTextOnSlide || selector.nthBodyShape)
+        return 0.82;
+    if (matches.length === 1)
+        return 0.9;
+    return Number(Math.max(0.35, 0.8 / Math.max(1, matches.length)).toFixed(2));
 }
 function operationName(operation) {
     return "op" in operation ? operation.op : operation.type;

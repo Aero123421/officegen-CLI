@@ -764,6 +764,43 @@ describe("@officegen/formats MVP", () => {
     expect(result.readiness).not.toBe("blocked");
   });
 
+  it("applies explicit verification gates for AI and CI workflows", async () => {
+    const rendered = await render({ title: "Verify Gates", slides: [{ title: "Ready", body: "Body" }] }, { target: "pptx" });
+    const pass = await verify(
+      { data: rendered.bytes, format: "pptx" },
+      { gates: { expectedSlides: 1, requiredText: ["Ready"], forbiddenText: ["Do not ship"] } }
+    );
+    const blocked = await verify(
+      { data: rendered.bytes, format: "pptx" },
+      { gates: { expectedSlides: 2, requiredText: ["Missing"] } }
+    );
+    const visualUnevaluated = await verify(
+      { data: rendered.bytes, format: "pptx" },
+      { gates: { maxBlankPages: 0 } }
+    );
+
+    expect(pass.gates?.passed).toBe(true);
+    expect(blocked.gates?.passed).toBe(false);
+    expect(blocked.readiness).toBe("blocked");
+    expect(blocked.blockingIssues.join("\n")).toContain("GATE_EXPECTED_SLIDES");
+    expect(blocked.blockingIssues.join("\n")).toContain("GATE_REQUIRED_TEXT_MISSING");
+    expect(visualUnevaluated.readiness).toBe("blocked");
+    expect(visualUnevaluated.blockingIssues.join("\n")).toContain("GATE_MAX_BLANK_PAGES_UNEVALUATED");
+  });
+
+  it("counts visually blank PPTX slides without treating preview backgrounds as content", async () => {
+    const zip = new JSZip();
+    zip.file("[Content_Types].xml", "<Types><Override PartName=\"/ppt/presentation.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml\"/><Override PartName=\"/ppt/slides/slide1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slide+xml\"/></Types>");
+    zip.file("ppt/presentation.xml", "<p:presentation xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\"><p:sldIdLst><p:sldId id=\"256\" r:id=\"rId1\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"/></p:sldIdLst></p:presentation>");
+    zip.file("ppt/_rels/presentation.xml.rels", "<Relationships><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide\" Target=\"slides/slide1.xml\"/></Relationships>");
+    zip.file("ppt/slides/slide1.xml", "<p:sld xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/></p:spTree></p:cSld></p:sld>");
+    const result = await verify({ data: await zip.generateAsync({ type: "uint8array" }), format: "pptx" }, { visual: true, gates: { maxBlankPages: 0 } });
+
+    expect(result.visual?.blankPages).toBe(1);
+    expect(result.readiness).toBe("blocked");
+    expect(result.blockingIssues.join("\n")).toContain("GATE_MAX_BLANK_PAGES");
+  });
+
   it("renders empty sections with at least one PPTX slide, XLSX sheet, and DOCX document body", async () => {
     const pptx = await render({ title: "Empty deck", sections: [] }, { target: "pptx" });
     const xlsx = await render({ title: "Empty workbook", sections: [] }, { target: "xlsx" });
@@ -903,6 +940,230 @@ describe("@officegen/formats MVP", () => {
     expect(valuesByRef.get("A2")).toBe("Inserted");
     expect(valuesByRef.get("B3")).toBe("Updated");
     expect(valuesByRef.get("C2")).toBe("T1");
+  });
+
+  it("adds PPTX slides and text boxes through Open XML edit ops", async () => {
+    const pptx = await render({ title: "Runtime", slides: [{ title: "First", body: "Body" }] }, { target: "pptx" });
+    const edited = await edit(
+      { data: pptx.bytes, format: "pptx" },
+      [
+        { op: "pptx.addSlide", after: 1 },
+        { op: "pptx.addTextbox", slide: 2, text: "Added by EditOps", bounds: { x: 96, y: 96, width: 320, height: 80 }, fontSize: 24, bold: true }
+      ]
+    );
+    const inspected = await inspect({ data: edited.bytes, format: "pptx" });
+    const zip = await JSZip.loadAsync(edited.bytes as Uint8Array);
+    const rels = await zip.file("ppt/slides/_rels/slide2.xml.rels")?.async("string");
+
+    expect(inspected.trusted.summary.slides).toBe(2);
+    expect(inspected.objectMap.map((entry) => entry.text)).toContain("Added by EditOps");
+    expect(inspected.objectMap.find((entry) => entry.text === "Added by EditOps")?.editableOps).toContain("pptx.setFontSize");
+    expect(rels).toContain("/slideLayout");
+  });
+
+  it("escapes PPTX textbox names used as XML attributes", async () => {
+    const pptx = await render({ title: "Runtime", slides: [{ title: "First", body: "Body" }] }, { target: "pptx" });
+    const edited = await edit(
+      { data: pptx.bytes, format: "pptx" },
+      [{ op: "pptx.addTextbox", slide: 1, name: "Q1 \"Actual\"", text: "Quoted name", bounds: { x: 96, y: 96, width: 320, height: 80 } }]
+    );
+    const zip = await JSZip.loadAsync(edited.bytes as Uint8Array);
+    const xml = await zip.file("ppt/slides/slide1.xml")?.async("string");
+
+    expect(xml).toContain("Q1 &quot;Actual&quot;");
+    expect(xml).toContain("<a:t>Quoted name</a:t>");
+  });
+
+  it("allows later PPTX ops in the same batch to select newly created text boxes", async () => {
+    const pptx = await render({ title: "Runtime", slides: [{ title: "First", body: "Body" }] }, { target: "pptx" });
+    const edited = await edit(
+      { data: pptx.bytes, format: "pptx" },
+      [
+        { op: "pptx.addTextbox", slide: 1, text: "Created then styled", bounds: { x: 96, y: 180, width: 360, height: 80 } },
+        { op: "pptx.setBold", selector: { slide: 1, contains: "Created then styled" }, bold: true }
+      ],
+      { atomic: true, resolveSelectors: true }
+    );
+    const zip = await JSZip.loadAsync(edited.bytes as Uint8Array);
+    const xml = await zip.file("ppt/slides/slide1.xml")?.async("string");
+
+    expect(edited.changed).toBe(true);
+    expect(edited.errors).toBeUndefined();
+    expect(xml).toContain("Created then styled");
+    expect(xml).toContain('b="1"');
+  });
+
+  it("inserts PPTX text boxes before spTree extLst to preserve element order", async () => {
+    const zip = new JSZip();
+    zip.file("ppt/presentation.xml", '<p:presentation><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst></p:presentation>');
+    zip.file("ppt/_rels/presentation.xml.rels", '<Relationships><Relationship Id="rId1" Target="slides/slide1.xml"/></Relationships>');
+    zip.file("ppt/slides/_rels/slide1.xml.rels", '<Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/></Relationships>');
+    zip.file("ppt/slides/slide1.xml", [
+      '<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree>',
+      '<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>',
+      '<p:grpSpPr/>',
+      '<p:extLst><p:ext uri="{x}"/></p:extLst>',
+      '</p:spTree></p:cSld></p:sld>'
+    ].join(""));
+    const bytes = await zip.generateAsync({ type: "uint8array" });
+    const edited = await edit(
+      { data: bytes, format: "pptx" },
+      [{ op: "pptx.addTextbox", slide: 1, text: "Before ext", bounds: { x: 10, y: 10, width: 100, height: 40 } }]
+    );
+    const editedZip = await JSZip.loadAsync(edited.bytes as Uint8Array);
+    const xml = await editedZip.file("ppt/slides/slide1.xml")?.async("string");
+
+    expect(String(xml).indexOf("Before ext")).toBeLessThan(String(xml).indexOf("<p:extLst"));
+  });
+
+  it("supports AI-friendly PPTX selectors and text formatting edit ops", async () => {
+    const pptx = await render({ title: "Selector Deck", slides: [{ title: "Main Title", body: "Original body" }] }, { target: "pptx" });
+    const dryRun = await edit(
+      { data: pptx.bytes, format: "pptx" },
+      [{ op: "pptx.formatTitle", selector: { largestTextOnSlide: 1 }, fontSize: 44, bold: true, textCase: "upper" }],
+      { dryRun: true, resolveSelectors: true }
+    );
+    const edited = await edit(
+      { data: pptx.bytes, format: "pptx" },
+      [
+        { op: "pptx.formatTitle", selector: { largestTextOnSlide: 1 }, fontSize: 44, bold: true, textCase: "upper" },
+        {
+          op: "pptx.replaceWithBulletList",
+          selector: { slide: 1, contains: "Original body" },
+          items: [
+            { text: "Hazard", level: 0, bold: true },
+            { text: "Missing security controls", level: 1 },
+            { text: "Low user knowledge", level: 1, numbering: true }
+          ],
+          spaceBeforeForLevel1ExceptFirst: 18
+        },
+        { op: "pptx.setLineSpacing", selector: { slide: 1, contains: "Original body" }, lineSpacing: 1.2 }
+      ],
+      { resolveSelectors: true }
+    );
+    const inspected = await inspect({ data: edited.bytes, format: "pptx" });
+    const zip = await JSZip.loadAsync(edited.bytes as Uint8Array);
+    const xml = await zip.file("ppt/slides/slide1.xml")?.async("string");
+
+    expect(dryRun.resolvedSelectors?.[0]?.confidence).toBeGreaterThan(0.8);
+    expect(inspected.objectMap.map((entry) => entry.text)).toContain("MAIN TITLE");
+    expect(inspected.objectMap.map((entry) => entry.text).join("\n")).toContain("HazardMissing security controlsLow user knowledge");
+    expect(xml).toContain('sz="4400"');
+    expect(xml).toContain('b="1"');
+    expect(xml).toContain('lvl="1"');
+    expect(xml).toContain("<a:buAutoNum");
+    expect(xml).toContain("<a:lnSpc>");
+  });
+
+  it("preserves nested text body properties and valid paragraph property order in rich bullet ops", async () => {
+    const zip = new JSZip();
+    zip.file("ppt/slides/slide1.xml", [
+      "<p:sld><p:sp><p:nvSpPr><p:cNvPr id=\"9\" name=\"Body\"/></p:nvSpPr><p:txBody>",
+      "<a:bodyPr wrap=\"square\"><a:spAutoFit/></a:bodyPr><a:lstStyle><a:lvl1pPr marL=\"0\"/></a:lstStyle>",
+      "<a:p><a:pPr><a:lnSpc><a:spcPct val=\"100000\"/></a:lnSpc><a:buChar char=\"-\"/></a:pPr><a:r><a:t>Old body</a:t></a:r></a:p>",
+      "</p:txBody></p:sp></p:sld>"
+    ].join(""));
+    const bytes = await zip.generateAsync({ type: "uint8array" });
+    const inspected = await inspect({ data: bytes, format: "pptx" });
+    const stableObjectId = inspected.objectMap[0]?.stableObjectId;
+    const edited = await edit(
+      { data: bytes, format: "pptx" },
+      [
+        { op: "pptx.replaceWithBulletList", selector: { stableObjectId }, items: [{ text: "New item", level: 12, numbering: true }] },
+        { op: "pptx.setLineSpacing", selector: { stableObjectId }, lineSpacing: 1.2 },
+        { op: "pptx.setSpaceBefore", selector: { stableObjectId }, spaceBefore: 18 },
+        { op: "pptx.setNumbering", selector: { stableObjectId }, startAt: 3 }
+      ],
+      { atomic: true }
+    );
+    const editedZip = await JSZip.loadAsync(edited.bytes as Uint8Array);
+    const xml = await editedZip.file("ppt/slides/slide1.xml")?.async("string") ?? "";
+    const pPr = /<a:pPr\b[\s\S]*?<\/a:pPr>/.exec(xml)?.[0] ?? "";
+
+    expect(xml).toContain("<a:bodyPr wrap=\"square\"><a:spAutoFit/></a:bodyPr>");
+    expect(xml).toContain("<a:lstStyle><a:lvl1pPr marL=\"0\"/></a:lstStyle>");
+    expect(xml).toContain('lvl="8"');
+    expect(pPr.indexOf("<a:lnSpc>")).toBeLessThan(pPr.indexOf("<a:spcBef>"));
+    expect(pPr.indexOf("<a:spcBef>")).toBeLessThan(pPr.indexOf("<a:buAutoNum"));
+  });
+
+  it("treats ambiguous rightOf anchors as unsafe instead of silently picking the first", async () => {
+    const zip = new JSZip();
+    zip.file("ppt/slides/slide1.xml", [
+      "<p:sld><p:sp>",
+      "<p:nvSpPr><p:cNvPr id=\"2\" name=\"Label A\"/></p:nvSpPr>",
+      "<p:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"914400\" cy=\"457200\"/></a:xfrm></p:spPr>",
+      "<p:txBody><a:p><a:r><a:t>Label</a:t></a:r></a:p></p:txBody></p:sp>",
+      "<p:sp><p:nvSpPr><p:cNvPr id=\"3\" name=\"Label B\"/></p:nvSpPr>",
+      "<p:spPr><a:xfrm><a:off x=\"0\" y=\"914400\"/><a:ext cx=\"914400\" cy=\"457200\"/></a:xfrm></p:spPr>",
+      "<p:txBody><a:p><a:r><a:t>Label</a:t></a:r></a:p></p:txBody></p:sp>",
+      "<p:sp><p:nvSpPr><p:cNvPr id=\"4\" name=\"Value\"/></p:nvSpPr>",
+      "<p:spPr><a:xfrm><a:off x=\"1828800\" y=\"0\"/><a:ext cx=\"914400\" cy=\"457200\"/></a:xfrm></p:spPr>",
+      "<p:txBody><a:p><a:r><a:t>Value</a:t></a:r></a:p></p:txBody></p:sp></p:sld>"
+    ].join(""));
+    const bytes = await zip.generateAsync({ type: "uint8array" });
+
+    await expect(edit(
+      { data: bytes, format: "pptx" },
+      [{ op: "setText", selector: { rightOf: "Label" }, text: "Changed" }],
+      { atomic: true }
+    )).resolves.toMatchObject({ changed: false, errors: [expect.objectContaining({ reason: "ambiguous" })] });
+  });
+
+  it("combines AI-friendly PPTX selectors with slide and text filters", async () => {
+    const pptx = await render(
+      { title: "Selector Deck", slides: [{ title: "First", body: "Keep" }, { title: "Second", body: "Target body" }] },
+      { target: "pptx" }
+    );
+    const edited = await edit(
+      { data: pptx.bytes, format: "pptx" },
+      [{ op: "setText", selector: { slide: 2, contains: "Target", nearestTo: { x: 90, y: 120 } }, text: "Changed on slide 2" }],
+      { resolveSelectors: true }
+    );
+    const inspected = await inspect({ data: edited.bytes, format: "pptx" });
+
+    expect(edited.resolvedSelectors?.[0]?.matches[0]?.text).toBe("Target body");
+    expect(String(inspected.untrusted.slides[0]?.text)).toContain("Keep");
+    expect(String(inspected.untrusted.slides[1]?.text)).toContain("Changed on slide 2");
+  });
+
+  it("edits PPTX table cells by stable selector hashes", async () => {
+    const pptx = await render(
+      { title: "Table", slides: [{ title: "Table", blocks: [{ type: "table", rows: [{ metric: "Revenue", value: "$10M" }] }] }] },
+      { target: "pptx" }
+    );
+    const inspected = await inspect({ data: pptx.bytes, format: "pptx" });
+    const revenueCell = inspected.objectMap.find((entry) => entry.kind === "tableCell" && entry.text === "Revenue");
+    const edited = await edit(
+      { data: pptx.bytes, format: "pptx" },
+      [{ op: "pptx.setTableCellText", selector: { slide: 1, textHash: String(revenueCell?.selectorHints?.textHash) }, text: "ARR" }]
+    );
+    const reinspected = await inspect({ data: edited.bytes, format: "pptx" });
+
+    expect(revenueCell?.editableOps).toContain("pptx.setTableCellText");
+    expect(reinspected.objectMap.map((entry) => entry.text)).toContain("ARR");
+    expect(reinspected.objectMap.map((entry) => entry.text)).not.toContain("Revenue");
+  });
+
+  it("routes generic setText to PPTX table cells and clears split runs", async () => {
+    const zip = new JSZip();
+    zip.file("ppt/slides/slide1.xml", [
+      "<p:sld><p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=\"9\" name=\"Table\"/></p:nvGraphicFramePr>",
+      "<a:tbl><a:tr><a:tc><a:txBody><a:p>",
+      "<a:r><a:t>Old </a:t></a:r><a:r><a:t>value</a:t></a:r>",
+      "</a:p></a:txBody></a:tc></a:tr></a:tbl></p:graphicFrame></p:sld>"
+    ].join(""));
+    const bytes = await zip.generateAsync({ type: "uint8array" });
+    const inspected = await inspect({ data: bytes, format: "pptx" });
+    const cellId = inspected.objectMap.find((entry) => entry.kind === "tableCell")?.stableObjectId;
+    const edited = await edit(
+      { data: bytes, format: "pptx" },
+      [{ op: "setText", selector: { stableObjectId: cellId }, text: "New" }]
+    );
+    const reinspected = await inspect({ data: edited.bytes, format: "pptx" });
+
+    expect(reinspected.objectMap.find((entry) => entry.kind === "tableCell")?.text).toBe("New");
+    expect(reinspected.objectMap.find((entry) => entry.kind === "tableCell")?.text).not.toContain("value");
   });
 
   it("keeps PPTX shape stableObjectId values stable when slides are reordered", async () => {

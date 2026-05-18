@@ -15,7 +15,8 @@ export async function verify(input, options = {}) {
     let partial = false;
     const warnings = [];
     const blockingIssues = [];
-    const inspected = await timedPhase("inspect", phaseTimings, options.timeoutMs, () => inspect({ data: normalized.bytes, path: normalized.path, format: normalized.format }, { depth: "summary", config: options.config })).catch((error) => {
+    const inspectDepth = gatesNeedFullText(options.gates) ? "full" : "summary";
+    const inspected = await timedPhase("inspect", phaseTimings, options.timeoutMs, () => inspect({ data: normalized.bytes, path: normalized.path, format: normalized.format }, { depth: inspectDepth, config: options.config })).catch((error) => {
         if (isTimeout(error)) {
             partial = true;
             warnings.push(`VERIFY_TIMEOUT: inspect exceeded ${options.timeoutMs}ms.`);
@@ -101,6 +102,11 @@ export async function verify(input, options = {}) {
         if (options.protectedSheets && workbookMap?.protectedSheets?.length > 0)
             warnings.push("XLSX_PROTECTED_SHEETS_PRESENT: protected sheets may require manual review.");
     }
+    const gateResult = inspected ? evaluateGates(options.gates, inspected, visual, warnings.length, noRepairDialogExpected, nativeRenderer) : undefined;
+    for (const issue of gateResult?.failed ?? [])
+        blockingIssues.push(issue);
+    for (const issue of gateResult?.warnings ?? [])
+        warnings.push(issue);
     if (!openable)
         blockingIssues.push("INPUT_NOT_OPENABLE");
     const warningSummary = aggregateWarnings(warnings, blockingIssues);
@@ -157,7 +163,8 @@ export async function verify(input, options = {}) {
         topRisks,
         scoreBreakdown,
         recommendedRepairs,
-        artifacts
+        artifacts,
+        gates: gateResult
     };
     if (options.out)
         await writeFile(options.out, `${JSON.stringify(result, null, 2)}\n`, "utf8");
@@ -245,10 +252,62 @@ function commandForRisk(code, format) {
         return `OFFICEGEN_PROFILE=enterprise officegen verify input.${format} --native --visual --json`;
     return undefined;
 }
+function evaluateGates(gates, inspected, visual, warningCount, noRepairDialogExpected, nativeRenderer) {
+    if (!gates)
+        return undefined;
+    const failed = [];
+    const warnings = [];
+    const summary = inspected.trusted.summary;
+    if (gates.expectedSlides !== undefined && Number(summary.slides ?? 0) !== gates.expectedSlides) {
+        failed.push(`GATE_EXPECTED_SLIDES: expected ${gates.expectedSlides}, got ${Number(summary.slides ?? 0)}.`);
+    }
+    if (gates.expectedPages !== undefined) {
+        const pages = Number(summary.pages ?? summary.slides ?? summary.sheets ?? 0);
+        if (pages !== gates.expectedPages)
+            failed.push(`GATE_EXPECTED_PAGES: expected ${gates.expectedPages}, got ${pages}.`);
+    }
+    const searchableText = inspected.objectMap.map((entry) => `${entry.text ?? ""}\n${entry.textPreview ?? ""}`).join("\n");
+    for (const text of gates.requiredText ?? []) {
+        if (!searchableText.includes(text))
+            failed.push(`GATE_REQUIRED_TEXT_MISSING: ${text}`);
+    }
+    for (const text of gates.forbiddenText ?? []) {
+        if (searchableText.includes(text))
+            failed.push(`GATE_FORBIDDEN_TEXT_PRESENT: ${text}`);
+    }
+    if (gates.maxBlankPages !== undefined) {
+        if (!visual)
+            failed.push("GATE_MAX_BLANK_PAGES_UNEVALUATED: run verify with visual enabled to evaluate maxBlankPages.");
+        else if (visual.blankPages > gates.maxBlankPages)
+            failed.push(`GATE_MAX_BLANK_PAGES: expected <= ${gates.maxBlankPages}, got ${visual.blankPages}.`);
+    }
+    if (gates.maxWarnings !== undefined && warningCount > gates.maxWarnings) {
+        failed.push(`GATE_MAX_WARNINGS: expected <= ${gates.maxWarnings}, got ${warningCount}.`);
+    }
+    if (gates.requireNoRepairDialog) {
+        if (!noRepairDialogExpected)
+            failed.push("GATE_REPAIR_DIALOG_EXPECTED: repair dialog risk was detected.");
+        if (!nativeRenderer?.ok)
+            failed.push("GATE_REPAIR_DIALOG_NATIVE_UNEVALUATED: run verify with native enabled to prove repair-dialog behavior.");
+        if (inspected.trusted.caveats.some((caveat) => /repair/i.test(caveat))) {
+            warnings.push("GATE_REPAIR_DIALOG_EVIDENCE_LIMITED: inspect caveats mention repair risk.");
+        }
+    }
+    return { passed: failed.length === 0, failed, warnings };
+}
+function gatesNeedFullText(gates) {
+    return Boolean(gates?.requiredText?.length || gates?.forbiddenText?.length);
+}
 async function verifyVisual(input, config) {
     const preview = await view(input, { format: "svg", maxPages: 10, config });
-    const blankPages = preview.pages.filter((page) => !/<text\b|<rect\b|data-kind=/.test(page.content)).length;
+    const blankPages = preview.pages.filter((page) => !page.objectMap.some(hasVisiblePreviewObject)).length;
     return { fidelity: "approximate", pagesChecked: preview.pages.length, blankPages };
+}
+function hasVisiblePreviewObject(entry) {
+    const text = `${entry.text ?? ""}${entry.textPreview ?? ""}`.trim();
+    if (text)
+        return true;
+    return ["picture", "image", "chart"].includes(entry.kind);
 }
 async function verifyNative(input, options, artifacts) {
     if (!["pptx", "docx", "xlsx"].includes(input.format))

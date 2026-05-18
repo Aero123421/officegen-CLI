@@ -24,7 +24,7 @@ export const COMMAND_SPECS = [
   spec("diagnose", ["diagnose"]),
   spec("repair", ["repair"]),
   spec("diff", ["diff"]),
-  spec("run", ["run"]),
+  spec("run", ["run", "run prepare-reference"]),
   spec("critique", ["critique"]),
   spec("improve", ["improve"]),
   spec("benchmark", ["benchmark run", "benchmark compare"]),

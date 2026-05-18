@@ -208,8 +208,10 @@ function commandExamples(commandGroup, subcommand) {
         return ["officegen render deck.ir.json --target pptx --out deck.pptx --json"];
     if (commandGroup === "diff")
         return ["officegen diff before.pptx after.pptx --visual --json"];
+    if (commandGroup === "run")
+        return ["officegen run plan.json --manifest .officegen/run-manifest.json --json", "officegen run prepare-reference --reference problem.pdf --target deck.pptx --out .officegen/run --json"];
     if (commandGroup === "verify")
-        return ["officegen verify deck.pptx --visual --json", "OFFICEGEN_PROFILE=enterprise officegen verify deck.pptx --native --out verify-report.json --json"];
+        return ["officegen verify deck.pptx --visual --json", "officegen verify deck.pptx --gates gates.json --json", "OFFICEGEN_PROFILE=enterprise officegen verify deck.pptx --native --out verify-report.json --json"];
     if (commandGroup === "asset" && subcommand === "replace")
         return ["officegen asset replace deck.pptx --asset ppt/media/image1.png logo.png --out deck-logo.pptx --json"];
     if (commandGroup === "asset" && subcommand === "inspect")
@@ -271,6 +273,18 @@ function commandSpecificHelpOptions(commandGroup, subcommand) {
             "  --manifest <path>              benchmark manifest JSON",
             "  --report-out <path>            write benchmark JSON report",
             "  setup: run npm run benchmark:fetch before public corpus runs"
+        ];
+    if (commandGroup === "run")
+        return [
+            "  --reference <path>            reference file for prepare-reference mode",
+            "  --target <path>               target file for prepare-reference mode",
+            "  --out <dir>                   output directory for prepare-reference mode",
+            "  --max-pages <number>          maximum preview pages",
+            "  --manifest <path>             write run manifest for plan mode",
+            "  --log-jsonl <path>            write JSONL run log for plan mode",
+            "  --summary <path>              write Markdown summary for plan mode",
+            "  --output-root <path>          restrict plan outputs to a directory",
+            "  --expected-artifacts <path>   expected artifact list for plan mode"
         ];
     if (commandGroup === "asset" && subcommand === "inspect")
         return [
@@ -394,6 +408,7 @@ function baseCommand(name, description) {
         .option("--to <format>", "export target format")
         .option("--mode <mode>", "export mode")
         .option("--issues <path>", "repair issues JSON")
+        .option("--gates <path>", "verification gates JSON")
         .option("--images", "extract image assets")
         .option("--embedded", "inspect embedded media in Office packages")
         .option("--visual", "include approximate visual diff/regression output")
@@ -416,6 +431,7 @@ function baseCommand(name, description) {
         .option("--expected-artifacts <path>", "JSON list of expected artifacts")
         .option("--profile <profile>", "critique or scaffold profile")
         .option("--asset <path>", "asset zip path")
+        .option("--reference <path>", "reference file path")
         .option("--selector <selector>", "asset or object selector")
         .option("--name <name>", "template, design, plugin, or renderer name")
         .option("--map <path>", "template map JSON")

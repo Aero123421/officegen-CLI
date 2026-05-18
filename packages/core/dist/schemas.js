@@ -58,11 +58,50 @@ const selectorSchema = {
     additionalProperties: false,
     properties: {
         stableObjectId: { type: "string" },
+        slide: { type: "integer", minimum: 1 },
+        shapeId: { type: "string" },
         contains: { type: "string" },
         placeholderKey: { type: "string" },
+        placeholder: { type: "string" },
         shapeName: { type: "string" },
         contentControlTag: { type: "string" },
         namedRange: { type: "string" },
+        textHash: { type: "string" },
+        positionHash: { type: "string" },
+        nearestTo: {
+            type: "object",
+            required: ["x", "y"],
+            additionalProperties: false,
+            properties: {
+                slide: { type: "integer", minimum: 1 },
+                x: { type: "number" },
+                y: { type: "number" }
+            }
+        },
+        rightOf: {
+            oneOf: [
+                { type: "string" },
+                {
+                    type: "object",
+                    required: ["text"],
+                    additionalProperties: false,
+                    properties: {
+                        text: { type: "string" },
+                        slide: { type: "integer", minimum: 1 }
+                    }
+                }
+            ]
+        },
+        largestTextOnSlide: { oneOf: [{ type: "integer", minimum: 1 }, { type: "boolean" }] },
+        nthBodyShape: {
+            type: "object",
+            required: ["slide", "n"],
+            additionalProperties: false,
+            properties: {
+                slide: { type: "integer", minimum: 1 },
+                n: { type: "integer", minimum: 1 }
+            }
+        },
         textMatch: {
             type: "object",
             required: ["text"],
@@ -130,7 +169,14 @@ function editOperationSchemas() {
         tableName: { type: "string" },
         styleId: { type: "string" },
         font: { type: "string" },
+        name: { type: "string" },
+        fontSize: { type: "number", minimum: 1 },
         bold: { type: "boolean" },
+        level: { type: "integer", minimum: 0, maximum: 8 },
+        startAt: { type: "integer", minimum: 1 },
+        lineSpacing: { type: "number", minimum: 0 },
+        spaceBefore: { type: "number", minimum: 0 },
+        textCase: { enum: ["upper", "lower", "title", "sentence"] },
         kind: { enum: ["header", "footer"] },
         selected: { type: "array", minItems: 1, items: { type: "string" } }
     };
@@ -150,9 +196,43 @@ function editOperationSchemas() {
         op("replaceText", ["from", "to"], ["selector", "from", "to"]),
         op("setText", ["selector", "text"], ["selector", "text"]),
         op("pptx.duplicateSlide", [], ["slide", "after", "selector"], {}, { anyOf: [{ required: ["slide"] }, { required: ["selector"] }] }),
+        op("pptx.addSlide", [], ["after"]),
         op("pptx.reorderSlides", ["order"], ["order"]),
+        op("pptx.addTextbox", ["slide", "text", "bounds"], ["slide", "text", "bounds", "name", "fontSize", "bold"]),
+        op("pptx.formatTitle", ["selector"], ["selector", "fontSize", "bold", "textCase"]),
+        op("pptx.replaceWithBulletList", ["selector", "items"], ["selector", "items"], {
+            items: {
+                type: "array",
+                minItems: 1,
+                items: {
+                    oneOf: [
+                        { type: "string" },
+                        {
+                            type: "object",
+                            required: ["text"],
+                            additionalProperties: false,
+                            properties: {
+                                text: { type: "string" },
+                                level: { type: "integer", minimum: 0, maximum: 8 },
+                                bold: { type: "boolean" },
+                                numbering: { type: "boolean" }
+                            }
+                        }
+                    ]
+                }
+            },
+            spaceBeforeForLevel1ExceptFirst: { type: "number", minimum: 0 }
+        }),
         op("pptx.insertBulletItems", ["selector", "items"], ["selector", "items"]),
         op("pptx.replaceBulletItems", ["selector", "items"], ["selector", "items"]),
+        op("pptx.setFontSize", ["selector", "fontSize"], ["selector", "fontSize"]),
+        op("pptx.setBold", ["selector", "bold"], ["selector", "bold"]),
+        op("pptx.setBulletLevel", ["selector", "level"], ["selector", "level"]),
+        op("pptx.setNumbering", ["selector"], ["selector", "level", "startAt"]),
+        op("pptx.setLineSpacing", ["selector", "lineSpacing"], ["selector", "lineSpacing"]),
+        op("pptx.setSpaceBefore", ["selector", "spaceBefore"], ["selector", "spaceBefore"]),
+        op("pptx.setTextCase", ["selector", "textCase"], ["selector", "textCase"]),
+        op("pptx.setTableCellText", ["selector", "text"], ["selector", "text"]),
         op("pptx.replaceImageByShape", ["selector"], ["selector", "replacementPath", "replacementBase64", "fit", "crop"], {}, { anyOf: [{ required: ["replacementPath"] }, { required: ["replacementBase64"] }] }),
         op("pptx.updateChartData", ["selector", "categories", "values"], ["selector", "categories", "values", "seriesName"]),
         op("pptx.setBounds", ["selector", "bounds"], ["selector", "bounds"]),
@@ -453,6 +533,7 @@ const entries = [
     entry("officegen.projected-result@2.3", looseSchema("officegen.projected-result@2.3"), undefined),
     entry("officegen.inspect.result@1.2", looseSchema("officegen.inspect.result@1.2"), "inspect"),
     entry("officegen.view.result@1.2", looseSchema("officegen.view.result@1.2"), "view"),
+    entry("officegen.view.manifest@1.2", looseSchema("officegen.view.manifest@1.2"), "view"),
     entry("officegen.edit.selectors@1.2", looseSchema("officegen.edit.selectors@1.2"), "edit"),
     entry("officegen.edit.result@1.2", looseSchema("officegen.edit.result@1.2"), "edit"),
     entry("officegen.render.result@1.2", looseSchema("officegen.render.result@1.2"), "render"),
@@ -483,6 +564,9 @@ const entries = [
     entry("officegen.run.result@2.3", looseSchema("officegen.run.result@2.3"), "run"),
     entry("officegen.run.manifest@2.4", looseSchema("officegen.run.manifest@2.4"), "run"),
     entry("officegen.run.result@2.4", looseSchema("officegen.run.result@2.4"), "run"),
+    entry("officegen.prepare-reference.manifest@1.2", looseSchema("officegen.prepare-reference.manifest@1.2"), "run"),
+    entry("officegen.prepare-reference.result@1.2", looseSchema("officegen.prepare-reference.result@1.2"), "run"),
+    entry("officegen.prepare-reference.object-map@1.2", looseSchema("officegen.prepare-reference.object-map@1.2"), "run"),
     entry("officegen.run.step-error@1.2", looseSchema("officegen.run.step-error@1.2"), "run"),
     entry("officegen.ooxml.validation@1", looseSchema("officegen.ooxml.validation@1"), "validate"),
     entry("officegen.mcp.tools@1.2", looseSchema("officegen.mcp.tools@1.2"), "mcp"),

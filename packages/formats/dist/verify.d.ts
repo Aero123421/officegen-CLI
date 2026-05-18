@@ -3,12 +3,22 @@ export interface VerifyOptions {
     native?: boolean;
     visual?: boolean;
     out?: string;
+    gates?: VerifyGates;
     formulas?: boolean;
     namedRanges?: boolean;
     externalLinks?: boolean;
     protectedSheets?: boolean;
     timeoutMs?: number;
     config?: OfficegenConfig;
+}
+export interface VerifyGates {
+    expectedSlides?: number;
+    expectedPages?: number;
+    requiredText?: string[];
+    forbiddenText?: string[];
+    maxWarnings?: number;
+    requireNoRepairDialog?: boolean;
+    maxBlankPages?: number;
 }
 export interface VerifyResult {
     schema: "officegen.verify.result@1.2";
@@ -62,6 +72,11 @@ export interface VerifyResult {
         reason: string;
     }>;
     artifacts: Record<string, unknown>;
+    gates?: {
+        passed: boolean;
+        failed: string[];
+        warnings: string[];
+    };
 }
 export declare function verify(input: InputLike, options?: VerifyOptions): Promise<VerifyResult>;
 type WarningCategory = "quality" | "compatibility" | "security" | "environment";

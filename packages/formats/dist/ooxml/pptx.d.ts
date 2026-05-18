@@ -37,4 +37,17 @@ export declare function replaceShapeBulletItems(xml: string, ordinal: number, it
     xml: string;
 };
 export declare function duplicateSlide(zip: JSZip, slideNumber: number, after?: number): Promise<void>;
+export declare function addBlankSlide(zip: JSZip, after?: number): Promise<number>;
+export declare function addTextBox(zip: JSZip, slideNumber: number, spec: {
+    text: string;
+    bounds: {
+        x: number;
+        y: number;
+        width: number;
+        height: number;
+    };
+    name?: string;
+    fontSize?: number;
+    bold?: boolean;
+}): Promise<void>;
 export declare function reorderSlides(zip: JSZip, order: number[]): Promise<void>;

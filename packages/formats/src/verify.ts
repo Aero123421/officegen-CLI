@@ -12,12 +12,23 @@ export interface VerifyOptions {
   native?: boolean;
   visual?: boolean;
   out?: string;
+  gates?: VerifyGates;
   formulas?: boolean;
   namedRanges?: boolean;
   externalLinks?: boolean;
   protectedSheets?: boolean;
   timeoutMs?: number;
   config?: OfficegenConfig;
+}
+
+export interface VerifyGates {
+  expectedSlides?: number;
+  expectedPages?: number;
+  requiredText?: string[];
+  forbiddenText?: string[];
+  maxWarnings?: number;
+  requireNoRepairDialog?: boolean;
+  maxBlankPages?: number;
 }
 
 export interface VerifyResult {
@@ -38,6 +49,7 @@ export interface VerifyResult {
   scoreBreakdown: Record<string, unknown>;
   recommendedRepairs: Array<{ code: string; command?: string; reason: string }>;
   artifacts: Record<string, unknown>;
+  gates?: { passed: boolean; failed: string[]; warnings: string[] };
 }
 
 export async function verify(input: InputLike, options: VerifyOptions = {}): Promise<VerifyResult> {
@@ -48,7 +60,8 @@ export async function verify(input: InputLike, options: VerifyOptions = {}): Pro
   let partial = false;
   const warnings: string[] = [];
   const blockingIssues: string[] = [];
-  const inspected = await timedPhase("inspect", phaseTimings, options.timeoutMs, () => inspect({ data: normalized.bytes, path: normalized.path, format: normalized.format }, { depth: "summary", config: options.config })).catch((error) => {
+  const inspectDepth = gatesNeedFullText(options.gates) ? "full" : "summary";
+  const inspected = await timedPhase("inspect", phaseTimings, options.timeoutMs, () => inspect({ data: normalized.bytes, path: normalized.path, format: normalized.format }, { depth: inspectDepth, config: options.config })).catch((error) => {
     if (isTimeout(error)) {
       partial = true;
       warnings.push(`VERIFY_TIMEOUT: inspect exceeded ${options.timeoutMs}ms.`);
@@ -130,6 +143,10 @@ export async function verify(input: InputLike, options: VerifyOptions = {}): Pro
     if (options.protectedSheets && workbookMap?.protectedSheets?.length > 0) warnings.push("XLSX_PROTECTED_SHEETS_PRESENT: protected sheets may require manual review.");
   }
 
+  const gateResult = inspected ? evaluateGates(options.gates, inspected, visual, warnings.length, noRepairDialogExpected, nativeRenderer) : undefined;
+  for (const issue of gateResult?.failed ?? []) blockingIssues.push(issue);
+  for (const issue of gateResult?.warnings ?? []) warnings.push(issue);
+
   if (!openable) blockingIssues.push("INPUT_NOT_OPENABLE");
   const warningSummary = aggregateWarnings(warnings, blockingIssues);
   const topRisks: VerifyResult["topRisks"] = warningSummary.slice(0, 8).map((item) => ({
@@ -185,7 +202,8 @@ export async function verify(input: InputLike, options: VerifyOptions = {}): Pro
     topRisks,
     scoreBreakdown,
     recommendedRepairs,
-    artifacts
+    artifacts,
+    gates: gateResult
   };
   if (options.out) await writeFile(options.out, `${JSON.stringify(result, null, 2)}\n`, "utf8");
   return result;
@@ -270,10 +288,63 @@ function commandForRisk(code: string, format: string): string | undefined {
   return undefined;
 }
 
+function evaluateGates(
+  gates: VerifyGates | undefined,
+  inspected: Awaited<ReturnType<typeof inspect>>,
+  visual: VerifyResult["visual"] | undefined,
+  warningCount: number,
+  noRepairDialogExpected: boolean,
+  nativeRenderer: VerifyResult["nativeRenderer"] | undefined
+): VerifyResult["gates"] | undefined {
+  if (!gates) return undefined;
+  const failed: string[] = [];
+  const warnings: string[] = [];
+  const summary = inspected.trusted.summary as Record<string, unknown>;
+  if (gates.expectedSlides !== undefined && Number(summary.slides ?? 0) !== gates.expectedSlides) {
+    failed.push(`GATE_EXPECTED_SLIDES: expected ${gates.expectedSlides}, got ${Number(summary.slides ?? 0)}.`);
+  }
+  if (gates.expectedPages !== undefined) {
+    const pages = Number(summary.pages ?? summary.slides ?? summary.sheets ?? 0);
+    if (pages !== gates.expectedPages) failed.push(`GATE_EXPECTED_PAGES: expected ${gates.expectedPages}, got ${pages}.`);
+  }
+  const searchableText = inspected.objectMap.map((entry) => `${entry.text ?? ""}\n${entry.textPreview ?? ""}`).join("\n");
+  for (const text of gates.requiredText ?? []) {
+    if (!searchableText.includes(text)) failed.push(`GATE_REQUIRED_TEXT_MISSING: ${text}`);
+  }
+  for (const text of gates.forbiddenText ?? []) {
+    if (searchableText.includes(text)) failed.push(`GATE_FORBIDDEN_TEXT_PRESENT: ${text}`);
+  }
+  if (gates.maxBlankPages !== undefined) {
+    if (!visual) failed.push("GATE_MAX_BLANK_PAGES_UNEVALUATED: run verify with visual enabled to evaluate maxBlankPages.");
+    else if (visual.blankPages > gates.maxBlankPages) failed.push(`GATE_MAX_BLANK_PAGES: expected <= ${gates.maxBlankPages}, got ${visual.blankPages}.`);
+  }
+  if (gates.maxWarnings !== undefined && warningCount > gates.maxWarnings) {
+    failed.push(`GATE_MAX_WARNINGS: expected <= ${gates.maxWarnings}, got ${warningCount}.`);
+  }
+  if (gates.requireNoRepairDialog) {
+    if (!noRepairDialogExpected) failed.push("GATE_REPAIR_DIALOG_EXPECTED: repair dialog risk was detected.");
+    if (!nativeRenderer?.ok) failed.push("GATE_REPAIR_DIALOG_NATIVE_UNEVALUATED: run verify with native enabled to prove repair-dialog behavior.");
+    if (inspected.trusted.caveats.some((caveat) => /repair/i.test(caveat))) {
+      warnings.push("GATE_REPAIR_DIALOG_EVIDENCE_LIMITED: inspect caveats mention repair risk.");
+    }
+  }
+  return { passed: failed.length === 0, failed, warnings };
+}
+
+function gatesNeedFullText(gates: VerifyGates | undefined): boolean {
+  return Boolean(gates?.requiredText?.length || gates?.forbiddenText?.length);
+}
+
 async function verifyVisual(input: InputLike, config?: OfficegenConfig): Promise<NonNullable<VerifyResult["visual"]>> {
   const preview = await view(input, { format: "svg", maxPages: 10, config });
-  const blankPages = preview.pages.filter((page) => !/<text\b|<rect\b|data-kind=/.test(page.content)).length;
+  const blankPages = preview.pages.filter((page) => !page.objectMap.some(hasVisiblePreviewObject)).length;
   return { fidelity: "approximate", pagesChecked: preview.pages.length, blankPages };
+}
+
+function hasVisiblePreviewObject(entry: { kind: string; text?: string; textPreview?: string; label?: string }): boolean {
+  const text = `${entry.text ?? ""}${entry.textPreview ?? ""}`.trim();
+  if (text) return true;
+  return ["picture", "image", "chart"].includes(entry.kind);
 }
 
 async function verifyNative(input: Awaited<ReturnType<typeof normalizeInput>>, options: VerifyOptions, artifacts: Record<string, unknown>): Promise<NonNullable<VerifyResult["nativeRenderer"]>> {

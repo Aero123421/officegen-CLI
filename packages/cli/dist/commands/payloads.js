@@ -116,7 +116,9 @@ function effectiveOptionsForHelp(commandGroup, subcommand) {
     if (commandGroup === "render")
         return ["--target", "--out", "--overwrite", "--report-out"];
     if (commandGroup === "verify")
-        return ["--visual", "--native", "--timeout-ms", "--out", "--report-out"];
+        return ["--visual", "--native", "--timeout-ms", "--gates", "--out", "--report-out"];
+    if (commandGroup === "run")
+        return ["--reference", "--target", "--out", "--max-pages", "--manifest", "--log-jsonl", "--summary", "--output-root", "--expected-artifacts", "--report-out"];
     if (commandGroup === "benchmark")
         return ["--manifest", "--report-out", "--timeout-ms"];
     if (commandGroup === "improve")
@@ -523,12 +525,90 @@ export async function viewPayload(context) {
     const out = optionValue(context.argv, "--out");
     if (out) {
         const outDir = await validateOutputPath(context, out, { directory: true });
-        await fs.mkdir(outDir, { recursive: true });
-        await Promise.all(result.pages.map((page) => fs.writeFile(path.join(outDir, `page-${String(page.page).padStart(3, "0")}.${page.format}`), page.content, "utf8")));
-        await fs.writeFile(path.join(outDir, "object-map.json"), `${JSON.stringify(result.objectMap, null, 2)}\n`, "utf8");
-        return maybeWriteReport(context, { ...result, artifacts: [{ path: out, exists: true, kind: "view", sourceCommand: "view" }], pages: result.pages.map((page) => ({ ...page, content: undefined })) }, "view");
+        const artifacts = await writeViewArtifacts(context, outDir, result, "view");
+        return maybeWriteReport(context, { ...result, artifacts, pages: result.pages.map((page) => ({ ...page, content: undefined })) }, "view");
     }
     return maybeWriteReport(context, result, "view");
+}
+async function writeViewArtifacts(context, outDir, result, sourceCommand) {
+    await fs.mkdir(outDir, { recursive: true });
+    const pageRecords = [];
+    for (const page of result.pages) {
+        const fileName = `page-${String(page.page).padStart(3, "0")}.${page.format}`;
+        const filePath = path.join(outDir, fileName);
+        await writeGeneratedText(context, filePath, page.content);
+        const dimensions = viewPageDimensions(page.content);
+        pageRecords.push({
+            page: page.page,
+            stableObjectId: page.stableObjectId,
+            path: filePath,
+            fileName,
+            format: page.format,
+            width: dimensions.width,
+            height: dimensions.height,
+            objectMapEntries: page.objectMap.length
+        });
+    }
+    const objectMapPath = path.join(outDir, "object-map.json");
+    const manifestPath = path.join(outDir, "manifest.json");
+    const contactSheetPath = path.join(outDir, "contact-sheet.html");
+    await writeGeneratedJson(context, objectMapPath, result.objectMap);
+    await writeGeneratedText(context, contactSheetPath, contactSheetHtml(pageRecords));
+    const manifest = {
+        schema: "officegen.view.manifest@1.2",
+        fidelity: result.fidelity,
+        renderer: "officegen-approximate-svg-html",
+        sourceFormat: result.trusted.sourceFormat,
+        generatedAt: result.trusted.generatedAt,
+        pages: pageRecords,
+        objectMapPath,
+        contactSheetPath,
+        caveats: result.caveats
+    };
+    await writeGeneratedJson(context, manifestPath, manifest);
+    return [
+        await artifactRecord(outDir, "view", "directory", sourceCommand),
+        await artifactRecord(manifestPath, "view-manifest", "json", sourceCommand),
+        await artifactRecord(contactSheetPath, "contact-sheet", "html", sourceCommand),
+        await artifactRecord(objectMapPath, "object-map", "json", sourceCommand),
+        ...await Promise.all(pageRecords.map((page) => artifactRecord(page.path, "view-page", page.format, sourceCommand)))
+    ];
+}
+async function writeGeneratedJson(context, filePath, value) {
+    await validateGeneratedOutputFile(context, filePath);
+    await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+async function writeGeneratedText(context, filePath, value) {
+    await validateGeneratedOutputFile(context, filePath);
+    await fs.writeFile(filePath, value, "utf8");
+}
+async function validateGeneratedOutputFile(context, filePath) {
+    await validateOutputPath(context, outputPathForValidation(context, filePath), { directory: true });
+}
+function outputPathForValidation(context, filePath) {
+    const absolute = path.resolve(filePath);
+    const relative = path.relative(context.cwd, absolute);
+    return relative && !relative.startsWith("..") && !path.isAbsolute(relative) ? relative : absolute;
+}
+function viewPageDimensions(content) {
+    const width = /\bwidth="([0-9.]+)"/.exec(content)?.[1] ?? /\bwidth:\s*([0-9.]+)px/.exec(content)?.[1];
+    const height = /\bheight="([0-9.]+)"/.exec(content)?.[1] ?? /\bheight:\s*([0-9.]+)px/.exec(content)?.[1];
+    return {
+        width: width ? Number(width) : undefined,
+        height: height ? Number(height) : undefined
+    };
+}
+function contactSheetHtml(pages) {
+    return [
+        "<!doctype html><meta charset=\"utf-8\"><title>officegen contact sheet</title>",
+        "<style>body{font-family:Arial,sans-serif;margin:24px;background:#f6f8fa;color:#111}main{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:16px}.page{background:#fff;border:1px solid #d0d7de;padding:12px}.frame{width:100%;aspect-ratio:16/9;border:1px solid #d0d7de;background:#fff;overflow:hidden}iframe{width:100%;height:100%;border:0}p{margin:8px 0 0;color:#57606a;font-size:12px}</style>",
+        "<main>",
+        ...pages.map((page) => `<section class="page"><div class="frame"><iframe src="${escapeHtmlAttr(page.fileName)}" title="page ${page.page}"></iframe></div><p>page ${page.page} · ${escapeHtmlAttr(page.stableObjectId)} · ${page.objectMapEntries} objects${page.width && page.height ? ` · ${page.width}x${page.height}` : ""}</p></section>`),
+        "</main>"
+    ].join("");
+}
+function escapeHtmlAttr(value) {
+    return String(value ?? "").replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 export async function editPayload(context) {
     const input = requireInput(context, 3, "edit");
@@ -665,10 +745,13 @@ export async function diagnosePayload(context) {
 export async function verifyPayload(context) {
     const input = requireInput(context, 3, "verify");
     const reportOut = optionValue(context.argv, "--report-out") ?? optionValue(context.argv, "--out");
+    const gatesPath = optionValue(context.argv, "--gates");
+    const gates = gatesPath ? verifyGatesFromJson(await readInputJson(context, gatesPath)) : undefined;
     const result = await verify(await validateInputPath(context, input), withFormatConfig(context, {
         native: hasFlag(context.argv, "--native"),
         visual: hasFlag(context.argv, "--visual"),
         out: reportOut ? await validateOutputPath(context, reportOut) : undefined,
+        gates,
         formulas: hasFlag(context.argv, "--formulas"),
         namedRanges: hasFlag(context.argv, "--named-ranges"),
         externalLinks: hasFlag(context.argv, "--external-links"),
@@ -676,6 +759,49 @@ export async function verifyPayload(context) {
         timeoutMs: numberOption(context, "--timeout-ms")
     }));
     return maybeWriteReport(context, result, "verify");
+}
+function verifyGatesFromJson(raw) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+        throw new CliFailure({
+            code: "SCHEMA_INVALID",
+            command: "verify",
+            message: "verify gates JSON is invalid.",
+            details: { errors: ["gates must be a JSON object"] }
+        }, 3);
+    }
+    const gates = asRecord(raw);
+    const allowed = new Set(["expectedSlides", "expectedPages", "requiredText", "forbiddenText", "maxWarnings", "requireNoRepairDialog", "maxBlankPages"]);
+    const unknownKeys = Object.keys(gates).filter((key) => !allowed.has(key));
+    const errors = [
+        ...unknownKeys.map((key) => `unknown key: ${key}`),
+        ...integerGateErrors(gates, ["expectedSlides", "expectedPages", "maxWarnings", "maxBlankPages"]),
+        ...stringArrayGateErrors(gates, ["requiredText", "forbiddenText"]),
+        ...booleanGateErrors(gates, ["requireNoRepairDialog"])
+    ];
+    if (errors.length) {
+        throw new CliFailure({
+            code: "SCHEMA_INVALID",
+            command: "verify",
+            message: "verify gates JSON is invalid.",
+            details: { errors }
+        }, 3);
+    }
+    return gates;
+}
+function integerGateErrors(gates, keys) {
+    return keys
+        .filter((key) => gates[key] !== undefined && (!Number.isInteger(gates[key]) || Number(gates[key]) < 0))
+        .map((key) => `${key} must be a non-negative integer`);
+}
+function stringArrayGateErrors(gates, keys) {
+    return keys
+        .filter((key) => gates[key] !== undefined && (!Array.isArray(gates[key]) || !gates[key].every((item) => typeof item === "string")))
+        .map((key) => `${key} must be an array of strings`);
+}
+function booleanGateErrors(gates, keys) {
+    return keys
+        .filter((key) => gates[key] !== undefined && typeof gates[key] !== "boolean")
+        .map((key) => `${key} must be a boolean`);
 }
 export async function repairPayload(context) {
     const input = requireInput(context, 3, "repair");
@@ -1064,6 +1190,8 @@ function average(values) {
 }
 export async function runPayload(context) {
     const planPath = positionalArgs(context.argv, 3)[0];
+    if (planPath === "prepare-reference")
+        return prepareReferencePayload(context);
     if (!planPath) {
         throw new CliFailure({
             code: "SCHEMA_INVALID",
@@ -1212,6 +1340,124 @@ export async function runPayload(context) {
         caveats: ["Run executes deterministic built-in steps and can invoke native verification/export only when the active security policy enables renderers."]
     };
 }
+async function prepareReferencePayload(context) {
+    const reference = optionValue(context.argv, "--reference");
+    const target = optionValue(context.argv, "--target");
+    const out = optionValue(context.argv, "--out");
+    if (!reference || !target || !out) {
+        throw new CliFailure({
+            code: "SCHEMA_INVALID",
+            command: "run prepare-reference",
+            message: "run prepare-reference requires --reference <file>, --target <file>, and --out <dir>."
+        }, 2);
+    }
+    const referencePath = await validateInputPath(context, reference);
+    const targetPath = await validateInputPath(context, target);
+    const outDir = await validateOutputPath(context, out, { directory: true });
+    const outputRoot = optionValue(context.argv, "--output-root") ? await validateOutputPath(context, optionValue(context.argv, "--output-root"), { directory: true }) : undefined;
+    const denyOutsideOutputRoot = hasFlag(context.argv, "--deny-outside-output-root") || (context.agent && Boolean(outputRoot));
+    if (denyOutsideOutputRoot && outputRoot && isOutside(outputRoot, outDir)) {
+        throw new CliFailure({
+            code: "SECURITY_PATH_OUTSIDE_ROOT",
+            category: "security",
+            severity: "error",
+            command: "run prepare-reference",
+            message: "run prepare-reference --out must stay inside --output-root when --deny-outside-output-root is set.",
+            details: { out, outputRoot }
+        }, 4);
+    }
+    const maxPages = numberOption(context, "--max-pages");
+    await fs.mkdir(outDir, { recursive: true });
+    const [referenceInspect, targetInspect] = await Promise.all([
+        inspect(referencePath, withFormatConfig(context, { depth: "full" })),
+        inspect(targetPath, withFormatConfig(context, { depth: "full" }))
+    ]);
+    const [referenceView, targetView] = await Promise.all([
+        view(referenceInspect, withFormatConfig(context, { format: "svg", maxPages })),
+        view(targetInspect, withFormatConfig(context, { format: "svg", maxPages }))
+    ]);
+    const referenceArtifacts = await writeViewArtifacts(context, path.join(outDir, "reference-view"), referenceView, "run prepare-reference");
+    const targetArtifacts = await writeViewArtifacts(context, path.join(outDir, "target-view"), targetView, "run prepare-reference");
+    const referenceInspectPath = path.join(outDir, "reference-inspect.json");
+    const targetInspectPath = path.join(outDir, "target-inspect.json");
+    const capabilitiesPath = path.join(outDir, "capabilities.json");
+    const editOpsSchemaPath = path.join(outDir, "edit-ops.schema.json");
+    const combinedObjectMapPath = path.join(outDir, "object-map.json");
+    await writeGeneratedJson(context, referenceInspectPath, referenceInspect);
+    await writeGeneratedJson(context, targetInspectPath, targetInspect);
+    await writeGeneratedJson(context, capabilitiesPath, capabilitiesPayload(context));
+    await writeGeneratedJson(context, editOpsSchemaPath, getSchema("officegen.edit.ops@1.2")?.schema ?? getSchema("officegen.edit.ops@1.2"));
+    await writeGeneratedJson(context, combinedObjectMapPath, {
+        schema: "officegen.prepare-reference.object-map@1.2",
+        reference: referenceInspect.objectMap,
+        target: targetInspect.objectMap
+    });
+    const manifest = {
+        schema: "officegen.prepare-reference.manifest@1.2",
+        reference: {
+            path: referencePath,
+            format: referenceInspect.trusted.format,
+            inspect: referenceInspectPath,
+            view: path.join(outDir, "reference-view", "manifest.json"),
+            pages: referenceView.pages.length,
+            totalPages: totalPageLikeCount(referenceInspect),
+            truncated: isViewTruncated(referenceInspect, referenceView.pages.length),
+            maxPagesApplied: maxPages
+        },
+        target: {
+            path: targetPath,
+            format: targetInspect.trusted.format,
+            inspect: targetInspectPath,
+            view: path.join(outDir, "target-view", "manifest.json"),
+            pages: targetView.pages.length,
+            totalPages: totalPageLikeCount(targetInspect),
+            truncated: isViewTruncated(targetInspect, targetView.pages.length),
+            maxPagesApplied: maxPages,
+            objectMapEntries: targetInspect.objectMap.length
+        },
+        capabilities: capabilitiesPath,
+        editOpsSchema: editOpsSchemaPath,
+        objectMap: combinedObjectMapPath,
+        recommendedWorkflow: [
+            `officegen edit ${quoteCommandValue(targetPath)} --ops ${quoteCommandValue(path.join(outDir, "ops.json"))} --dry-run --resolve-selectors --agent --json`,
+            `officegen edit ${quoteCommandValue(targetPath)} --ops ${quoteCommandValue(path.join(outDir, "ops.json"))} --out ${quoteCommandValue(path.join(outDir, `edited.${targetInspect.trusted.format}`))} --json`,
+            `officegen verify ${quoteCommandValue(path.join(outDir, `edited.${targetInspect.trusted.format}`))} --visual --gates ${quoteCommandValue(path.join(outDir, "gates.json"))} --json`
+        ],
+        caveats: [
+            "View artifacts are approximate SVG/HTML previews unless a native renderer/export step is explicitly run.",
+            "Use target objectMap stableObjectId or high-confidence selector hints before mutating Office files."
+        ]
+    };
+    const manifestPath = path.join(outDir, "manifest.json");
+    await writeGeneratedJson(context, manifestPath, manifest);
+    const artifacts = [
+        await artifactRecord(manifestPath, "prepare-reference-manifest", "json", "run prepare-reference", referencePath),
+        await artifactRecord(referenceInspectPath, "inspect", "json", "run prepare-reference", referencePath),
+        await artifactRecord(targetInspectPath, "inspect", "json", "run prepare-reference", targetPath),
+        await artifactRecord(capabilitiesPath, "capabilities", "json", "run prepare-reference"),
+        await artifactRecord(editOpsSchemaPath, "schema", "json", "run prepare-reference"),
+        await artifactRecord(combinedObjectMapPath, "object-map", "json", "run prepare-reference"),
+        ...referenceArtifacts,
+        ...targetArtifacts
+    ];
+    return maybeWriteReport(context, {
+        schema: "officegen.prepare-reference.result@1.2",
+        out: outDir,
+        manifestPath,
+        reference: manifest.reference,
+        target: manifest.target,
+        artifacts,
+        nextSuggestedCommands: manifest.recommendedWorkflow
+    }, "run prepare-reference");
+}
+function totalPageLikeCount(inspected) {
+    const summary = inspected.trusted.summary;
+    return Number(summary.pages ?? summary.slides ?? summary.sheets ?? 0);
+}
+function isViewTruncated(inspected, renderedPages) {
+    const total = totalPageLikeCount(inspected);
+    return total > renderedPages;
+}
 async function executeRunStep(context, folder, step, stepOutputs, index, outputRoot, denyOutsideOutputRoot = false, timeoutMs) {
     const command = String(step.command ?? step.type ?? "");
     const input = await resolveRunInput(context, step.input, stepOutputs);
@@ -1225,15 +1471,14 @@ async function executeRunStep(context, folder, step, stepOutputs, index, outputR
             native: step.native === true,
             visual: step.visual === true,
             out: out ?? path.join(folder.logsDir, `${String(index + 1).padStart(2, "0")}-verify.json`),
+            gates: step.gates !== undefined ? verifyGatesFromJson(step.gates) : undefined,
             timeoutMs
         }));
     if (command === "view") {
         const result = await view(requireRunInput(command, input), withFormatConfig(context, { format: "svg", maxPages: typeof step.maxPages === "number" ? step.maxPages : undefined }));
         const viewDir = out ?? path.join(folder.viewsDir, `${String(index + 1).padStart(2, "0")}-view`);
-        await fs.mkdir(viewDir, { recursive: true });
-        await Promise.all(result.pages.map((page) => fs.writeFile(path.join(viewDir, `page-${String(page.page).padStart(3, "0")}.svg`), page.content, "utf8")));
-        await fs.writeFile(path.join(viewDir, "object-map.json"), `${JSON.stringify(result.objectMap, null, 2)}\n`, "utf8");
-        return { ...result, out: viewDir, pages: result.pages.map((page) => ({ ...page, content: undefined })) };
+        const artifacts = await writeViewArtifacts(context, viewDir, result, "run view");
+        return { ...result, out: viewDir, artifacts, pages: result.pages.map((page) => ({ ...page, content: undefined })) };
     }
     if (command === "render") {
         const ir = await readInputJson(context, requireRunInput(command, input));

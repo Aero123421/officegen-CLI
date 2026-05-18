@@ -1,5 +1,5 @@
 import { makeStableObjectId, readZipText, sortedZipFiles, stableHashId } from "../shared.js";
-import { bulletParagraphXml, emuToPx, exactText, preview, replaceNthBlock, xmlAttr } from "./xml.js";
+import { bulletParagraphXml, emuToPx, escapeXmlText, exactText, preview, pxToEmu, replaceNthBlock, xmlAttr } from "./xml.js";
 import { nextRelationshipId, parseRelationships, relationshipTarget } from "./relationships.js";
 export async function getSlidePaths(zip) {
     const files = sortedZipFiles(zip);
@@ -50,9 +50,25 @@ export async function inspectSlides(zip) {
                     name: shape.name,
                     placeholder: shape.placeholderType,
                     placeholderKey: shape.placeholderType,
-                    textPreview: shape.textPreview
+                    textPreview: shape.textPreview,
+                    textHash: simpleHash(shape.text),
+                    positionHash: shape.bounds ? simpleHash(`${Math.round(shape.bounds.x)}:${Math.round(shape.bounds.y)}:${Math.round(shape.bounds.width)}:${Math.round(shape.bounds.height)}`) : undefined
                 },
-                editableOps: ["setText", "pptx.insertBulletItems", "pptx.replaceBulletItems"],
+                editableOps: [
+                    "setText",
+                    "pptx.addTextbox",
+                    "pptx.formatTitle",
+                    "pptx.insertBulletItems",
+                    "pptx.replaceBulletItems",
+                    "pptx.replaceWithBulletList",
+                    "pptx.setFontSize",
+                    "pptx.setBold",
+                    "pptx.setBulletLevel",
+                    "pptx.setNumbering",
+                    "pptx.setLineSpacing",
+                    "pptx.setSpaceBefore",
+                    "pptx.setTextCase"
+                ],
                 trust: { level: "untrusted", reason: "document-content" },
                 untrusted: true
             };
@@ -124,7 +140,16 @@ export async function inspectSlides(zip) {
                 xmlPath: slidePath,
                 bounds: cell.bounds,
                 bbox: cell.bounds ? [cell.bounds.x, cell.bounds.y, cell.bounds.width, cell.bounds.height] : undefined,
-                selectorHints: { slide: slideNo, tableCell: cell.cellIndex, row: cell.rowIndex, column: cell.columnIndex, textPreview: cell.textPreview },
+                selectorHints: {
+                    slide: slideNo,
+                    tableCell: cell.cellIndex,
+                    row: cell.rowIndex,
+                    column: cell.columnIndex,
+                    textPreview: cell.textPreview,
+                    textHash: simpleHash(cell.text),
+                    positionHash: cell.bounds ? simpleHash(`${Math.round(cell.bounds.x)}:${Math.round(cell.bounds.y)}:${Math.round(cell.bounds.width)}:${Math.round(cell.bounds.height)}`) : undefined
+                },
+                editableOps: ["setText", "pptx.setTableCellText"],
                 trust: { level: "untrusted", reason: "document-content" },
                 untrusted: true
             };
@@ -341,6 +366,31 @@ export async function duplicateSlide(zip, slideNumber, after) {
     await addPresentationSlide(zip, nextNo, after ?? slideNumber);
     await addSlideContentType(zip, nextNo);
 }
+export async function addBlankSlide(zip, after) {
+    const slidePaths = await getSlidePaths(zip);
+    const nextNo = nextSlideNumber(sortedZipFiles(zip));
+    const nextPath = `ppt/slides/slide${nextNo}.xml`;
+    zip.file(nextPath, blankSlideXml());
+    zip.file(nextPath.replace(/^ppt\/slides\//, "ppt/slides/_rels/") + ".rels", await blankSlideRelsXml(zip, slidePaths[sourceSlideIndexForInsert(slidePaths.length, after)]));
+    await addPresentationSlide(zip, nextNo, after ?? slidePaths.length);
+    await addSlideContentType(zip, nextNo);
+    return nextNo;
+}
+export async function addTextBox(zip, slideNumber, spec) {
+    const slidePaths = await getSlidePaths(zip);
+    const slidePath = slidePaths[slideNumber - 1];
+    if (!slidePath)
+        throw new Error(`SELECTOR_NOT_FOUND: pptx slide ${slideNumber} not found.`);
+    const xml = (await readZipText(zip, slidePath)) ?? "";
+    const nextId = nextShapeId(xml);
+    const shape = textBoxShapeXml(nextId, spec);
+    const next = /<p:spTree\b[\s\S]*?<\/p:spTree>/.test(xml)
+        ? xml.replace(/<p:spTree\b[\s\S]*?<\/p:spTree>/, (spTree) => insertShapeIntoSpTree(spTree, shape))
+        : xml.replace(/<\/p:cSld>/, `<p:spTree>${defaultGroupShapeTreeHead()}${shape}</p:spTree></p:cSld>`);
+    if (next === xml)
+        throw new Error("SELECTOR_NOT_FOUND: pptx slide shape tree not found.");
+    zip.file(slidePath, next);
+}
 export async function reorderSlides(zip, order) {
     const presentationXml = (await readZipText(zip, "ppt/presentation.xml")) ?? "";
     const ids = [...presentationXml.matchAll(/<p:sldId\b[^>]*\br:id="([^"]+)"[^>]*\/>/g)].map((match) => match[1] ?? "");
@@ -384,6 +434,9 @@ function spanWeights(weights, start, span) {
 }
 async function addPresentationSlide(zip, slideNo, after) {
     const presentationXml = (await readZipText(zip, "ppt/presentation.xml")) ?? "";
+    if (!/<p:sldIdLst\b[\s\S]*?<\/p:sldIdLst>/.test(presentationXml)) {
+        throw new Error("SELECTOR_NOT_FOUND: pptx presentation slide list not found.");
+    }
     const relsXml = (await readZipText(zip, "ppt/_rels/presentation.xml.rels")) ?? '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>';
     const rId = nextRelationshipId(relsXml);
     const sldIds = [...presentationXml.matchAll(/<p:sldId\b[^>]*\bid="(\d+)"[^>]*\/>/g)].map((match) => Number(match[1])).filter(Number.isFinite);
@@ -408,6 +461,70 @@ function nextSlideNumber(paths) {
         .filter(Boolean)
         .map(Number);
     return Math.max(0, ...numbers) + 1;
+}
+function insertShapeIntoSpTree(spTree, shape) {
+    return /<p:extLst\b[\s\S]*?<\/p:extLst>\s*<\/p:spTree>$/.test(spTree)
+        ? spTree.replace(/(<p:extLst\b[\s\S]*?<\/p:extLst>\s*<\/p:spTree>)$/, `${shape}$1`)
+        : spTree.replace(/<\/p:spTree>$/, `${shape}</p:spTree>`);
+}
+function nextShapeId(xml) {
+    const ids = [...xml.matchAll(/<p:cNvPr\b[^>]*\bid="(\d+)"/g)].map((match) => Number(match[1])).filter(Number.isFinite);
+    return Math.max(1, ...ids) + 1;
+}
+function blankSlideXml() {
+    return [
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+        '<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">',
+        '<p:cSld><p:spTree>',
+        defaultGroupShapeTreeHead(),
+        '</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>'
+    ].join("");
+}
+function defaultGroupShapeTreeHead() {
+    return [
+        '<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>',
+        '<p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr>'
+    ].join("");
+}
+function sourceSlideIndexForInsert(slideCount, after) {
+    if (slideCount <= 0)
+        return -1;
+    if (after === undefined)
+        return slideCount - 1;
+    return Math.max(0, Math.min(slideCount - 1, after === 0 ? 0 : after - 1));
+}
+async function blankSlideRelsXml(zip, sourceSlidePath) {
+    const empty = '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>';
+    if (!sourceSlidePath)
+        return empty;
+    const sourceRelsPath = sourceSlidePath.replace(/^ppt\/slides\//, "ppt/slides/_rels/") + ".rels";
+    const sourceRels = (await readZipText(zip, sourceRelsPath)) ?? "";
+    const layoutRel = /<Relationship\b[^>]*\bType="[^"]*\/slideLayout"[^>]*\/>/.exec(sourceRels)?.[0];
+    if (!layoutRel)
+        return empty;
+    const target = xmlAttr(layoutRel, "Target");
+    if (!target)
+        return empty;
+    return `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="${escapeXmlText(target)}"/></Relationships>`;
+}
+function textBoxShapeXml(id, spec) {
+    const fontSize = spec.fontSize ? ` sz="${Math.round(spec.fontSize * 100)}"` : "";
+    const bold = spec.bold ? ' b="1"' : "";
+    return [
+        "<p:sp>",
+        `<p:nvSpPr><p:cNvPr id="${id}" name="${escapeXmlText(spec.name ?? `TextBox ${id}`)}"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr>`,
+        `<p:spPr><a:xfrm><a:off x="${pxToEmu(spec.bounds.x)}" y="${pxToEmu(spec.bounds.y)}"/><a:ext cx="${pxToEmu(spec.bounds.width)}" cy="${pxToEmu(spec.bounds.height)}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></p:spPr>`,
+        `<p:txBody><a:bodyPr wrap="square"/><a:lstStyle/><a:p><a:r><a:rPr${fontSize}${bold}/><a:t>${escapeXmlText(spec.text)}</a:t></a:r></a:p></p:txBody>`,
+        "</p:sp>"
+    ].join("");
+}
+function simpleHash(value) {
+    let hash = 2166136261;
+    for (const char of value) {
+        hash ^= char.charCodeAt(0);
+        hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(16).padStart(8, "0");
 }
 function naturalSort(a, b) {
     return a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" });

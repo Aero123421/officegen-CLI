@@ -617,6 +617,91 @@ describe("officegen CLI command surface", () => {
     const runs = await readdir(path.join(cwd, ".officegen", "runs"));
     const runRoot = path.join(cwd, ".officegen", "runs", runs[0] as string);
     expect(await readFile(path.join(runRoot, "views", "deck", "object-map.json"), "utf8")).toContain("Run body");
+    expect(await readFile(path.join(runRoot, "views", "deck", "manifest.json"), "utf8")).toContain("officegen.view.manifest@1.2");
+    expect(await readFile(path.join(runRoot, "views", "deck", "contact-sheet.html"), "utf8")).toContain("officegen contact sheet");
+  });
+
+  it("prepares reference and target artifacts for AI editing", async () => {
+    const cwd = await tempWorkspace();
+    await writeFile(path.join(cwd, "reference.pptx"), await minimalPptxWithImage(false));
+    await writeFile(path.join(cwd, "target.pptx"), await minimalPptxWithImage(false));
+
+    const captured = await run([
+      "run", "prepare-reference",
+      "--reference", "reference.pptx",
+      "--target", "target.pptx",
+      "--out", ".officegen/prep",
+      "--json",
+      "--json-budget-bytes", "80000"
+    ], cwd);
+    const envelope = parseEnvelope(captured);
+
+    expect(envelope.ok).toBe(true);
+    expect(envelope.result.schema).toBe("officegen.prepare-reference.result@1.2");
+    expect(envelope.result.manifestPath).toContain("manifest.json");
+    expect(await readFile(path.join(cwd, ".officegen", "prep", "manifest.json"), "utf8")).toContain("officegen.prepare-reference.manifest@1.2");
+    expect(await readFile(path.join(cwd, ".officegen", "prep", "reference-view", "contact-sheet.html"), "utf8")).toContain("officegen contact sheet");
+    expect(JSON.parse(await readFile(path.join(cwd, ".officegen", "prep", "edit-ops.schema.json"), "utf8")).$id).toBe("officegen.edit.ops@1.2");
+  });
+
+  it("enforces output-root for prepare-reference artifacts", async () => {
+    const cwd = await tempWorkspace();
+    await writeFile(path.join(cwd, "reference.pptx"), await minimalPptxWithImage(false));
+    await writeFile(path.join(cwd, "target.pptx"), await minimalPptxWithImage(false));
+
+    const captured = await run([
+      "run", "prepare-reference",
+      "--reference", "reference.pptx",
+      "--target", "target.pptx",
+      "--out", ".officegen/prep",
+      "--output-root", ".officegen/allowed",
+      "--deny-outside-output-root",
+      "--json"
+    ], cwd);
+    const envelope = parseEnvelope(captured);
+
+    expect(envelope.ok).toBe(false);
+    expect(envelope.error.code).toBe("SECURITY_PATH_OUTSIDE_ROOT");
+    expect(process.exitCode).toBe(4);
+  });
+
+  it("rejects non-object verify gates JSON", async () => {
+    const cwd = await tempWorkspace();
+    await writeFile(path.join(cwd, "target.pptx"), await minimalPptxWithImage(false));
+    await writeFile(path.join(cwd, "gates.json"), "[]\n", "utf8");
+
+    const captured = await run(["verify", "target.pptx", "--gates", "gates.json", "--json"], cwd);
+    const envelope = parseEnvelope(captured);
+
+    expect(envelope.ok).toBe(false);
+    expect(envelope.error.code).toBe("SCHEMA_INVALID");
+    expect(process.exitCode).toBe(3);
+  });
+
+  it("applies verify gates inside run plan steps", async () => {
+    const cwd = await tempWorkspace();
+    await writeFile(path.join(cwd, "deck.ir.json"), `${JSON.stringify({
+      schema: "officegen.ir.document@1.2",
+      title: "Gate Deck",
+      targets: ["pptx"],
+      sections: [{ title: "Gate Deck", blocks: [{ type: "paragraph", text: "Present" }] }]
+    })}\n`, "utf8");
+    await writeFile(path.join(cwd, "plan.json"), `${JSON.stringify({
+      schema: "officegen.run.plan@1.2",
+      steps: [
+        { id: "rendered", command: "render", input: "deck.ir.json", target: "pptx", out: ".officegen/outputs/deck.pptx" },
+        { id: "verified", command: "verify", input: "$rendered", gates: { requiredText: ["Missing"] } }
+      ]
+    })}\n`, "utf8");
+
+    const captured = await run(["run", "plan.json", "--json"], cwd);
+    const envelope = parseEnvelope(captured);
+
+    expect(envelope.ok).toBe(false);
+    expect(envelope.objectiveOk).toBe(false);
+    expect(envelope.result.readiness).toBe("blocked");
+    expect(envelope.result.steps[1].ok).toBe(false);
+    expect(envelope.result.steps[1].error.code).toBe("RUN_STEP_FAILED");
   });
 
   it("rejects run outputs that try to escape the run folder", async () => {

@@ -1,8 +1,11 @@
 import { type InputLike, type OfficegenConfig, type ObjectMapEntry } from "./shared.js";
 export type EditSelector = {
     stableObjectId?: string;
+    slide?: number;
+    shapeId?: string;
     contains?: string;
     placeholderKey?: string;
+    placeholder?: string;
     shapeName?: string;
     contentControlTag?: string;
     namedRange?: string;
@@ -10,6 +13,28 @@ export type EditSelector = {
         text: string;
         exact?: boolean;
     };
+    textHash?: string;
+    positionHash?: string;
+    nearestTo?: {
+        slide?: number;
+        x: number;
+        y: number;
+    };
+    rightOf?: string | {
+        text: string;
+        slide?: number;
+    };
+    largestTextOnSlide?: number | boolean;
+    nthBodyShape?: {
+        slide: number;
+        n: number;
+    };
+};
+export type PptxBulletListItem = string | {
+    text: string;
+    level?: number;
+    bold?: boolean;
+    numbering?: boolean;
 };
 export type EditOperation = {
     type: "replaceText";
@@ -51,9 +76,36 @@ export type EditOperation = {
     after?: number;
     selector?: EditSelector;
 } | {
+    op: "pptx.addSlide";
+    after?: number;
+} | {
     op: "pptx.reorderSlides";
     order: number[];
     selector?: EditSelector;
+} | {
+    op: "pptx.addTextbox";
+    slide: number;
+    text: string;
+    bounds: {
+        x: number;
+        y: number;
+        width: number;
+        height: number;
+    };
+    name?: string;
+    fontSize?: number;
+    bold?: boolean;
+} | {
+    op: "pptx.formatTitle";
+    selector: EditSelector;
+    fontSize?: number;
+    bold?: boolean;
+    textCase?: "upper" | "lower" | "title" | "sentence";
+} | {
+    op: "pptx.replaceWithBulletList";
+    items: PptxBulletListItem[];
+    selector: EditSelector;
+    spaceBeforeForLevel1ExceptFirst?: number;
 } | {
     op: "pptx.insertBulletItems";
     items: string[];
@@ -62,6 +114,39 @@ export type EditOperation = {
     op: "pptx.replaceBulletItems";
     items: string[];
     selector: EditSelector;
+} | {
+    op: "pptx.setFontSize";
+    selector: EditSelector;
+    fontSize: number;
+} | {
+    op: "pptx.setBold";
+    selector: EditSelector;
+    bold: boolean;
+} | {
+    op: "pptx.setBulletLevel";
+    selector: EditSelector;
+    level: number;
+} | {
+    op: "pptx.setNumbering";
+    selector: EditSelector;
+    level?: number;
+    startAt?: number;
+} | {
+    op: "pptx.setLineSpacing";
+    selector: EditSelector;
+    lineSpacing: number;
+} | {
+    op: "pptx.setSpaceBefore";
+    selector: EditSelector;
+    spaceBefore: number;
+} | {
+    op: "pptx.setTextCase";
+    selector: EditSelector;
+    textCase: "upper" | "lower" | "title" | "sentence";
+} | {
+    op: "pptx.setTableCellText";
+    selector: EditSelector;
+    text: string;
 } | {
     op: "pptx.replaceImageByShape";
     selector: EditSelector;
@@ -211,9 +296,11 @@ export interface EditSelectorResolution {
     stableObjectId?: string;
     matched: boolean;
     matchCount: number;
+    confidence?: number;
     matches: Array<{
         stableObjectId: string;
         kind: string;
+        confidence?: number;
         label?: string;
         text?: string;
         sourcePath?: string;

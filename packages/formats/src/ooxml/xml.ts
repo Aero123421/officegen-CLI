@@ -60,7 +60,7 @@ export function replaceAllXmlText(input: string, from: string, to: string): stri
 }
 
 export function escapeXmlText(value: string): string {
-  return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
 export function paragraphXml(text: string, namespace: "a" | "w" = "a"): string {

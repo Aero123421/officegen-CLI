@@ -48,7 +48,7 @@ export function replaceAllXmlText(input, from, to) {
     return input.split(escapeXmlText(from)).join(escapeXmlText(to));
 }
 export function escapeXmlText(value) {
-    return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 export function paragraphXml(text, namespace = "a") {
     if (namespace === "w")
