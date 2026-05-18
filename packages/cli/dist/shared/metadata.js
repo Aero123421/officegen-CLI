@@ -16,7 +16,7 @@ export const COMMAND_METADATA = [
     core("diagnose", "Detect problems in generated or existing files", ["diagnose"]),
     core("repair", "Repair files or produce a repair plan", ["repair"]),
     core("diff", "Compare Office/PDF files semantically and with approximate visual regression scores", ["diff"]),
-    core("run", "Execute a multi-step workflow with run artifacts", ["run"]),
+    core("run", "Execute a multi-step workflow with run artifacts", ["run", "run prepare-reference"]),
     core("critique", "Lint business quality risks in PPTX/DOCX/XLSX files", ["critique"]),
     core("improve", "Produce dry-run improvement suggestions from critique findings", ["improve"]),
     core("benchmark", "Run and compare optional public corpus benchmark reviews", ["benchmark run", "benchmark compare"]),
