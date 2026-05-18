@@ -64,6 +64,19 @@ const selectorSchema = {
         placeholderKey: { type: "string" },
         placeholder: { type: "string" },
         shapeName: { type: "string" },
+        sourcePath: { type: "string" },
+        xmlPath: { type: "string" },
+        page: { type: "integer", minimum: 1 },
+        story: { type: "string" },
+        paragraph: { type: "integer", minimum: 1 },
+        table: { type: "integer", minimum: 1 },
+        row: { type: "integer", minimum: 1 },
+        column: { type: "integer", minimum: 1 },
+        range: { type: "string" },
+        relationshipId: { type: "string" },
+        assetPath: { type: "string" },
+        commentId: { type: "string" },
+        revisionId: { type: "string" },
         contentControlTag: { type: "string" },
         namedRange: { type: "string" },
         sheetName: { type: "string" },
@@ -120,6 +133,7 @@ const selectorSchema = {
 function editOperationSchemas() {
     const fields = {
         selector: selectorSchema,
+        selectors: { type: "array", minItems: 1, items: selectorSchema },
         from: { type: "string" },
         to: { type: "string" },
         text: { type: "string" },
@@ -174,6 +188,13 @@ function editOperationSchemas() {
         styleId: { type: "string" },
         font: { type: "string" },
         name: { type: "string" },
+        title: { type: "string" },
+        description: { type: "string" },
+        decorative: { type: "boolean" },
+        layout: { oneOf: [{ type: "string" }, { type: "integer", minimum: 1 }] },
+        mode: { enum: ["replace", "append", "left", "right", "center", "top", "bottom", "middle"] },
+        axis: { enum: ["x", "y"] },
+        minFontSize: { type: "number", minimum: 1 },
         values2d: { type: "array", minItems: 1, items: { type: "array" } },
         fontSize: { type: "number", minimum: 1 },
         bold: { type: "boolean" },
@@ -202,9 +223,43 @@ function editOperationSchemas() {
         op("setText", ["selector", "text"], ["selector", "text"]),
         op("pptx.duplicateSlide", [], ["slide", "after", "selector"], {}, { anyOf: [{ required: ["slide"] }, { required: ["selector"] }] }),
         op("pptx.addSlide", [], ["after"]),
+        op("pptx.addSlideFromLayout", [], ["after", "layout"]),
         op("pptx.reorderSlides", ["order"], ["order"]),
         op("pptx.addTextbox", ["slide", "text", "bounds"], ["slide", "text", "bounds", "name", "fontSize", "bold"]),
         op("pptx.formatTitle", ["selector"], ["selector", "fontSize", "bold", "textCase"]),
+        op("pptx.formatAllTitles", [], ["fontSize", "bold", "textCase"]),
+        op("pptx.replaceBodyBullets", ["slide", "items"], ["slide", "items"], {
+            items: {
+                type: "array",
+                minItems: 1,
+                items: {
+                    oneOf: [
+                        { type: "string" },
+                        {
+                            type: "object",
+                            required: ["text"],
+                            additionalProperties: false,
+                            properties: {
+                                text: { type: "string" },
+                                level: { type: "integer", minimum: 0, maximum: 8 },
+                                bold: { type: "boolean" },
+                                numbering: { type: "boolean" }
+                            }
+                        }
+                    ]
+                }
+            },
+            spaceBeforeForLevel1ExceptFirst: { type: "number", minimum: 0 }
+        }),
+        op("pptx.fitContentToPlaceholder", ["selector"], ["selector", "minFontSize"]),
+        op("pptx.alignObjects", ["selectors", "mode"], ["selectors", "mode"]),
+        op("pptx.distributeObjects", ["selectors", "axis"], ["selectors", "axis"]),
+        op("pptx.setAltText", ["selector"], ["selector", "title", "description", "decorative"], {
+            title: { type: "string" }
+        }, { anyOf: [{ required: ["title"] }, { required: ["description"] }, { required: ["decorative"] }] }),
+        op("pptx.setSpeakerNotes", ["slide", "text"], ["slide", "text", "mode"], {
+            mode: { enum: ["replace", "append"] }
+        }),
         op("pptx.replaceWithBulletList", ["selector", "items"], ["selector", "items"], {
             items: {
                 type: "array",
@@ -242,6 +297,8 @@ function editOperationSchemas() {
         op("pptx.updateChartData", ["selector", "categories", "values"], ["selector", "categories", "values", "seriesName"]),
         op("pptx.setBounds", ["selector", "bounds"], ["selector", "bounds"]),
         op("docx.insertParagraphAfter", ["selector", "text"], ["selector", "text"]),
+        op("docx.replaceTextSmart", ["from", "to"], ["selector", "from", "to"]),
+        op("docx.setTableCellText", ["selector", "text"], ["selector", "text"]),
         op("docx.setHeader", ["text"], ["text"]),
         op("docx.setFooter", ["text"], ["text"]),
         op("docx.setStyle", ["styleId"], ["styleId", "font", "size", "bold"]),
@@ -256,6 +313,8 @@ function editOperationSchemas() {
         op("xlsx.appendRows", ["rows"], ["sheet", "rows"]),
         op("xlsx.setCell", ["cell", "value"], ["sheet", "cell", "value"]),
         op("xlsx.setFormula", ["cell", "formula"], ["sheet", "cell", "formula"]),
+        op("xlsx.definedName.set", ["name", "ref"], ["name", "ref"]),
+        op("xlsx.definedName.delete", ["name"], ["name"]),
         op("xlsx.setRange", ["startCell", "values"], ["sheet", "startCell"], {
             values: { type: "array", minItems: 1, items: { type: "array" } }
         }),
@@ -294,6 +353,7 @@ const editOpsSchema = {
                 idempotencyKey: { type: "string" },
                 expectedInputSha256: { type: "string", pattern: "^sha256:" },
                 expectedObjectMapHash: { type: "string", pattern: "^sha256:" },
+                minSelectorConfidence: { type: "number", minimum: 0, maximum: 1 },
                 preserveUnknownParts: { type: "boolean", default: true },
                 preserveAnimations: { type: "boolean" }
             }
@@ -506,6 +566,39 @@ const diagnosticsSchema = {
         }
     }
 };
+const verifyGatesSchema = {
+    $id: "officegen.verify.gates@1.2",
+    type: "object",
+    additionalProperties: false,
+    properties: {
+        expectedSlides: { type: "integer", minimum: 0 },
+        expectedPages: { type: "integer", minimum: 0 },
+        requiredText: { type: "array", items: { type: "string" } },
+        forbiddenText: { type: "array", items: { type: "string" } },
+        maxWarnings: { type: "integer", minimum: 0 },
+        requireNoRepairDialog: { type: "boolean" },
+        maxBlankPages: { type: "integer", minimum: 0 }
+    }
+};
+const transactionSchema = {
+    $id: "officegen.transaction@1.2",
+    type: "object",
+    required: ["schema", "inputPath", "outputPath", "backupPath", "inputSha256", "createdAt"],
+    additionalProperties: true,
+    properties: {
+        schema: schemaField("officegen.transaction@1.2"),
+        inputPath: { type: "string" },
+        outputPath: { type: "string" },
+        backupPath: { type: "string" },
+        inputSha256: { type: "string" },
+        outputSha256: { type: "string" },
+        createdAt: { type: "string" },
+        rollbackCommand: { type: "string" },
+        attribution: { type: "object", additionalProperties: true },
+        lockPath: { type: "string" },
+        scope: { type: "string" }
+    }
+};
 function looseSchema(id) {
     return {
         $id: id,
@@ -550,15 +643,17 @@ const entries = [
     entry("officegen.export.result@1.2", looseSchema("officegen.export.result@1.2"), "export"),
     entry("officegen.diagnose.result@1.2", looseSchema("officegen.diagnose.result@1.2"), "diagnose"),
     entry("officegen.verify.result@1.2", looseSchema("officegen.verify.result@1.2"), "verify"),
+    entry("officegen.verify.gates@1.2", verifyGatesSchema, "verify"),
     entry("officegen.repair.result@1.2", looseSchema("officegen.repair.result@1.2"), "repair"),
     entry("officegen.diff.result@1.2", looseSchema("officegen.diff.result@1.2"), "diff"),
+    entry("officegen.diff.artifacts@1.2", looseSchema("officegen.diff.artifacts@1.2"), "diff"),
     entry("officegen.artifact.manifest@1.2", looseSchema("officegen.artifact.manifest@1.2"), "manifest"),
     entry("officegen.manifest.verify.result@1.2", looseSchema("officegen.manifest.verify.result@1.2"), "manifest"),
     entry("officegen.plan.result@1.2", looseSchema("officegen.plan.result@1.2"), "plan"),
     entry("officegen.rollback.result@1.2", looseSchema("officegen.rollback.result@1.2"), "rollback"),
     entry("officegen.lock@1.2", looseSchema("officegen.lock@1.2"), "lock"),
     entry("officegen.merge.result@1.2", looseSchema("officegen.merge.result@1.2"), "merge"),
-    entry("officegen.transaction@1.2", looseSchema("officegen.transaction@1.2"), "rollback"),
+    entry("officegen.transaction@1.2", transactionSchema, "rollback"),
     entry("officegen.office-edit.result@1.2", looseSchema("officegen.office-edit.result@1.2"), "run"),
     entry("officegen.scaffold.result@1.2", looseSchema("officegen.scaffold.result@1.2"), "scaffold"),
     entry("officegen.chart.render.result@1.2", looseSchema("officegen.chart.render.result@1.2"), "chart"),

@@ -21,13 +21,13 @@ Requires Node.js 24 or later.
 Recommended install is the checked release tarball:
 
 ```bash
-npm install -g https://github.com/Aero123421/officegen-CLI/releases/download/v2.5.2/officegen-v2.5.2.tgz
+npm install -g https://github.com/Aero123421/officegen-CLI/releases/download/v2.6.0/officegen-v2.6.0.tgz
 ```
 
 GitHub direct install is also smoke-tested, but use the tarball when an agent or CI needs the most deterministic path:
 
 ```bash
-npm install -g github:Aero123421/officegen-CLI#v2.5.2
+npm install -g github:Aero123421/officegen-CLI#v2.6.0
 ```
 
 The `officegen` package name is not published from this project to the public npm registry, because that name is owned separately on npm.
@@ -189,7 +189,7 @@ officegen asset replace deck.pptx --asset ppt/media/image1.png logo.png --out de
 
 ## Current Capability Level
 
-Officegen v2.5.2 is a practical v2 authoring substrate. It is strongest when an agent needs structured, auditable Office automation rather than free-form binary generation.
+Officegen v2.6.0 is a practical v2 authoring substrate. It is strongest when an agent needs structured, auditable Office automation rather than free-form binary generation.
 
 PPTX:
 
@@ -230,7 +230,7 @@ Use `--json` for machine-readable output. Responses use the `officegen.envelope@
   "ok": true,
   "command": "capabilities",
   "runId": "...",
-  "cliVersion": "2.5.2",
+  "cliVersion": "2.6.0",
   "capabilitiesHash": "sha256:...",
   "pathsRedacted": true,
   "result": {},
@@ -348,7 +348,7 @@ Post-tag checks:
 ```bash
 npm run github-install:tag-smoke
 npm run github-install:remote-smoke
-OFFICEGEN_RELEASE_TARBALL_SPEC=https://github.com/Aero123421/officegen-CLI/releases/download/v2.5.2/officegen-v2.5.2.tgz npm run release-tarball:smoke
+OFFICEGEN_RELEASE_TARBALL_SPEC=https://github.com/Aero123421/officegen-CLI/releases/download/v2.6.0/officegen-v2.6.0.tgz npm run release-tarball:smoke
 ```
 
 Optional public corpus benchmark:
@@ -356,8 +356,8 @@ Optional public corpus benchmark:
 ```bash
 npm run benchmark:fetch
 npm run benchmark:review
-officegen benchmark run --manifest benchmarks/office-corpus/manifest.json --report-out .officegen/benchmark-results/v2.5.2.json --agent --json
-officegen benchmark compare old.json .officegen/benchmark-results/v2.5.2.json --json
+officegen benchmark run --manifest benchmarks/office-corpus/manifest.json --report-out .officegen/benchmark-results/v2.6.0.json --agent --json
+officegen benchmark compare old.json .officegen/benchmark-results/v2.6.0.json --json
 ```
 
 The benchmark downloads public corpus files into `.officegen/benchmark-corpus/`; Office/PDF binaries are not committed to the repository.
@@ -367,7 +367,7 @@ Version bump:
 ```bash
 npm run version:bump -- patch
 npm run version:bump -- minor
-npm run version:bump -- 2.5.2
+npm run version:bump -- 2.6.0
 npm run version:check
 ```
 

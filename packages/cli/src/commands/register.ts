@@ -13,6 +13,7 @@ import {
   designPayload,
   diagnosePayload,
   diffPayload,
+  preparePayload,
   manifestPayload,
   selectPayload,
   planPayload,
@@ -67,6 +68,7 @@ const leafPayloads: Partial<Record<FeatureKey, LeafPayload>> = {
   diagnose: diagnosePayload,
   repair: repairPayload,
   diff: diffPayload,
+  prepare: preparePayload,
   manifest: (ctx) => manifestPayload(ctx),
   select: selectPayload,
   plan: planPayload,
@@ -245,6 +247,7 @@ export function writeCommandHelp(
 function usageSuffix(commandGroup: string, subcommand: string | undefined): string {
   if (commandGroup === "inspect" || commandGroup === "view" || commandGroup === "diagnose" || commandGroup === "repair" || commandGroup === "export" || commandGroup === "verify") return " <input>";
   if (commandGroup === "diff") return " <before> <after>";
+  if (commandGroup === "prepare") return " --reference <file> --target <file> --out <dir>";
   if (commandGroup === "render" || commandGroup === "validate") return " <input.json>";
   if (commandGroup === "edit") return " <input> --ops <ops.json>";
   if (commandGroup === "asset" && subcommand === "replace") return " <input> --asset <zip-path> <replacement>";
@@ -269,6 +272,7 @@ function commandExamples(commandGroup: string, subcommand: string | undefined): 
   ];
   if (commandGroup === "render") return ["officegen render deck.ir.json --target pptx --out deck.pptx --json"];
   if (commandGroup === "diff") return ["officegen diff before.pptx after.pptx --visual --json"];
+  if (commandGroup === "prepare") return ["officegen prepare --reference problem.pdf --target deck.pptx --out .officegen/run --json"];
   if (commandGroup === "run") return ["officegen run plan.json --manifest .officegen/run-manifest.json --json", "officegen run prepare-reference --reference problem.pdf --target deck.pptx --out .officegen/run --json"];
   if (commandGroup === "verify") return ["officegen verify deck.pptx --visual --json", "officegen verify deck.pptx --gates gates.json --json", "OFFICEGEN_PROFILE=enterprise officegen verify deck.pptx --native --out verify-report.json --json"];
   if (commandGroup === "asset" && subcommand === "replace") return ["officegen asset replace deck.pptx --asset ppt/media/image1.png logo.png --out deck-logo.pptx --json"];
@@ -330,6 +334,14 @@ function commandSpecificHelpOptions(commandGroup: string, subcommand: string | u
     "  --summary <path>              write Markdown summary for plan mode",
     "  --output-root <path>          restrict plan outputs to a directory",
     "  --expected-artifacts <path>   expected artifact list for plan mode"
+  ];
+  if (commandGroup === "prepare") return [
+    "  --reference <path>            reference file path",
+    "  --target <path>               target Office/PDF file path",
+    "  --out <dir>                   output directory for prepared artifacts",
+    "  --max-pages <number>          maximum preview pages",
+    "  --output-root <path>          restrict outputs to a directory",
+    "  --deny-outside-output-root    fail outputs outside --output-root"
   ];
   if (commandGroup === "asset" && subcommand === "inspect") return [
     "  --embedded                     list embedded media inside PPTX/DOCX/XLSX packages"

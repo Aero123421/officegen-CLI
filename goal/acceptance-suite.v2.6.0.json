@@ -1,0 +1,689 @@
+{
+  "schema": "officegen.acceptance-suite@1.0",
+  "suiteId": "officegen-v2.6.0-ai-office-operation-os",
+  "release": "2.6.0",
+  "contract": "office-operation-os-v2.6.0.goal.json",
+  "blockingPolicy": {
+    "mustPass": "Every blocking test covering a MUST requirement must pass before tagging v2.6.0.",
+    "manualEvidenceAllowed": "Manual evidence is allowed only for platform-dependent native renderer checks and must include reviewer notes.",
+    "knownLimitationRule": "Known limitations are acceptable only when machine-readable warnings, remediation entries, and user-facing docs disclose them."
+  },
+  "tests": [
+    {
+      "id": "A001",
+      "title": "Agent capability contract snapshot",
+      "kind": "contract",
+      "requirementIds": ["G01-R01"],
+      "formats": ["json"],
+      "fixtures": ["current checkout"],
+      "steps": [
+        {
+          "run": "npm run contract:check",
+          "expect": "Command metadata, core capabilities, registered commands, aliases, and wired-command exposure are consistent."
+        },
+        {
+          "run": "officegen capabilities --agent --json",
+          "expect": "JSON includes command groups, profiles, limitations, and disabled capability policy."
+        }
+      ],
+      "passCriteria": [
+        "No command group is documented in only one of core capabilities or CLI metadata.",
+        "No agent-visible command emits an implementation placeholder."
+      ],
+      "evidence": ["contract-check.txt", "capabilities.agent.json"],
+      "automation": "required",
+      "blocking": true
+    },
+    {
+      "id": "A002",
+      "title": "Help and workflow discovery",
+      "kind": "cli",
+      "requirementIds": ["G01-R01", "G06-R03", "G10-R02"],
+      "formats": ["json"],
+      "fixtures": ["current checkout"],
+      "steps": [
+        {
+          "run": "officegen help --agent --json",
+          "expect": "JSON help exposes top-level commands and machine-readable descriptions."
+        },
+        {
+          "run": "officegen help workflow inspect-edit-export --agent --json",
+          "expect": "Workflow help describes inspect, view, dry-run edit, apply, diff, and verify loop."
+        }
+      ],
+      "passCriteria": [
+        "Help output includes enough structured fields for an agent to choose the next command.",
+        "Workflow guidance has no source-only or README-only dependency."
+      ],
+      "evidence": ["help.agent.json", "help.workflow.inspect-edit-export.json"],
+      "automation": "required",
+      "blocking": true
+    },
+    {
+      "id": "A003",
+      "title": "Schema registry coverage",
+      "kind": "contract",
+      "requirementIds": ["G01-R02"],
+      "formats": ["json"],
+      "fixtures": ["schema registry"],
+      "steps": [
+        {
+          "run": "npm run schema:coverage",
+          "expect": "Runtime schema literals and implemented edit ops are represented in the schema registry."
+        },
+        {
+          "run": "officegen schema list --json && officegen schema get officegen.capabilities@1.2 --json",
+          "expect": "Schema list and get return valid JSON with stable schema IDs."
+        }
+      ],
+      "passCriteria": [
+        "Every representative result schema is registered.",
+        "Every implemented edit operation is present in the edit operation schema."
+      ],
+      "evidence": ["schema-coverage.txt", "schema-list.json", "schema-capabilities.json"],
+      "automation": "required",
+      "blocking": true
+    },
+    {
+      "id": "A004",
+      "title": "Structured error and recovery evidence",
+      "kind": "cli",
+      "requirementIds": ["G01-R03", "G10-R02"],
+      "formats": ["json"],
+      "fixtures": ["missing input file", "invalid schema payload", "unsupported command mode"],
+      "steps": [
+        {
+          "run": "officegen errors --json",
+          "expect": "Error catalog includes stable codes, categories, recoverability, and recovery hints."
+        },
+        {
+          "run": "officegen inspect does-not-exist.pptx --agent --json",
+          "expect": "Failure envelope includes code, message, hint, and redacted context."
+        }
+      ],
+      "passCriteria": [
+        "Negative commands return non-zero exit codes.",
+        "Error JSON is parseable and includes recovery guidance without leaking secrets."
+      ],
+      "evidence": ["errors.catalog.json", "negative.missing-file.json"],
+      "automation": "required",
+      "blocking": true
+    },
+    {
+      "id": "A005",
+      "title": "Cross-format inspection maps",
+      "kind": "e2e",
+      "requirementIds": ["G02-R01", "G02-R03"],
+      "formats": ["pptx", "docx", "xlsx", "pdf"],
+      "fixtures": ["representative pptx", "representative docx", "representative xlsx", "representative pdf", "hostile metadata fixture"],
+      "steps": [
+        {
+          "run": "officegen inspect <fixture> --depth summary --agent --json",
+          "expect": "Inspection returns object map, warnings, trust markers, and format-specific summaries."
+        }
+      ],
+      "passCriteria": [
+        "Every supported format has at least one stable object identifier in the inspect result when the fixture contains addressable objects.",
+        "Unsupported or partially parsed constructs appear as warnings or limitations."
+      ],
+      "evidence": ["inspect/*.json"],
+      "automation": "required",
+      "blocking": true
+    },
+    {
+      "id": "A006",
+      "title": "Preview artifact generation",
+      "kind": "e2e",
+      "requirementIds": ["G02-R02", "G02-R03"],
+      "formats": ["pptx", "docx", "xlsx", "pdf", "svg"],
+      "fixtures": ["representative pptx", "representative docx", "representative xlsx", "representative pdf"],
+      "steps": [
+        {
+          "run": "officegen view <fixture> --format svg --out .officegen/acceptance/views/<name> --json",
+          "expect": "View command reports generated artifacts, object-map overlay data, bytes, and warnings."
+        }
+      ],
+      "passCriteria": [
+        "Every declared output exists and has non-zero bytes.",
+        "The view JSON links generated preview artifacts to source object context."
+      ],
+      "evidence": ["views/**/*.svg", "views/**/*.json", "views-sha256.txt"],
+      "automation": "required",
+      "blocking": true
+    },
+    {
+      "id": "A007",
+      "title": "Structured IR render matrix",
+      "kind": "e2e",
+      "requirementIds": ["G03-R01"],
+      "formats": ["pptx", "docx", "xlsx", "pdf"],
+      "fixtures": ["minimal IR per target", "business document IR per target"],
+      "steps": [
+        {
+          "run": "officegen scaffold --kind <target> --title Acceptance --out <ir> --json",
+          "expect": "Scaffold writes valid structured IR."
+        },
+        {
+          "run": "officegen render <ir> --target <target> --out <output> --json",
+          "expect": "Render writes output and reports artifact metadata."
+        },
+        {
+          "run": "officegen verify <output> --json",
+          "expect": "Generated output is openable according to available validators."
+        }
+      ],
+      "passCriteria": [
+        "Each target produces a non-empty output file.",
+        "Verify has no blocking openability failure for generated outputs."
+      ],
+      "evidence": ["render/*.ir.json", "render/*.{pptx,docx,xlsx,pdf}", "render/verify/*.json"],
+      "automation": "required",
+      "blocking": true
+    },
+    {
+      "id": "A008",
+      "title": "Chart and diagram SVG rendering",
+      "kind": "e2e",
+      "requirementIds": ["G03-R02"],
+      "formats": ["svg", "json"],
+      "fixtures": ["bar chart spec", "line chart spec", "flow diagram spec", "invalid visual spec"],
+      "steps": [
+        {
+          "run": "officegen chart render <chart-spec> --out <chart.svg> --json",
+          "expect": "Chart SVG is written with structured success metadata."
+        },
+        {
+          "run": "officegen diagram render <diagram-spec> --out <diagram.svg> --json",
+          "expect": "Diagram SVG is written with structured success metadata."
+        },
+        {
+          "run": "officegen chart render <invalid-spec> --out <bad.svg> --json",
+          "expect": "Invalid input fails with a structured validation error."
+        }
+      ],
+      "passCriteria": [
+        "SVG outputs are non-empty and include expected root SVG markers.",
+        "Invalid specs never produce silent success."
+      ],
+      "evidence": ["visuals/*.svg", "visuals/*.json"],
+      "automation": "required",
+      "blocking": true
+    },
+    {
+      "id": "A009",
+      "title": "Template design layout disclosure",
+      "kind": "quality",
+      "requirementIds": ["G03-R03"],
+      "formats": ["pptx", "json"],
+      "fixtures": ["branded deck", "layout-heavy deck"],
+      "steps": [
+        {
+          "run": "officegen design capture <fixture> --out .officegen/acceptance/design/<name> --json",
+          "expect": "Design capture records reusable design-pack artifacts and limitations."
+        },
+        {
+          "run": "officegen layout <fixture> --json",
+          "expect": "Layout command returns structured layout signals or explicit unsupported status."
+        }
+      ],
+      "passCriteria": [
+        "Best-effort design behavior includes limitations when fidelity is incomplete.",
+        "Generated design artifacts are referenced in JSON output."
+      ],
+      "evidence": ["design/**/*.json", "layout/*.json"],
+      "automation": "preferred",
+      "blocking": false
+    },
+    {
+      "id": "A010",
+      "title": "Dry-run edit safety",
+      "kind": "e2e",
+      "requirementIds": ["G04-R01"],
+      "formats": ["pptx", "docx", "xlsx", "pdf", "json"],
+      "fixtures": ["edit source files", "selector-based edit operations"],
+      "steps": [
+        {
+          "run": "officegen edit <fixture> --ops <ops.json> --dry-run --resolve-selectors --agent --json",
+          "expect": "Dry-run reports resolved targets, planned mutations, warnings, and writes no output document."
+        }
+      ],
+      "passCriteria": [
+        "Source file sha256 is unchanged after dry-run.",
+        "Target count and unresolved selectors are explicit."
+      ],
+      "evidence": ["edit/dry-run/*.json", "edit/dry-run/source-sha256.txt"],
+      "automation": "required",
+      "blocking": true
+    },
+    {
+      "id": "A011",
+      "title": "Cross-format edit diff verify loop",
+      "kind": "e2e",
+      "requirementIds": ["G04-R02"],
+      "formats": ["pptx", "docx", "xlsx", "pdf"],
+      "fixtures": ["pptx text table chart image ops", "docx style comment redline ops", "xlsx formula table chart ops", "pdf overlay ops"],
+      "steps": [
+        {
+          "run": "officegen edit <fixture> --ops <ops.json> --out <edited> --json",
+          "expect": "Edit writes a new output document and reports applied operations."
+        },
+        {
+          "run": "officegen diff <fixture> <edited> --json",
+          "expect": "Diff reports semantic changes matching the operation intent."
+        },
+        {
+          "run": "officegen verify <edited> --json",
+          "expect": "Edited output is openable with no blocking repair warning."
+        }
+      ],
+      "passCriteria": [
+        "Each supported format has at least one representative mutation applied.",
+        "Diff confirms intended changes and verify does not report a blocking failure."
+      ],
+      "evidence": ["edit/applied/*.json", "diff/*.json", "verify/edited/*.json"],
+      "automation": "required",
+      "blocking": true
+    },
+    {
+      "id": "A012",
+      "title": "Embedded asset lifecycle",
+      "kind": "e2e",
+      "requirementIds": ["G04-R03"],
+      "formats": ["pptx", "docx", "xlsx", "json"],
+      "fixtures": ["media-heavy deck", "image-heavy document", "workbook with embedded images"],
+      "steps": [
+        {
+          "run": "officegen asset inspect <fixture> --embedded --agent --json",
+          "expect": "Embedded assets include IDs, media type, trust state, and extraction hints."
+        },
+        {
+          "run": "officegen asset extract <fixture> --images --out <asset-dir> --agent --json",
+          "expect": "Extraction writes only inside the declared output directory."
+        },
+        {
+          "run": "officegen asset replace <fixture> --asset <asset-id> <replacement> --out <edited> --json",
+          "expect": "Replacement writes edited output with artifact metadata."
+        }
+      ],
+      "passCriteria": [
+        "Extracted assets exist and include sha256 evidence.",
+        "Replacement output verifies or reports a non-blocking format limitation."
+      ],
+      "evidence": ["asset/inspect/*.json", "asset/extract/**/*", "asset/replace/*.json"],
+      "automation": "required",
+      "blocking": true
+    },
+    {
+      "id": "A013",
+      "title": "Verify clean and damaged fixtures",
+      "kind": "quality",
+      "requirementIds": ["G05-R01"],
+      "formats": ["pptx", "docx", "xlsx", "pdf", "json"],
+      "fixtures": ["clean generated outputs", "damaged or repair-risk fixtures"],
+      "steps": [
+        {
+          "run": "officegen verify <fixture> --visual --json",
+          "expect": "Verify reports openability, warnings, repair risk, and visual/native evidence availability."
+        },
+        {
+          "run": "officegen renderer doctor --json",
+          "expect": "Renderer doctor reports native backend availability without requiring native conversion to be enabled."
+        }
+      ],
+      "passCriteria": [
+        "Clean fixtures pass openability checks.",
+        "Damaged fixtures produce blocking warnings rather than success-only output."
+      ],
+      "evidence": ["verify/clean/*.json", "verify/damaged/*.json", "renderer-doctor.json"],
+      "automation": "required",
+      "blocking": true
+    },
+    {
+      "id": "A014",
+      "title": "Diagnose repair diff closure",
+      "kind": "quality",
+      "requirementIds": ["G05-R02"],
+      "formats": ["pptx", "docx", "xlsx", "pdf", "json"],
+      "fixtures": ["layout warning deck", "repairable office file", "changed output pair"],
+      "steps": [
+        {
+          "run": "officegen diagnose <fixture> --json",
+          "expect": "Diagnose returns issue IDs, severities, and actionable descriptions."
+        },
+        {
+          "run": "officegen repair <fixture> --out <repaired> --json",
+          "expect": "Repair either writes conservative output or reports why repair is not safe."
+        },
+        {
+          "run": "officegen diff <fixture> <repaired> --visual --json",
+          "expect": "Diff reports semantic or approximate visual changes."
+        }
+      ],
+      "passCriteria": [
+        "No repair operation silently drops unsupported content.",
+        "Diff evidence exists for any written repaired artifact."
+      ],
+      "evidence": ["diagnose/*.json", "repair/*.json", "diff/repair/*.json"],
+      "automation": "required",
+      "blocking": true
+    },
+    {
+      "id": "A015",
+      "title": "Plan-first quality improvement",
+      "kind": "quality",
+      "requirementIds": ["G05-R03"],
+      "formats": ["pptx", "docx", "xlsx", "json"],
+      "fixtures": ["messy deck", "messy document", "messy workbook"],
+      "steps": [
+        {
+          "run": "officegen critique <fixture> --json",
+          "expect": "Critique returns structured findings and severity."
+        },
+        {
+          "run": "officegen improve <fixture> --plan --json",
+          "expect": "Improve returns a plan and executable command/EditOps skeletons without mutating the source."
+        }
+      ],
+      "passCriteria": [
+        "Improve is plan-only unless an explicit mutating command is requested.",
+        "Recommended changes are traceable to critique findings."
+      ],
+      "evidence": ["critique/*.json", "improve/*.json"],
+      "automation": "preferred",
+      "blocking": false
+    },
+    {
+      "id": "A016",
+      "title": "Manifested workflow run",
+      "kind": "e2e",
+      "requirementIds": ["G06-R01", "G10-R03"],
+      "formats": ["json"],
+      "fixtures": ["inspect-edit-export workflow.json"],
+      "steps": [
+        {
+          "run": "officegen run <workflow.json> --strict-json --log-jsonl <events.jsonl> --manifest <manifest.json> --summary <summary.md> --output-root .officegen/acceptance/outputs --deny-outside-output-root --agent --json",
+          "expect": "Run writes strict JSON result, JSONL events, manifest with artifact metadata, and Markdown summary."
+        }
+      ],
+      "passCriteria": [
+        "Every expected output in the workflow appears in the manifest with exists, bytes, and sha256.",
+        "JSONL events are parseable line by line."
+      ],
+      "evidence": ["runs/latest/result.json", "runs/latest/events.jsonl", "runs/latest/manifest.json", "runs/latest/summary.md"],
+      "automation": "required",
+      "blocking": true
+    },
+    {
+      "id": "A017",
+      "title": "Output root escape rejection",
+      "kind": "security",
+      "requirementIds": ["G06-R02"],
+      "formats": ["json"],
+      "fixtures": ["workflow with ../ output", "workflow with absolute output path"],
+      "steps": [
+        {
+          "run": "officegen run <escape-workflow.json> --deny-outside-output-root --output-root .officegen/acceptance/outputs --json",
+          "expect": "Command fails with structured path boundary error and writes no escaped artifact."
+        }
+      ],
+      "passCriteria": [
+        "Escaping output paths are rejected with non-zero exit status.",
+        "No file is written outside the declared output root."
+      ],
+      "evidence": ["security/output-root-escape.json", "security/output-root-filesystem-check.txt"],
+      "automation": "required",
+      "blocking": true
+    },
+    {
+      "id": "A018",
+      "title": "Untrusted document content handling",
+      "kind": "security",
+      "requirementIds": ["G07-R01"],
+      "formats": ["pptx", "docx", "xlsx", "pdf", "json"],
+      "fixtures": ["prompt-injection text fixture", "macro marker fixture", "external hyperlink fixture", "embedded file fixture"],
+      "steps": [
+        {
+          "run": "officegen inspect <hostile-fixture> --agent --json",
+          "expect": "Document-derived strings and risky embedded content are marked as untrusted or warning-bearing data."
+        },
+        {
+          "run": "officegen asset inspect <hostile-fixture> --embedded --agent --json",
+          "expect": "Embedded assets include trust annotations and extraction risk signals."
+        }
+      ],
+      "passCriteria": [
+        "No inspected document text is presented as a trusted instruction.",
+        "Risky embedded content has explicit warning or trust metadata."
+      ],
+      "evidence": ["security/untrusted-inspect/*.json", "security/untrusted-asset/*.json"],
+      "automation": "required",
+      "blocking": true
+    },
+    {
+      "id": "A019",
+      "title": "Archive and path safety tests",
+      "kind": "security",
+      "requirementIds": ["G07-R02"],
+      "formats": ["all"],
+      "fixtures": ["zip traversal archive", "absolute path archive", "oversized zip entry", "path boundary unit fixtures"],
+      "steps": [
+        {
+          "run": "npm test -- zipSafety paths",
+          "expect": "Zip and path safety unit tests reject traversal, absolute path, and size-limit violations."
+        }
+      ],
+      "passCriteria": [
+        "Unsafe archive members cannot escape extraction roots.",
+        "Path boundary helpers reject outside-root writes."
+      ],
+      "evidence": ["test-zip-path-safety.txt"],
+      "automation": "required",
+      "blocking": true
+    },
+    {
+      "id": "A020",
+      "title": "External capability gate checks",
+      "kind": "security",
+      "requirementIds": ["G07-R03"],
+      "formats": ["json"],
+      "fixtures": ["default profile", "trusted profile"],
+      "steps": [
+        {
+          "run": "officegen config --json",
+          "expect": "Default policy shows gated native renderer, plugin, MCP, and external process capabilities."
+        },
+        {
+          "run": "officegen renderer doctor --json",
+          "expect": "Doctor reports availability without enabling native conversion by default."
+        }
+      ],
+      "passCriteria": [
+        "Default profile does not permit unsafe external execution.",
+        "Disabled capability responses are structured and discoverable."
+      ],
+      "evidence": ["config.default.json", "renderer-doctor.gated.json"],
+      "automation": "required",
+      "blocking": true
+    },
+    {
+      "id": "A021",
+      "title": "Redaction behavior",
+      "kind": "security",
+      "requirementIds": ["G07-R04"],
+      "formats": ["json"],
+      "fixtures": ["secret-like environment values", "secret-like document fields"],
+      "steps": [
+        {
+          "run": "npm test -- redaction",
+          "expect": "Redaction tests mask configured secret patterns while preserving useful context."
+        }
+      ],
+      "passCriteria": [
+        "No known secret literal appears in error or log fixtures.",
+        "Redacted fields remain identifiable as redacted."
+      ],
+      "evidence": ["test-redaction.txt"],
+      "automation": "preferred",
+      "blocking": false
+    },
+    {
+      "id": "A022",
+      "title": "Version synchronization gate",
+      "kind": "packaging",
+      "requirementIds": ["G08-R01"],
+      "formats": ["json"],
+      "fixtures": ["current checkout"],
+      "steps": [
+        {
+          "run": "npm run version:check",
+          "expect": "Manifest versions, lockfile, runtime constant, and README release examples are synchronized."
+        }
+      ],
+      "passCriteria": [
+        "Version check exits zero before release tagging.",
+        "No manual multi-file version edits are required."
+      ],
+      "evidence": ["version-check.txt"],
+      "automation": "required",
+      "blocking": true
+    },
+    {
+      "id": "A023",
+      "title": "Pack and install smoke",
+      "kind": "packaging",
+      "requirementIds": ["G08-R02"],
+      "formats": ["all"],
+      "fixtures": ["release tarball", "GitHub checkout install path"],
+      "steps": [
+        {
+          "run": "npm run pack:smoke",
+          "expect": "Packed tarball contains expected dist files and runnable CLI entrypoint."
+        },
+        {
+          "run": "npm run github-install:head-smoke",
+          "expect": "GitHub install smoke succeeds for the release candidate branch."
+        }
+      ],
+      "passCriteria": [
+        "Installed officegen binary reports the expected release candidate version.",
+        "Packaged files include runtime dist artifacts and required scripts."
+      ],
+      "evidence": ["pack-smoke.txt", "github-install-head-smoke.txt"],
+      "automation": "required",
+      "blocking": true
+    },
+    {
+      "id": "A024",
+      "title": "Full release gate transcript",
+      "kind": "smoke",
+      "requirementIds": ["G08-R03"],
+      "formats": ["all"],
+      "fixtures": ["current checkout"],
+      "steps": [
+        {
+          "run": "npm run goal:check && npm run contract:check && npm run schema:coverage && npm run remediation:check && npm run typecheck && npm test && npm run build && npm run binary:smoke && npm run pack:smoke",
+          "expect": "All release-blocking checks exit zero in a clean checkout."
+        }
+      ],
+      "passCriteria": [
+        "No release-blocking command fails.",
+        "Failures include complete logs and are classified before tag creation."
+      ],
+      "evidence": ["release-gate.txt"],
+      "automation": "required",
+      "blocking": true
+    },
+    {
+      "id": "A025",
+      "title": "Acceptance evidence bundle",
+      "kind": "contract",
+      "requirementIds": ["G09-R01", "G10-R03"],
+      "formats": ["all"],
+      "fixtures": ["acceptance workflow outputs"],
+      "steps": [
+        {
+          "run": "officegen run <acceptance-workflow.json> --manifest <manifest.json> --summary <summary.md> --log-jsonl <events.jsonl> --json",
+          "expect": "Acceptance workflow retains all declared outputs and machine-readable evidence."
+        }
+      ],
+      "passCriteria": [
+        "Evidence root contains transcripts, JSON outputs, generated artifacts, sha256 list, and reviewer notes.",
+        "Manifest references every required artifact."
+      ],
+      "evidence": ["acceptance/index.json", "acceptance/sha256.txt", "acceptance/reviewer-notes.md"],
+      "automation": "required",
+      "blocking": true
+    },
+    {
+      "id": "A026",
+      "title": "Corpus benchmark review",
+      "kind": "benchmark",
+      "requirementIds": ["G09-R02"],
+      "formats": ["pptx", "docx", "xlsx", "pdf", "json"],
+      "fixtures": ["benchmarks/office-corpus/manifest.json"],
+      "steps": [
+        {
+          "run": "npm run benchmark:local-fixtures",
+          "expect": "Local fixture corpus benchmark writes structured results."
+        },
+        {
+          "run": "npm run benchmark:review",
+          "expect": "Benchmark review summarizes regressions, warnings, and known limitations."
+        }
+      ],
+      "passCriteria": [
+        "Benchmark results are stored under the configured benchmark result root.",
+        "Known limitations remain explicit and reviewable."
+      ],
+      "evidence": ["benchmark-results/**/*.json", "benchmark-review.txt"],
+      "automation": "preferred",
+      "blocking": false
+    },
+    {
+      "id": "A027",
+      "title": "Remediation matrix closure",
+      "kind": "contract",
+      "requirementIds": ["G09-R03"],
+      "formats": ["json"],
+      "fixtures": ["docs/reviews/v2.6.0-remediation-matrix.md"],
+      "steps": [
+        {
+          "run": "npm run remediation:check",
+          "expect": "v2.6.0 remediation matrix has required sections, valid statuses, unique IDs, and evidence."
+        }
+      ],
+      "passCriteria": [
+        "No remediation row is undecided, draft-only, or missing evidence.",
+        "Every allowed status is represented where applicable."
+      ],
+      "evidence": ["remediation-check.txt", "docs/reviews/v2.6.0-remediation-matrix.md"],
+      "automation": "required",
+      "blocking": true
+    },
+    {
+      "id": "A028",
+      "title": "Human and JSON parity snapshots",
+      "kind": "cli",
+      "requirementIds": ["G10-R01"],
+      "formats": ["json"],
+      "fixtures": ["representative commands: inspect, edit dry-run, render, verify, run"],
+      "steps": [
+        {
+          "run": "officegen <command> <args>",
+          "expect": "Human output is concise and includes decision-critical status."
+        },
+        {
+          "run": "officegen <command> <args> --agent --json",
+          "expect": "JSON output contains the same decision-critical status, warnings, artifacts, and error fields."
+        }
+      ],
+      "passCriteria": [
+        "JSON mode never drops warnings or limitations present in human mode.",
+        "Human mode never claims success when JSON mode reports partial or failed status."
+      ],
+      "evidence": ["parity/human/*.txt", "parity/json/*.json", "parity/report.md"],
+      "automation": "preferred",
+      "blocking": true
+    }
+  ]
+}

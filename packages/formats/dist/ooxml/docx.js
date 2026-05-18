@@ -1,5 +1,6 @@
 import { readZipText, sortedZipFiles, stableHashId } from "../shared.js";
 import { localText, paragraphXml, preview, replaceNthBlock, setFirstTextInBlock } from "./xml.js";
+import { parseRelationships, relationshipTarget } from "./relationships.js";
 export async function inspectParagraphs(zip) {
     const paths = sortedZipFiles(zip);
     const docxParts = [
@@ -9,6 +10,7 @@ export async function inspectParagraphs(zip) {
         ...paths.filter((path) => /^word\/comments\.xml$/i.test(path)).sort()
     ];
     const paragraphs = [];
+    const extraObjectMap = [];
     for (const partPath of docxParts) {
         const xml = (await readZipText(zip, partPath)) ?? "";
         const partKind = docxPartKind(partPath);
@@ -22,6 +24,8 @@ export async function inspectParagraphs(zip) {
                 untrusted: true
             });
         }
+        extraObjectMap.push(...inspectDocxTables(xml, partPath, partKind));
+        extraObjectMap.push(...await inspectDocxImages(zip, xml, partPath, partKind));
     }
     const objectMap = paragraphs
         .filter((paragraph) => paragraph.text)
@@ -39,7 +43,75 @@ export async function inspectParagraphs(zip) {
         trust: { level: "untrusted", reason: "document-content" },
         untrusted: true
     }));
-    return { paragraphs, objectMap };
+    return { paragraphs, objectMap: [...objectMap, ...extraObjectMap] };
+}
+function inspectDocxTables(xml, partPath, partKind) {
+    const entries = [];
+    let tableIndex = 0;
+    let cellIndex = 0;
+    for (const tableMatch of xml.matchAll(/<w:tbl\b[\s\S]*?<\/w:tbl>/g)) {
+        tableIndex += 1;
+        const table = tableMatch[0];
+        entries.push({
+            stableObjectId: stableHashId("docx", partKind, "table", `${partPath}#${tableIndex}`),
+            kind: "table",
+            label: `Table ${tableIndex}`,
+            sourcePath: partPath,
+            xmlPath: partPath,
+            selectorHints: { story: partKind, sourcePath: partPath, table: tableIndex },
+            editableOps: ["docx.setTableCellText"],
+            trust: { level: "untrusted", reason: "document-content" },
+            untrusted: true
+        });
+        let rowIndex = 0;
+        for (const rowMatch of table.matchAll(/<w:tr\b[\s\S]*?<\/w:tr>/g)) {
+            rowIndex += 1;
+            let columnIndex = 0;
+            for (const cellMatch of rowMatch[0].matchAll(/<w:tc\b[\s\S]*?<\/w:tc>/g)) {
+                columnIndex += 1;
+                cellIndex += 1;
+                const text = localText(cellMatch[0], "t").join("");
+                entries.push({
+                    stableObjectId: stableHashId("docx", partKind, "tableCell", `${partPath}#${cellIndex}`),
+                    kind: "tableCell",
+                    text,
+                    textPreview: preview(text),
+                    sourcePath: partPath,
+                    xmlPath: partPath,
+                    bounds: { x: 72 + (columnIndex - 1) * 144, y: 120 + (rowIndex - 1) * 28, width: 144, height: 28 },
+                    bbox: [72 + (columnIndex - 1) * 144, 120 + (rowIndex - 1) * 28, 144, 28],
+                    selectorHints: { story: partKind, sourcePath: partPath, table: tableIndex, row: rowIndex, column: columnIndex, cell: cellIndex },
+                    editableOps: ["setText", "docx.setTableCellText"],
+                    trust: { level: "untrusted", reason: "document-content" },
+                    untrusted: true
+                });
+            }
+        }
+    }
+    return entries;
+}
+async function inspectDocxImages(zip, xml, partPath, partKind) {
+    const relsPath = partPath.replace(/^word\//, "word/_rels/") + ".rels";
+    const rels = parseRelationships((await readZipText(zip, relsPath)) ?? "");
+    let imageIndex = 0;
+    return [...xml.matchAll(/<w:drawing\b[\s\S]*?<\/w:drawing>/g)].map((match) => {
+        imageIndex += 1;
+        const relationshipId = /(?:r:embed|r:link)="([^"]+)"/.exec(match[0])?.[1];
+        const rel = rels.find((item) => item.id === relationshipId);
+        const assetPath = rel ? relationshipTarget("word", rel.target) : undefined;
+        return {
+            stableObjectId: stableHashId("docx", partKind, "image", `${partPath}#${imageIndex}`),
+            kind: "image",
+            label: `Image ${imageIndex}`,
+            sourcePath: partPath,
+            xmlPath: partPath,
+            selectorHints: { story: partKind, sourcePath: partPath, relationshipId, assetPath },
+            editableOps: ["asset.replace", "docx.replaceImage"],
+            media: { relationshipId, assetPath },
+            trust: { level: "untrusted", reason: "document-content" },
+            untrusted: true
+        };
+    });
 }
 export function setParagraphText(xml, ordinal, text) {
     return replaceNthBlock(xml, /<w:p\b[\s\S]*?<\/w:p>/g, ordinal, (paragraph) => setFirstTextInBlock(paragraph, "w:t", text));

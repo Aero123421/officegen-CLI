@@ -12,6 +12,7 @@ export async function inspectSheets(zip) {
             const type = xmlAttr(cell.attrs, "t");
             const raw = exactText(cell.body, "v")[0] ?? "";
             const inlineText = localText(cell.body, "t").join("");
+            const formula = exactText(cell.body, "f")[0];
             const value = type === "s" ? sharedStrings[Number(raw)] ?? raw : type === "inlineStr" ? inlineText : type === "b" ? booleanText(raw) : raw;
             const sheetScope = `s${String(sheetIndex + 1).padStart(3, "0")}`;
             const stableObjectId = stableHashId("xlsx", sheetScope, "cell", `${sheetPath}#${cell.ref}`);
@@ -26,7 +27,7 @@ export async function inspectSheets(zip) {
                 xmlPath: sheetPath,
                 bounds,
                 bbox: bounds ? [bounds.x, bounds.y, bounds.width, bounds.height] : undefined,
-                selectorHints: { sheet: sheetIndex + 1, cell: cell.ref },
+                selectorHints: { sheet: sheetIndex + 1, cell: cell.ref, formula, regionRole: formula ? "formula" : undefined },
                 editableOps: ["setText", "xlsx.setCell"],
                 trust: { level: "untrusted", reason: "document-content" },
                 untrusted: true
@@ -34,6 +35,21 @@ export async function inspectSheets(zip) {
             objectMap.push(entry);
             return { stableObjectId, ref: cell.ref, value, sourcePath: sheetPath, untrusted: true };
         });
+        for (const [validationIndex, validation] of [...xml.matchAll(/<dataValidation\b([^>]*)/g)].entries()) {
+            const attrs = validation[1] ?? "";
+            const range = xmlAttr(attrs, "sqref");
+            objectMap.push({
+                stableObjectId: stableHashId("xlsx", `s${String(sheetIndex + 1).padStart(3, "0")}`, "validation", `${sheetPath}#${validationIndex + 1}`),
+                kind: "validation",
+                label: range,
+                sourcePath: sheetPath,
+                xmlPath: sheetPath,
+                selectorHints: { sheet: sheetIndex + 1, range, regionRole: "validation" },
+                editableOps: ["xlsx.validation.set", "xlsx.validation.delete"],
+                trust: { level: "untrusted", reason: "document-content" },
+                untrusted: true
+            });
+        }
         sheets.push({
             stableObjectId: makeStableObjectId("xlsx", "workbook", "sheet", sheetIndex + 1),
             index: sheetIndex + 1,
@@ -55,6 +71,27 @@ export async function inspectSheets(zip) {
             xmlPath: path,
             selectorHints: { tableName: name, ref },
             editableOps: ["xlsx.writeTable", "xlsx.updateTable", "xlsx.appendRows", "xlsx.table.resize"],
+            trust: { level: "untrusted", reason: "document-content" },
+            untrusted: true
+        });
+    }
+    const workbookXml = (await readZipText(zip, "xl/workbook.xml")) ?? "";
+    for (const definedName of workbookXml.matchAll(/<definedName\b([^>]*)>([\s\S]*?)<\/definedName>/g)) {
+        const attrs = definedName[1] ?? "";
+        const name = xmlAttr(attrs, "name");
+        const ref = (definedName[2] ?? "").replace(/&apos;/g, "'").replace(/&amp;/g, "&");
+        if (!name)
+            continue;
+        objectMap.push({
+            stableObjectId: stableHashId("xlsx", "workbook", "namedRange", name),
+            kind: "namedRange",
+            label: name,
+            text: ref,
+            textPreview: preview(ref),
+            sourcePath: "xl/workbook.xml",
+            xmlPath: "xl/workbook.xml",
+            selectorHints: { namedRange: name, range: ref, regionRole: "namedRange" },
+            editableOps: ["xlsx.definedName.set", "xlsx.definedName.delete"],
             trust: { level: "untrusted", reason: "document-content" },
             untrusted: true
         });

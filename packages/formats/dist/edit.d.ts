@@ -19,6 +19,19 @@ export type EditSelector = {
     };
     textHash?: string;
     positionHash?: string;
+    sourcePath?: string;
+    xmlPath?: string;
+    page?: number;
+    story?: string;
+    paragraph?: number;
+    table?: number;
+    row?: number;
+    column?: number;
+    range?: string;
+    relationshipId?: string;
+    assetPath?: string;
+    commentId?: string;
+    revisionId?: string;
     nearestTo?: {
         slide?: number;
         x: number;
@@ -83,6 +96,10 @@ export type EditOperation = {
     op: "pptx.addSlide";
     after?: number;
 } | {
+    op: "pptx.addSlideFromLayout";
+    after?: number;
+    layout?: string | number;
+} | {
     op: "pptx.reorderSlides";
     order: number[];
     selector?: EditSelector;
@@ -105,6 +122,39 @@ export type EditOperation = {
     fontSize?: number;
     bold?: boolean;
     textCase?: "upper" | "lower" | "title" | "sentence";
+} | {
+    op: "pptx.formatAllTitles";
+    fontSize?: number;
+    bold?: boolean;
+    textCase?: "upper" | "lower" | "title" | "sentence";
+} | {
+    op: "pptx.replaceBodyBullets";
+    slide: number;
+    items: PptxBulletListItem[];
+    spaceBeforeForLevel1ExceptFirst?: number;
+} | {
+    op: "pptx.fitContentToPlaceholder";
+    selector: EditSelector;
+    minFontSize?: number;
+} | {
+    op: "pptx.alignObjects";
+    selectors: EditSelector[];
+    mode: "left" | "right" | "center" | "top" | "bottom" | "middle";
+} | {
+    op: "pptx.distributeObjects";
+    selectors: EditSelector[];
+    axis: "x" | "y";
+} | {
+    op: "pptx.setAltText";
+    selector: EditSelector;
+    title?: string;
+    description?: string;
+    decorative?: boolean;
+} | {
+    op: "pptx.setSpeakerNotes";
+    slide: number;
+    text: string;
+    mode?: "replace" | "append";
 } | {
     op: "pptx.replaceWithBulletList";
     items: PptxBulletListItem[];
@@ -178,6 +228,15 @@ export type EditOperation = {
     text: string;
     selector: EditSelector;
 } | {
+    op: "docx.replaceTextSmart";
+    from: string;
+    to: string;
+    selector?: EditSelector;
+} | {
+    op: "docx.setTableCellText";
+    text: string;
+    selector: EditSelector;
+} | {
     op: "docx.setHeader";
     text: string;
 } | {
@@ -245,6 +304,13 @@ export type EditOperation = {
     formula: string;
     selector?: EditSelector;
 } | {
+    op: "xlsx.definedName.set";
+    name: string;
+    ref: string;
+} | {
+    op: "xlsx.definedName.delete";
+    name: string;
+} | {
     op: "xlsx.setRange";
     sheet?: number;
     startCell: string;
@@ -299,6 +365,7 @@ export interface EditOptions {
     idempotencyKey?: string;
     expectedInputSha256?: string;
     expectedObjectMapHash?: string;
+    minSelectorConfidence?: number;
     continueOnError?: boolean;
     config?: OfficegenConfig;
 }
@@ -318,7 +385,7 @@ export interface EditSelectorResolution {
         sourcePath?: string;
         xmlPath?: string;
     }>;
-    reason?: "not-found" | "ambiguous" | "unsupported-selector";
+    reason?: "not-found" | "ambiguous" | "low-confidence" | "unsupported-selector";
 }
 export interface ResolveEditSelectorsResult {
     schema: "officegen.edit.selectors@1.2";
@@ -333,7 +400,7 @@ export interface EditOperationResult {
     operationIndex: number;
     op: string;
     applied: boolean;
-    reason?: "not-found" | "ambiguous" | "unsupported" | "validation-failed" | "idempotency-replay" | "skipped-after-error" | "stale-plan";
+    reason?: "not-found" | "ambiguous" | "low-confidence" | "unsupported" | "validation-failed" | "idempotency-replay" | "skipped-after-error" | "stale-plan";
     message?: string;
 }
 export interface EditResult {

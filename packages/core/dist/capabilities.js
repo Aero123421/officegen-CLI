@@ -17,6 +17,7 @@ export const COMMAND_SPECS = [
     spec("diagnose", ["diagnose"]),
     spec("repair", ["repair"]),
     spec("diff", ["diff"]),
+    spec("prepare", ["prepare", "prepare reference"]),
     spec("manifest", ["manifest", "manifest inspect", "manifest verify"]),
     spec("select", ["select"]),
     spec("plan", ["plan"]),

@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://officegen.dev/schemas/acceptance-suite.schema.json",
+  "title": "Officegen Acceptance Suite Specification",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "suiteId", "release", "contract", "blockingPolicy", "tests"],
+  "properties": {
+    "schema": { "const": "officegen.acceptance-suite@1.0" },
+    "suiteId": { "type": "string", "minLength": 6 },
+    "release": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
+    "contract": { "type": "string", "minLength": 8 },
+    "blockingPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mustPass", "manualEvidenceAllowed", "knownLimitationRule"],
+      "properties": {
+        "mustPass": { "type": "string", "minLength": 8 },
+        "manualEvidenceAllowed": { "type": "string", "minLength": 8 },
+        "knownLimitationRule": { "type": "string", "minLength": 8 }
+      }
+    },
+    "tests": { "type": "array", "minItems": 12, "items": { "$ref": "#/$defs/test" } }
+  },
+  "$defs": {
+    "test": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "kind", "requirementIds", "fixtures", "steps", "passCriteria", "evidence", "automation", "blocking"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^A[0-9]{3}$" },
+        "title": { "type": "string", "minLength": 6 },
+        "kind": { "enum": ["contract", "cli", "e2e", "smoke", "security", "quality", "packaging", "benchmark", "manual"] },
+        "requirementIds": { "type": "array", "minItems": 1, "items": { "type": "string", "pattern": "^G[0-9]{2}-R[0-9]{2}$" } },
+        "formats": { "type": "array", "items": { "enum": ["pptx", "docx", "xlsx", "pdf", "svg", "json", "all"] } },
+        "fixtures": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 3 } },
+        "steps": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["run", "expect"],
+            "properties": {
+              "run": { "type": "string", "minLength": 4 },
+              "expect": { "type": "string", "minLength": 8 }
+            }
+          }
+        },
+        "passCriteria": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 8 } },
+        "evidence": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 6 } },
+        "automation": { "enum": ["required", "preferred", "manual"] },
+        "blocking": { "type": "boolean" }
+      }
+    }
+  }
+}

@@ -18,6 +18,7 @@ export const COMMAND_METADATA: CapabilityEntry[] = [
   core("diagnose", "Detect problems in generated or existing files", ["diagnose"]),
   core("repair", "Repair files or produce a repair plan", ["repair"]),
   core("diff", "Compare Office/PDF files semantically and with approximate visual regression scores", ["diff"]),
+  core("prepare", "Prepare AI-readable reference/target artifacts for Office editing", ["prepare", "prepare reference"]),
   core("manifest", "Create, inspect, and verify artifact manifests", ["manifest", "manifest inspect", "manifest verify"]),
   core("select", "Resolve safe Office/PDF selectors with confidence", ["select"]),
   core("plan", "Turn goals into deterministic EditOps plans when possible", ["plan"]),

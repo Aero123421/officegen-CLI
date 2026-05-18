@@ -1,8 +1,8 @@
-import { getLoadedZipSafetyReport, isOfficeFormat, loadZip, normalizeInput, readZipBytes, readZipText, writeOutput, zipSafetyCaveats, zipToBytes } from "./shared.js";
+import { getLoadedZipSafetyReport, isOfficeFormat, loadZip, normalizeInput, readZipBytes, readZipText, stripXmlTags, writeOutput, zipSafetyCaveats, zipToBytes } from "./shared.js";
 import { inspect } from "./inspect.js";
 import { commentXml, insertParagraphAfter, insertedParagraphXml, replaceOrCreateHeaderFooter, setParagraphText } from "./ooxml/docx.js";
 import { embedPdfFonts } from "./pdfFonts.js";
-import { addBlankSlide, addTextBox, duplicateSlide, extractShapes, reorderSlides, replaceShapeBulletItems } from "./ooxml/pptx.js";
+import { addBlankSlide, addTextBox, duplicateSlide, extractShapes, getSlidePaths, reorderSlides, replaceShapeBulletItems } from "./ooxml/pptx.js";
 import { appendRows, insertRows, setCell, sheetPath } from "./ooxml/xlsx.js";
 import { escapeXmlText, pxToEmu, replaceAllXmlText, setFirstTextInBlock } from "./ooxml/xml.js";
 import { nextRelationshipId } from "./ooxml/relationships.js";
@@ -17,7 +17,7 @@ export async function edit(input, operations, options = {}) {
     const result = isOfficeFormat(normalized.format)
         ? await editOfficeXml(normalized, operations, options, selectorResult)
         : normalized.format === "pdf"
-            ? await editPdf(normalized, operations, options)
+            ? await editPdf(normalized, operations, options, selectorResult)
             : undefined;
     if (result) {
         if (selectorResult && !(normalized.format === "pptx" && hasSelectorAfterPptxCreator(operations)))
@@ -104,7 +104,7 @@ async function editOfficeXml(input, operations, options, selectorResult) {
         : undefined;
     const validationErrors = options.validateFirst === false
         ? []
-        : validationFailures(selectorResult).filter((failure) => !dynamicPptxSelectors || !hasPriorPptxCreator(operations, failure.operationIndex));
+        : validationFailures(selectorResult, options.minSelectorConfidence).filter((failure) => !dynamicPptxSelectors || !hasPriorPptxCreator(operations, failure.operationIndex));
     if (validationErrors.length && atomic) {
         return editAbortResult(input.format, operations.length, validationErrors, [
             "Atomic edit aborted before writing because selector validation failed.",
@@ -197,7 +197,7 @@ async function applyOfficeOperation(zip, format, operation, objectMap, index) {
         await duplicateSlide(zip, duplicate.slide ?? slideNumberFromSelector(duplicate.selector, objectMap) ?? 1, duplicate.after);
         return true;
     }
-    if (format === "pptx" && op === "pptx.addSlide") {
+    if (format === "pptx" && (op === "pptx.addSlide" || op === "pptx.addSlideFromLayout")) {
         await addBlankSlide(zip, operation.after);
         return true;
     }
@@ -212,6 +212,27 @@ async function applyOfficeOperation(zip, format, operation, objectMap, index) {
     }
     if (format === "pptx" && op === "pptx.formatTitle") {
         return editPptxTextStyle(zip, operation, objectMap);
+    }
+    if (format === "pptx" && op === "pptx.formatAllTitles") {
+        return editPptxFormatAllTitles(zip, operation, objectMap);
+    }
+    if (format === "pptx" && op === "pptx.replaceBodyBullets") {
+        return editPptxReplaceBodyBullets(zip, operation, objectMap);
+    }
+    if (format === "pptx" && op === "pptx.fitContentToPlaceholder") {
+        return editPptxFitContent(zip, operation, objectMap);
+    }
+    if (format === "pptx" && op === "pptx.alignObjects") {
+        return editPptxAlignObjects(zip, operation, objectMap);
+    }
+    if (format === "pptx" && op === "pptx.distributeObjects") {
+        return editPptxDistributeObjects(zip, operation, objectMap);
+    }
+    if (format === "pptx" && op === "pptx.setAltText") {
+        return editPptxSetAltText(zip, operation, objectMap);
+    }
+    if (format === "pptx" && op === "pptx.setSpeakerNotes") {
+        return editPptxSetSpeakerNotes(zip, operation);
     }
     if (format === "pptx" && op === "pptx.replaceWithBulletList") {
         return editPptxRichBullets(zip, operation, objectMap);
@@ -254,6 +275,13 @@ async function applyOfficeOperation(zip, format, operation, objectMap, index) {
     }
     if (format === "docx" && op === "docx.insertParagraphAfter") {
         return editDocxInsertParagraph(zip, operation, objectMap);
+    }
+    if (format === "docx" && op === "docx.replaceTextSmart") {
+        const smart = operation;
+        return smart.selector ? editDocxReplaceTextSmartSelected(zip, smart, objectMap) : replaceTextInEditableParts(zip, format, smart.from, smart.to);
+    }
+    if (format === "docx" && op === "docx.setTableCellText") {
+        return editDocxSetTableCellText(zip, operation, objectMap);
     }
     if (format === "docx" && (op === "docx.setHeader" || op === "docx.setFooter" || op === "docx.headerFooter.setText")) {
         const headerFooter = operation;
@@ -305,6 +333,12 @@ async function applyOfficeOperation(zip, format, operation, objectMap, index) {
     if (format === "xlsx" && op === "xlsx.setFormula") {
         const formulaOp = operation;
         return editXlsxSetFormula(zip, formulaOp.sheet, formulaOp.cell, formulaOp.formula);
+    }
+    if (format === "xlsx" && op === "xlsx.definedName.set") {
+        return editXlsxDefinedName(zip, operation, "set");
+    }
+    if (format === "xlsx" && op === "xlsx.definedName.delete") {
+        return editXlsxDefinedName(zip, operation, "delete");
     }
     if (format === "xlsx" && op === "xlsx.setRange") {
         const rangeOp = operation;
@@ -465,6 +499,129 @@ async function editPptxTextStyle(zip, operation, objectMap) {
         zip.file(target.sourcePath, next);
     return next !== xml;
 }
+async function editPptxFormatAllTitles(zip, operation, objectMap) {
+    let changed = false;
+    const slideNumbers = [...new Set(objectMap.map((entry) => Number(entry.selectorHints?.slide)).filter(Number.isFinite))].sort((a, b) => a - b);
+    for (const slide of slideNumbers) {
+        const candidates = objectMap.filter((entry) => entry.kind === "shape" && Number(entry.selectorHints?.slide) === slide && entry.sourcePath);
+        const title = candidates.find((entry) => ["title", "ctrTitle"].includes(String(entry.selectorHints?.placeholder ?? entry.selectorHints?.placeholderKey ?? "")))
+            ?? candidates.sort((left, right) => textProminenceScore(right) - textProminenceScore(left))[0];
+        if (!title?.sourcePath)
+            continue;
+        const xml = (await readZipText(zip, title.sourcePath)) ?? "";
+        const next = updateSelectedPptxShape(xml, title, (shape) => {
+            let updated = shape;
+            if (operation.textCase)
+                updated = applyPptxTextCase(updated, operation.textCase);
+            return updateShapeRunProperties(updated, { fontSize: operation.fontSize, bold: operation.bold });
+        });
+        if (next !== xml) {
+            zip.file(title.sourcePath, next);
+            changed = true;
+        }
+    }
+    return changed;
+}
+async function editPptxReplaceBodyBullets(zip, operation, objectMap) {
+    const bodies = objectMap.filter((entry) => entry.kind === "shape" && Number(entry.selectorHints?.slide) === operation.slide && entry.sourcePath);
+    const target = bodies.find((entry) => {
+        const placeholder = String(entry.selectorHints?.placeholder ?? entry.selectorHints?.placeholderKey ?? "");
+        return placeholder === "body" || placeholder === "subTitle" || placeholder === "obj";
+    }) ?? bodies.find((entry) => !["title", "ctrTitle"].includes(String(entry.selectorHints?.placeholder ?? entry.selectorHints?.placeholderKey ?? "")));
+    if (!target?.sourcePath)
+        throw new Error(`SELECTOR_NOT_FOUND: no body shape found on slide ${operation.slide}.`);
+    const xml = (await readZipText(zip, target.sourcePath)) ?? "";
+    const next = updateSelectedPptxShape(xml, target, (shape) => replaceTextBodyParagraphs(shape, operation.items, operation.spaceBeforeForLevel1ExceptFirst));
+    if (next !== xml)
+        zip.file(target.sourcePath, next);
+    return next !== xml;
+}
+async function editPptxFitContent(zip, operation, objectMap) {
+    const target = singleMatch(objectMap, operation.selector);
+    if (!target.sourcePath || target.kind !== "shape")
+        throw new Error("SELECTOR_NOT_FOUND: selected object is not a PPTX text shape.");
+    const xml = (await readZipText(zip, target.sourcePath)) ?? "";
+    const next = updateSelectedPptxShape(xml, target, (shape) => {
+        return ensurePptxNormAutofit(shape, operation.minFontSize);
+    });
+    if (next !== xml)
+        zip.file(target.sourcePath, next);
+    return next !== xml;
+}
+function ensurePptxNormAutofit(shapeXml, minFontSize) {
+    const autofit = `<a:normAutofit${minFontSize ? ` lnSpcReduction="20000" fontScale="${Math.max(1000, Math.round(minFontSize * 2500))}"` : ""}/>`;
+    const cleaned = shapeXml.replace(/<a:(?:spAutoFit|normAutofit|noAutofit)\b[^>]*\/>/g, "");
+    if (/<a:bodyPr\b[^>]*\/>/.test(cleaned)) {
+        return cleaned.replace(/<a:bodyPr\b([^>]*)\/>/, (_match, attrs) => `<a:bodyPr${attrs}>${autofit}</a:bodyPr>`);
+    }
+    return cleaned.replace(/(<a:bodyPr\b[^>]*>)([\s\S]*?)(<\/a:bodyPr>)/, (_match, open, body, close) => `${open}${body}${autofit}${close}`);
+}
+async function editPptxAlignObjects(zip, operation, objectMap) {
+    const targets = operation.selectors.map((selector) => singleMatch(objectMap, selector)).filter((entry) => entry.bounds);
+    if (targets.length < 2)
+        throw new Error("SELECTOR_NOT_FOUND: pptx.alignObjects requires at least two bounded objects.");
+    const anchor = targets[0]?.bounds;
+    if (!anchor)
+        return false;
+    let changed = false;
+    for (const target of targets.slice(1)) {
+        const bounds = target.bounds;
+        const nextBounds = { ...bounds };
+        if (operation.mode === "left")
+            nextBounds.x = anchor.x;
+        if (operation.mode === "right")
+            nextBounds.x = anchor.x + anchor.width - bounds.width;
+        if (operation.mode === "center")
+            nextBounds.x = anchor.x + (anchor.width - bounds.width) / 2;
+        if (operation.mode === "top")
+            nextBounds.y = anchor.y;
+        if (operation.mode === "bottom")
+            nextBounds.y = anchor.y + anchor.height - bounds.height;
+        if (operation.mode === "middle")
+            nextBounds.y = anchor.y + (anchor.height - bounds.height) / 2;
+        changed = (await setPptxTargetBounds(zip, target, nextBounds)) || changed;
+    }
+    return changed;
+}
+async function editPptxDistributeObjects(zip, operation, objectMap) {
+    const targets = operation.selectors.map((selector) => singleMatch(objectMap, selector)).filter((entry) => entry.bounds)
+        .sort((left, right) => operation.axis === "x" ? left.bounds.x - right.bounds.x : left.bounds.y - right.bounds.y);
+    if (targets.length < 3)
+        throw new Error("SELECTOR_NOT_FOUND: pptx.distributeObjects requires at least three bounded objects.");
+    const first = targets[0].bounds;
+    const last = targets[targets.length - 1].bounds;
+    const start = operation.axis === "x" ? first.x : first.y;
+    const end = operation.axis === "x" ? last.x : last.y;
+    const gap = (end - start) / (targets.length - 1);
+    let changed = false;
+    for (const [index, target] of targets.entries()) {
+        if (index === 0 || index === targets.length - 1)
+            continue;
+        const bounds = { ...target.bounds };
+        if (operation.axis === "x")
+            bounds.x = start + gap * index;
+        else
+            bounds.y = start + gap * index;
+        changed = (await setPptxTargetBounds(zip, target, bounds)) || changed;
+    }
+    return changed;
+}
+async function editPptxSetAltText(zip, operation, objectMap) {
+    const target = singleMatch(objectMap, operation.selector);
+    if (!target.sourcePath || !["shape", "picture", "chart"].includes(target.kind))
+        throw new Error("SELECTOR_NOT_FOUND: selected object cannot receive alt text.");
+    const xml = (await readZipText(zip, target.sourcePath)) ?? "";
+    const next = replacePptxObjectBlock(xml, target.kind, String(target.selectorHints?.shapeId ?? ""), (block) => block.replace(/<p:cNvPr\b([^>]*)\/>/, (_match, attrs) => {
+        let nextAttrs = attrs;
+        if (operation.title !== undefined)
+            nextAttrs = upsertXmlAttr(nextAttrs, "title", operation.title);
+        nextAttrs = upsertXmlAttr(nextAttrs, "descr", operation.decorative ? "" : operation.description ?? operation.title ?? "");
+        return `<p:cNvPr ${nextAttrs}/>`;
+    }));
+    if (next !== xml)
+        zip.file(target.sourcePath, next);
+    return next !== xml;
+}
 async function editPptxParagraphStyle(zip, operation, objectMap) {
     const target = singleMatch(objectMap, operation.selector);
     if (!target?.sourcePath || target.kind !== "shape")
@@ -542,15 +699,38 @@ async function editPptxUpdateChartData(zip, operation, objectMap) {
 }
 async function editPptxSetBounds(zip, operation, objectMap) {
     const target = singleMatch(objectMap, operation.selector);
+    return setPptxTargetBounds(zip, target, operation.bounds);
+}
+async function setPptxTargetBounds(zip, target, bounds) {
     if (!target.sourcePath || !["shape", "picture", "chart"].includes(target.kind)) {
         throw new Error("SELECTOR_NOT_FOUND: selected object is not a PPTX shape, picture, or chart.");
     }
     const xml = (await readZipText(zip, target.sourcePath)) ?? "";
     const shapeId = String(target.selectorHints?.shapeId ?? "");
-    const next = replacePptxObjectBlock(xml, target.kind, shapeId, (block) => setBlockBounds(block, operation.bounds));
+    const next = replacePptxObjectBlock(xml, target.kind, shapeId, (block) => setBlockBounds(block, bounds));
     if (next !== xml)
         zip.file(target.sourcePath, next);
     return next !== xml;
+}
+async function editPptxSetSpeakerNotes(zip, operation) {
+    const slidePaths = await getSlidePaths(zip);
+    const slidePath = slidePaths[operation.slide - 1];
+    if (!slidePath)
+        throw new Error(`SELECTOR_NOT_FOUND: pptx slide ${operation.slide} not found.`);
+    const notesPath = `ppt/notesSlides/notesSlide${operation.slide}.xml`;
+    const existing = await readZipText(zip, notesPath);
+    const text = operation.mode === "append" && existing
+        ? `${extractNotesText(existing)}\n${operation.text}`.trim()
+        : operation.text;
+    zip.file(notesPath, notesSlideXml(text));
+    await ensureContentTypeOverride(zip, `/${notesPath}`, "application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml");
+    const relsPath = slidePath.replace(/^ppt\/slides\//, "ppt/slides/_rels/") + ".rels";
+    const relsXml = (await readZipText(zip, relsPath)) ?? '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>';
+    if (!/\/notesSlide"/.test(relsXml) && !relsXml.includes(`../notesSlides/notesSlide${operation.slide}.xml`)) {
+        const rId = nextRelationshipId(relsXml);
+        zip.file(relsPath, relsXml.replace(/<\/Relationships>\s*$/, `<Relationship Id="${rId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide" Target="../notesSlides/notesSlide${operation.slide}.xml"/></Relationships>`));
+    }
+    return true;
 }
 async function editDocxInsertParagraph(zip, operation, objectMap) {
     const target = singleMatch(objectMap, operation.selector);
@@ -648,6 +828,37 @@ async function editDocxApplyStyle(zip, operation, objectMap) {
         zip.file(target.sourcePath, next.xml);
     return next.changed;
 }
+async function editDocxReplaceTextSmartSelected(zip, operation, objectMap) {
+    const target = singleMatch(objectMap, operation.selector);
+    if (!target.sourcePath)
+        throw new Error("SELECTOR_NOT_FOUND: selected DOCX object has no sourcePath.");
+    const xml = (await readZipText(zip, target.sourcePath)) ?? "";
+    const ordinal = Number(target.selectorHints?.paragraph ?? stableOrdinal(target.stableObjectId));
+    const next = replaceNthParagraph(xml, ordinal, (paragraph) => smartReplaceDocxParagraph(paragraph, operation.from, operation.to));
+    if (next.changed)
+        zip.file(target.sourcePath, next.xml);
+    return next.changed;
+}
+async function editDocxSetTableCellText(zip, operation, objectMap) {
+    const target = singleMatch(objectMap, operation.selector);
+    if (!target.sourcePath || target.kind !== "tableCell")
+        throw new Error("SELECTOR_NOT_FOUND: selected object is not a DOCX table cell.");
+    const xml = (await readZipText(zip, target.sourcePath)) ?? "";
+    const cellOrdinal = Number(target.selectorHints?.cell ?? stableOrdinal(target.stableObjectId));
+    let index = 0;
+    let changed = false;
+    const next = xml.replace(/<w:tc\b[\s\S]*?<\/w:tc>/g, (cell) => {
+        index += 1;
+        if (index !== cellOrdinal)
+            return cell;
+        const replaced = setFirstTextInBlock(cell, "w:t", operation.text);
+        changed = replaced !== cell;
+        return replaced;
+    });
+    if (changed)
+        zip.file(target.sourcePath, next);
+    return changed;
+}
 async function editDocxStyle(zip, operation) {
     const path = "word/styles.xml";
     const styles = (await readZipText(zip, path)) ?? '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"></w:styles>';
@@ -669,6 +880,22 @@ function buildDocxStyleXml(operation) {
         operation.bold ? "<w:b/>" : ""
     ].join("");
     return `<w:style w:type="paragraph" w:styleId="${styleId}"><w:name w:val="${styleId}"/>${runProps ? `<w:rPr>${runProps}</w:rPr>` : ""}</w:style>`;
+}
+function smartReplaceDocxParagraph(paragraph, from, to) {
+    if (!from)
+        return paragraph;
+    const textRuns = [...paragraph.matchAll(/<w:t\b[^>]*>[\s\S]*?<\/w:t>/g)];
+    const joined = textRuns.map((match) => stripXmlTags(match[0])).join("");
+    if (!joined.includes(from))
+        return paragraph;
+    const replaced = joined.split(from).join(to);
+    let used = false;
+    return paragraph.replace(/<w:t\b([^>]*)>[\s\S]*?<\/w:t>/g, (_match, attrs) => {
+        if (used)
+            return `<w:t${attrs}></w:t>`;
+        used = true;
+        return `<w:t${attrs}>${escapeXmlText(replaced)}</w:t>`;
+    });
 }
 async function editXlsxSetCell(zip, sheet, ref, value) {
     if (!ref)
@@ -697,6 +924,7 @@ async function editXlsxSetRange(zip, sheet, startCell, values) {
 async function editXlsxSetFormula(zip, sheet, ref, formula) {
     if (!ref)
         throw new Error("SELECTOR_NOT_FOUND: xlsx cell ref is required.");
+    assertSafeXlsxFormula(formula);
     const path = sheetPath(sheet);
     const xml = (await readZipText(zip, path)) ?? "";
     const cellXml = `<c r="${escapeXmlText(ref)}"><f>${escapeXmlText(formula.replace(/^=/, ""))}</f></c>`;
@@ -708,9 +936,61 @@ async function editXlsxSetFormula(zip, sheet, ref, formula) {
         : rowPattern.test(xml)
             ? xml.replace(rowPattern, (row) => row.replace(/<\/row>$/, `${cellXml}</row>`))
             : xml.replace(/<\/sheetData>/, `<row r="${rowNo}">${cellXml}</row></sheetData>`);
+    if (next !== xml) {
+        zip.file(path, next);
+        await markXlsxRecalcNeeded(zip);
+    }
+    return next !== xml;
+}
+async function editXlsxDefinedName(zip, operation, mode) {
+    const path = "xl/workbook.xml";
+    const xml = (await readZipText(zip, path)) ?? "";
+    if (!operation.name)
+        throw new Error("SCHEMA_INVALID: defined name requires a non-empty name.");
+    const name = escapeXmlText(operation.name);
+    const tagPattern = new RegExp(`<definedName\\b[^>]*\\bname="${escapeRegExp(operation.name)}"[^>]*>[\\s\\S]*?<\\/definedName>`, "g");
+    let next = xml.replace(tagPattern, "");
+    if (mode === "set") {
+        const ref = escapeXmlText(operation.ref ?? "");
+        if (!ref)
+            throw new Error("SCHEMA_INVALID: xlsx.definedName.set requires ref.");
+        const definedName = `<definedName name="${name}">${ref}</definedName>`;
+        if (/<definedNames\b[\s\S]*?<\/definedNames>/.test(next))
+            next = next.replace(/<\/definedNames>/, `${definedName}</definedNames>`);
+        else
+            next = next.replace(/<\/workbook>/, `<definedNames>${definedName}</definedNames></workbook>`);
+    }
     if (next !== xml)
         zip.file(path, next);
     return next !== xml;
+}
+function assertSafeXlsxFormula(formula) {
+    const normalized = formula.replace(/^=/, "").toUpperCase();
+    const forbidden = [
+        /\[[^\]]+\]/,
+        /\bWEBSERVICE\s*\(/,
+        /\bHYPERLINK\s*\(/,
+        /\bRTD\s*\(/,
+        /\bDDE\s*\(/,
+        /\bINDIRECT\s*\(/,
+        /\bNOW\s*\(/,
+        /\bRAND(?:BETWEEN)?\s*\(/
+    ];
+    if (forbidden.some((pattern) => pattern.test(normalized))) {
+        throw new Error("SCHEMA_INVALID: xlsx.setFormula strict safety blocks external, volatile, indirection, and link-capable formulas.");
+    }
+}
+async function markXlsxRecalcNeeded(zip) {
+    const workbookPath = "xl/workbook.xml";
+    const workbook = (await readZipText(zip, workbookPath)) ?? "";
+    if (workbook) {
+        const next = /<calcPr\b[^>]*\/>/.test(workbook)
+            ? workbook.replace(/<calcPr\b([^>]*)\/>/, (_match, attrs) => `<calcPr${upsertXmlAttr(upsertXmlAttr(attrs, "fullCalcOnLoad", "1"), "forceFullCalc", "1")}/>`)
+            : workbook.replace(/<\/workbook>/, '<calcPr fullCalcOnLoad="1" forceFullCalc="1"/></workbook>');
+        if (next !== workbook)
+            zip.file(workbookPath, next);
+    }
+    zip.remove("xl/calcChain.xml");
 }
 function updatePictureCrop(slideXml, target, pictureIndex, fit, crop, replacement, mediaType) {
     const shapeId = String(target.selectorHints?.shapeId ?? "");
@@ -872,6 +1152,20 @@ function upsertXmlAttr(attrs, name, value) {
     const pattern = new RegExp(`(?:^|\\s)${escaped}="[^"]*"`);
     const attr = `${name}="${escapeXmlText(value)}"`;
     return pattern.test(attrs) ? attrs.replace(pattern, ` ${attr}`).trim() : `${attrs.trim()} ${attr}`.trim();
+}
+function notesSlideXml(text) {
+    return [
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+        '<p:notes xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">',
+        '<p:cSld><p:spTree>',
+        '<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>',
+        '<p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr>',
+        `<p:sp><p:nvSpPr><p:cNvPr id="2" name="Notes Placeholder"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:txBody><a:bodyPr/><a:lstStyle/>${text.split(/\r?\n/).map((line) => `<a:p><a:r><a:t>${escapeXmlText(line)}</a:t></a:r></a:p>`).join("")}</p:txBody></p:sp>`,
+        '</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:notes>'
+    ].join("");
+}
+function extractNotesText(xml) {
+    return [...xml.matchAll(/<a:t\b[^>]*>([\s\S]*?)<\/a:t>/g)].map((match) => match[1] ?? "").join("\n");
 }
 function setBlockBounds(block, bounds) {
     const off = `<a:off x="${pxToEmu(bounds.x)}" y="${pxToEmu(bounds.y)}"/>`;
@@ -1257,17 +1551,19 @@ function replaceShapeText(xml, ordinal, text) {
     });
     return { changed, xml: next };
 }
-function validationFailures(selectorResult) {
+function validationFailures(selectorResult, minSelectorConfidence = 0) {
     return (selectorResult?.resolutions ?? [])
-        .filter((resolution) => resolution.reason === "not-found" || resolution.reason === "ambiguous")
+        .filter((resolution) => resolution.reason === "not-found" || resolution.reason === "ambiguous" || resolution.reason === "low-confidence" || ((resolution.confidence ?? 1) < minSelectorConfidence))
         .map((resolution) => ({
         operationIndex: resolution.operationIndex,
         op: "selector",
         applied: false,
-        reason: resolution.reason === "ambiguous" ? "ambiguous" : "not-found",
+        reason: resolution.reason === "ambiguous" ? "ambiguous" : resolution.reason === "not-found" ? "not-found" : "low-confidence",
         message: resolution.reason === "ambiguous"
             ? `SELECTOR_AMBIGUOUS: selector matched ${resolution.matchCount} objects.`
-            : "SELECTOR_NOT_FOUND: selector matched no objects."
+            : resolution.reason === "not-found"
+                ? "SELECTOR_NOT_FOUND: selector matched no objects."
+                : `SELECTOR_LOW_CONFIDENCE: selector confidence ${resolution.confidence ?? 0} is below required ${minSelectorConfidence}.`
     }));
 }
 function stalePlanFailures(selectorResult, options, operations) {
@@ -1387,6 +1683,32 @@ function resolveMatches(objectMap, selector) {
         candidates = candidates.filter((entry) => String(entry.selectorHints?.shapeId ?? "") === selector.shapeId);
     if (selector.shapeName)
         candidates = candidates.filter((entry) => entry.label === selector.shapeName || entry.selectorHints?.shapeName === selector.shapeName || entry.selectorHints?.name === selector.shapeName);
+    if (selector.sourcePath)
+        candidates = candidates.filter((entry) => entry.sourcePath === selector.sourcePath || entry.selectorHints?.sourcePath === selector.sourcePath);
+    if (selector.xmlPath)
+        candidates = candidates.filter((entry) => entry.xmlPath === selector.xmlPath || entry.selectorHints?.xmlPath === selector.xmlPath);
+    if (selector.page !== undefined)
+        candidates = candidates.filter((entry) => Number(entry.selectorHints?.page ?? entry.selectorHints?.slide ?? entry.selectorHints?.sheet) === selector.page);
+    if (selector.story)
+        candidates = candidates.filter((entry) => entry.selectorHints?.story === selector.story || entry.selectorHints?.partKind === selector.story);
+    if (selector.paragraph !== undefined)
+        candidates = candidates.filter((entry) => Number(entry.selectorHints?.paragraph) === selector.paragraph);
+    if (selector.table !== undefined)
+        candidates = candidates.filter((entry) => Number(entry.selectorHints?.table ?? entry.selectorHints?.tableIndex) === selector.table);
+    if (selector.row !== undefined)
+        candidates = candidates.filter((entry) => Number(entry.selectorHints?.row) === selector.row);
+    if (selector.column !== undefined)
+        candidates = candidates.filter((entry) => Number(entry.selectorHints?.column) === selector.column);
+    if (selector.range)
+        candidates = candidates.filter((entry) => String(entry.selectorHints?.range ?? entry.selectorHints?.ref ?? "") === selector.range);
+    if (selector.relationshipId)
+        candidates = candidates.filter((entry) => entry.selectorHints?.relationshipId === selector.relationshipId || entry.media?.relationshipId === selector.relationshipId);
+    if (selector.assetPath)
+        candidates = candidates.filter((entry) => entry.selectorHints?.assetPath === selector.assetPath || entry.media?.assetPath === selector.assetPath);
+    if (selector.commentId)
+        candidates = candidates.filter((entry) => String(entry.selectorHints?.commentId ?? "") === selector.commentId);
+    if (selector.revisionId)
+        candidates = candidates.filter((entry) => String(entry.selectorHints?.revisionId ?? "") === selector.revisionId);
     const placeholderKey = selector.placeholderKey ?? selector.placeholder;
     if (placeholderKey)
         candidates = candidates.filter((entry) => entry.selectorHints?.placeholderKey === placeholderKey || entry.selectorHints?.placeholder === placeholderKey);
@@ -1593,7 +1915,23 @@ function columnName(index) {
 function rowFromRef(ref) {
     return Number(/\d+/.exec(ref)?.[0] ?? 1);
 }
-async function editPdf(input, operations, options) {
+async function editPdf(input, operations, options, selectorResult) {
+    const staleErrors = stalePlanFailures(selectorResult, options, operations);
+    if (staleErrors.length) {
+        return {
+            schema: "officegen.edit.result@1.2",
+            format: "pdf",
+            dryRun: options.dryRun,
+            inputSha256: selectorResult?.inputSha256,
+            objectMapHash: selectorResult?.objectMapHash,
+            changed: false,
+            applied: 0,
+            skipped: operations.length,
+            opResults: staleErrors,
+            errors: staleErrors,
+            caveats: ["EDIT_STALE_PLAN: expected input or object map hash does not match the current PDF."]
+        };
+    }
     const pdf = await PDFDocument.load(input.bytes, { ignoreEncryption: true });
     const fontSet = await embedPdfFonts(pdf, operations.map((op) => "text" in op ? String(op.text) : ""));
     const font = fontSet.font;
@@ -1647,6 +1985,9 @@ async function editPdf(input, operations, options) {
     return {
         schema: "officegen.edit.result@1.2",
         format: "pdf",
+        dryRun: options.dryRun,
+        inputSha256: selectorResult?.inputSha256,
+        objectMapHash: selectorResult?.objectMapHash,
         changed: applied > 0,
         applied,
         skipped,

@@ -1,5 +1,6 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import {
   appendTrace,
   createRunFolder,
@@ -467,7 +468,7 @@ export function errorLookup(code: string | undefined): unknown {
 
 function supportedFormatsForFeature(feature: FeatureKey): string[] {
   if (feature === "inspect" || feature === "view" || feature === "diagnose" || feature === "verify") return ["pptx", "docx", "xlsx", "pdf"];
-  if (feature === "manifest" || feature === "select" || feature === "plan" || feature === "rollback" || feature === "lock") return ["pptx", "docx", "xlsx", "pdf", "json"];
+  if (feature === "prepare" || feature === "manifest" || feature === "select" || feature === "plan" || feature === "rollback" || feature === "lock") return ["pptx", "docx", "xlsx", "pdf", "json"];
   if (feature === "merge") return ["pdf"];
   if (feature === "critique" || feature === "improve") return ["pptx", "docx", "xlsx"];
   if (feature === "benchmark") return ["json", "pptx", "docx", "xlsx", "pdf"];
@@ -606,14 +607,21 @@ async function writeViewArtifacts(context: RuntimeContext, outDir: string, resul
     const filePath = path.join(outDir, fileName);
     await writeGeneratedText(context, filePath, page.content);
     const dimensions = viewPageDimensions(page.content);
+    const pageSha256 = await sha256File(filePath).catch(() => undefined);
     pageRecords.push({
+      artifactId: `view-page-${String(page.page).padStart(3, "0")}`,
+      role: "page-preview",
       page: page.page,
       stableObjectId: page.stableObjectId,
       path: filePath,
       fileName,
       format: page.format,
+      sha256: pageSha256,
       width: dimensions.width,
       height: dimensions.height,
+      renderer: result.fidelity === "approximate" ? "officegen-approximate-svg-html" : "native",
+      fidelity: result.fidelity,
+      coordinateSystem: "px",
       objectMapEntries: page.objectMap.length
     });
   }
@@ -630,6 +638,7 @@ async function writeViewArtifacts(context: RuntimeContext, outDir: string, resul
     generatedAt: result.trusted.generatedAt,
     pages: pageRecords,
     objectMapPath,
+    objectMapHash: sha256Json(result.objectMap),
     contactSheetPath,
     caveats: result.caveats
   };
@@ -713,7 +722,7 @@ export async function editPayload(context: RuntimeContext): Promise<unknown> {
   const inputPath = await validateInputPath(context, input);
   const dryRun = hasFlag(context.argv, "--dry-run");
   const out = dryRun ? optionValue(context.argv, "--out") : await validatedOutOption(context);
-  await assertMutationLock(context, inputPath);
+  await assertMutationLock(context, inputPath, operations);
   if (!dryRun) await assertSafeOoxmlMutationInput(inputPath, "edit");
   const result = await edit(inputPath, operations, withFormatConfig(context, {
     out,
@@ -724,12 +733,17 @@ export async function editPayload(context: RuntimeContext): Promise<unknown> {
     continueOnError: booleanOption(editOptions, "continueOnError"),
     idempotencyKey: typeof editOptions.idempotencyKey === "string" ? editOptions.idempotencyKey : undefined,
     expectedInputSha256: typeof editOptions.expectedInputSha256 === "string" ? editOptions.expectedInputSha256 : undefined,
-    expectedObjectMapHash: typeof editOptions.expectedObjectMapHash === "string" ? editOptions.expectedObjectMapHash : undefined
+    expectedObjectMapHash: typeof editOptions.expectedObjectMapHash === "string" ? editOptions.expectedObjectMapHash : undefined,
+    minSelectorConfidence: typeof editOptions.minSelectorConfidence === "number" ? editOptions.minSelectorConfidence : undefined
   }));
+  const attributedResult = {
+    ...asRecord(result),
+    attribution: editAttribution(context, operations)
+  };
   if (!dryRun && optionValue(context.argv, "--tx-out") && result.changed && out) {
-    await writeEditTransaction(context, optionValue(context.argv, "--tx-out")!, inputPath, out);
+    await writeEditTransaction(context, optionValue(context.argv, "--tx-out")!, inputPath, out, operations);
   }
-  return dryRun ? result : withOutputArtifact(result, out, "edit", inputPath);
+  return dryRun ? attributedResult : withOutputArtifact(attributedResult, out, "edit", inputPath);
 }
 
 async function hydrateEditOperationAssets(context: RuntimeContext, operations: ReturnType<typeof normalizeEditOperations>): Promise<ReturnType<typeof normalizeEditOperations>> {
@@ -747,7 +761,7 @@ async function hydrateEditOperationAssets(context: RuntimeContext, operations: R
   return hydrated as ReturnType<typeof normalizeEditOperations>;
 }
 
-async function assertMutationLock(context: RuntimeContext, inputPath: string): Promise<void> {
+async function assertMutationLock(context: RuntimeContext, inputPath: string, operations: ReturnType<typeof normalizeEditOperations>): Promise<void> {
   const lockPath = optionValue(context.argv, "--lock");
   if (!lockPath) return;
   const lock = asRecord(await readInputJson(context, lockPath));
@@ -756,17 +770,53 @@ async function assertMutationLock(context: RuntimeContext, inputPath: string): P
   const expectedSha = typeof lock.inputSha256 === "string" ? lock.inputSha256 : undefined;
   const actualSha = await sha256File(inputPath);
   const agent = optionValue(context.argv, "--name") ?? "agent";
-  if ((expectedInput && expectedInput !== actualInput) || (expectedSha && expectedSha !== actualSha) || (lock.agent && lock.agent !== agent)) {
+  const lockFailures = mutationLockFailures(String(lock.scope ?? "document"), operations);
+  if ((expectedInput && expectedInput !== actualInput) || (expectedSha && expectedSha !== actualSha) || (lock.agent && lock.agent !== agent) || lockFailures.length) {
     throw new CliFailure({
       code: "EDIT_TRANSACTION_FAILED",
       command: commandFromArgv(context.argv),
       message: "Mutation lock does not match the requested input, hash, or agent.",
-      details: { lockPath, expectedInput, actualInput, expectedSha, actualSha, expectedAgent: lock.agent, agent }
+      details: { lockPath, expectedInput, actualInput, expectedSha, actualSha, expectedAgent: lock.agent, agent, scope: lock.scope, lockFailures }
     }, 3);
   }
 }
 
-async function writeEditTransaction(context: RuntimeContext, txOut: string, inputPath: string, outputPath: string): Promise<void> {
+function mutationLockFailures(scope: string, operations: ReturnType<typeof normalizeEditOperations>): string[] {
+  if (!scope || scope === "document") return [];
+  return operations
+    .map((operation, index) => operationTouchesScope(asRecord(operation), scope) ? undefined : `operation ${index} does not prove it is inside lock scope ${scope}`)
+    .filter((item): item is string => Boolean(item));
+}
+
+function operationTouchesScope(operation: Record<string, unknown>, scope: string): boolean {
+  const [kind, rawValue] = scope.split(":", 2);
+  const value = rawValue ?? "";
+  const selector = asRecord(operation.selector);
+  if (kind === "slide") {
+    const slide = Number(operation.slide ?? selector.slide ?? asRecord(selector.nearestTo).slide ?? asRecord(selector.nthBodyShape).slide);
+    return Number(value) === slide;
+  }
+  if (kind === "sheet") {
+    const sheet = String(operation.sheet ?? selector.sheetName ?? selector.sheet ?? "").toLowerCase();
+    return sheet === value.toLowerCase() || sheet === String(Number(value));
+  }
+  if (kind === "paragraph") return Number(selector.paragraph) === Number(value);
+  if (kind === "range") return String(selector.range ?? operation.range ?? "").toUpperCase() === value.toUpperCase();
+  if (kind === "stableObjectId") return selector.stableObjectId === value;
+  return false;
+}
+
+function editAttribution(context: RuntimeContext, operations: ReturnType<typeof normalizeEditOperations>): Record<string, unknown> {
+  return {
+    agent: optionValue(context.argv, "--name") ?? process.env.OFFICEGEN_AGENT_NAME ?? "agent",
+    command: commandFromArgv(context.argv),
+    operationCount: operations.length,
+    opsSha256: sha256Json(operations),
+    lockPath: optionValue(context.argv, "--lock")
+  };
+}
+
+async function writeEditTransaction(context: RuntimeContext, txOut: string, inputPath: string, outputPath: string, operations: ReturnType<typeof normalizeEditOperations>): Promise<void> {
   const txPath = await validateOutputPath(context, txOut);
   const backupDir = path.join(context.cwd, ".officegen", "transactions");
   await fs.mkdir(backupDir, { recursive: true });
@@ -779,11 +829,15 @@ async function writeEditTransaction(context: RuntimeContext, txOut: string, inpu
     backupPath,
     inputSha256: await sha256File(inputPath),
     outputSha256: await sha256File(outputPath).catch(() => undefined),
+    attribution: editAttribution(context, operations),
+    lockPath: optionValue(context.argv, "--lock"),
+    scope: optionValue(context.argv, "--scope"),
     createdAt: new Date().toISOString(),
     rollbackCommand: `officegen rollback --tx ${quoteCommandValue(txPath)} --out ${quoteCommandValue(inputPath)} --json`
   };
   await fs.mkdir(path.dirname(txPath), { recursive: true });
   await fs.writeFile(txPath, `${JSON.stringify(tx, null, 2)}\n`, "utf8");
+  await fs.appendFile(path.join(backupDir, "history.jsonl"), `${JSON.stringify(tx)}\n`, "utf8");
 }
 
 function editOpsValidationPayload(raw: unknown, operations: ReturnType<typeof normalizeEditOperations>, input: string): unknown {
@@ -895,50 +949,16 @@ export async function verifyPayload(context: RuntimeContext): Promise<unknown> {
 }
 
 function verifyGatesFromJson(raw: unknown): Record<string, unknown> {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+  const validation = validateSchema("officegen.verify.gates@1.2", raw);
+  if (!validation.ok) {
     throw new CliFailure({
       code: "SCHEMA_INVALID",
       command: "verify",
       message: "verify gates JSON is invalid.",
-      details: { errors: ["gates must be a JSON object"] }
+      details: { schema: "officegen.verify.gates@1.2", errors: validation.errors }
     }, 3);
   }
-  const gates = asRecord(raw);
-  const allowed = new Set(["expectedSlides", "expectedPages", "requiredText", "forbiddenText", "maxWarnings", "requireNoRepairDialog", "maxBlankPages"]);
-  const unknownKeys = Object.keys(gates).filter((key) => !allowed.has(key));
-  const errors = [
-    ...unknownKeys.map((key) => `unknown key: ${key}`),
-    ...integerGateErrors(gates, ["expectedSlides", "expectedPages", "maxWarnings", "maxBlankPages"]),
-    ...stringArrayGateErrors(gates, ["requiredText", "forbiddenText"]),
-    ...booleanGateErrors(gates, ["requireNoRepairDialog"])
-  ];
-  if (errors.length) {
-    throw new CliFailure({
-      code: "SCHEMA_INVALID",
-      command: "verify",
-      message: "verify gates JSON is invalid.",
-      details: { errors }
-    }, 3);
-  }
-  return gates;
-}
-
-function integerGateErrors(gates: Record<string, unknown>, keys: string[]): string[] {
-  return keys
-    .filter((key) => gates[key] !== undefined && (!Number.isInteger(gates[key]) || Number(gates[key]) < 0))
-    .map((key) => `${key} must be a non-negative integer`);
-}
-
-function stringArrayGateErrors(gates: Record<string, unknown>, keys: string[]): string[] {
-  return keys
-    .filter((key) => gates[key] !== undefined && (!Array.isArray(gates[key]) || !(gates[key] as unknown[]).every((item) => typeof item === "string")))
-    .map((key) => `${key} must be an array of strings`);
-}
-
-function booleanGateErrors(gates: Record<string, unknown>, keys: string[]): string[] {
-  return keys
-    .filter((key) => gates[key] !== undefined && typeof gates[key] !== "boolean")
-    .map((key) => `${key} must be a boolean`);
+  return asRecord(raw);
 }
 
 export async function repairPayload(context: RuntimeContext): Promise<unknown> {
@@ -976,7 +996,47 @@ export async function diffPayload(context: RuntimeContext): Promise<unknown> {
       maxPages: numberOption(context, "--max-pages")
     })
   );
+  const out = optionValue(context.argv, "--out");
+  if (out) {
+    const outDir = await validateOutputPath(context, out, { directory: true });
+    await fs.mkdir(outDir, { recursive: true });
+    const resultPath = path.join(outDir, "diff.json");
+    await writeGeneratedJson(context, resultPath, result);
+    const artifacts = [await artifactRecord(resultPath, "diff-report", "json", "diff")];
+    if (hasFlag(context.argv, "--visual")) {
+      const beforePath = await validateInputPath(context, before);
+      const afterPath = await validateInputPath(context, after);
+      const [beforeView, afterView] = await Promise.all([
+        view(beforePath, withFormatConfig(context, { format: "svg" as const, maxPages: numberOption(context, "--max-pages") })),
+        view(afterPath, withFormatConfig(context, { format: "svg" as const, maxPages: numberOption(context, "--max-pages") }))
+      ]);
+      artifacts.push(
+        ...await writeViewArtifacts(context, path.join(outDir, "before"), beforeView, "diff"),
+        ...await writeViewArtifacts(context, path.join(outDir, "after"), afterView, "diff")
+      );
+    }
+    const manifestPath = path.join(outDir, "manifest.json");
+    await writeGeneratedJson(context, manifestPath, {
+      schema: "officegen.diff.artifacts@1.2",
+      generatedAt: new Date().toISOString(),
+      before,
+      after,
+      visual: hasFlag(context.argv, "--visual"),
+      resultPath,
+      artifacts
+    });
+    artifacts.push(await artifactRecord(manifestPath, "diff-manifest", "json", "diff"));
+    return maybeWriteReport(context, { ...asRecord(result), out: outDir, artifacts }, "diff");
+  }
   return maybeWriteReport(context, result, "diff");
+}
+
+function sha256Json(value: unknown): string {
+  return `sha256:${createHash("sha256").update(JSON.stringify(value)).digest("hex")}`;
+}
+
+export async function preparePayload(context: RuntimeContext): Promise<unknown> {
+  return prepareReferencePayload(context);
 }
 
 export async function manifestPayload(context: RuntimeContext, subcommand?: string): Promise<unknown> {
@@ -998,7 +1058,7 @@ export async function manifestPayload(context: RuntimeContext, subcommand?: stri
       checks.push({
         ...record,
         expectedSha256: expectedSha,
-        sha256Matches: expectedSha ? record.sha256 === expectedSha || `sha256:${record.sha256}` === expectedSha : undefined
+        sha256Matches: expectedSha ? String(record.sha256) === expectedSha || String(record.sha256).replace(/^sha256:/, "") === expectedSha.replace(/^sha256:/, "") : undefined
       });
     }
     const failed = checks.filter((check) => !check.exists || check.sha256Matches === false);
@@ -1019,22 +1079,32 @@ export async function manifestPayload(context: RuntimeContext, subcommand?: stri
     view(inputPath, withFormatConfig(context, { format: "svg" as const, maxPages: numberOption(context, "--max-pages") }))
   ]);
   const out = optionValue(context.argv, "--out");
+  const outPath = out ? await validateOutputPath(context, out) : undefined;
+  const artifactDir = outPath ? path.join(path.dirname(outPath), `${path.basename(outPath, path.extname(outPath))}-artifacts`) : undefined;
+  const artifacts = artifactDir ? await writeViewArtifacts(context, artifactDir, viewed, "manifest") : [];
+  const objectMapArtifact = artifactDir ? await artifactRecord(path.join(artifactDir, "object-map.json"), "object-map", "json", "manifest", inputPath) : undefined;
+  const sourceArtifact = await artifactRecord(inputPath, "source", inspected.trusted.format, "manifest", inputPath);
   const manifest = {
     schema: "officegen.artifact.manifest@1.2",
     source: {
       path: inputPath,
       format: inspected.trusted.format,
-      sha256: await sha256File(inputPath)
+      sha256: `sha256:${await sha256File(inputPath)}`
     },
     renderer: "officegen-approximate-svg-html",
     generatedAt: new Date().toISOString(),
     summary: inspected.trusted.summary,
     pageCount: viewed.pages.length,
     objectMapEntries: inspected.objectMap.length,
+    objectMapHash: sha256Json(inspected.objectMap),
+    artifacts: [
+      sourceArtifact,
+      ...artifacts,
+      ...(objectMapArtifact ? [objectMapArtifact] : [])
+    ],
     warnings: inspected.trusted.caveats,
     commandHistory: [commandFromArgv(context.argv)]
   };
-  const outPath = out ? await validateOutputPath(context, out) : undefined;
   if (outPath) await writeGeneratedJson(context, outPath, manifest);
   return maybeWriteReport(context, { ...manifest, out: outPath }, "manifest");
 }
@@ -1787,6 +1857,7 @@ async function prepareReferencePayload(context: RuntimeContext): Promise<unknown
   const capabilitiesPath = path.join(outDir, "capabilities.json");
   const editOpsSchemaPath = path.join(outDir, "edit-ops.schema.json");
   const combinedObjectMapPath = path.join(outDir, "object-map.json");
+  const gatesPath = path.join(outDir, "gates.json");
   await writeGeneratedJson(context, referenceInspectPath, referenceInspect);
   await writeGeneratedJson(context, targetInspectPath, targetInspect);
   await writeGeneratedJson(context, capabilitiesPath, capabilitiesPayload(context));
@@ -1795,6 +1866,11 @@ async function prepareReferencePayload(context: RuntimeContext): Promise<unknown
     schema: "officegen.prepare-reference.object-map@1.2",
     reference: referenceInspect.objectMap,
     target: targetInspect.objectMap
+  });
+  await writeGeneratedJson(context, gatesPath, {
+    expectedPages: totalPageLikeCount(targetInspect) || undefined,
+    maxWarnings: 20,
+    maxBlankPages: 0
   });
 
   const manifest = {
@@ -1823,6 +1899,7 @@ async function prepareReferencePayload(context: RuntimeContext): Promise<unknown
     capabilities: capabilitiesPath,
     editOpsSchema: editOpsSchemaPath,
     objectMap: combinedObjectMapPath,
+    gates: gatesPath,
     recommendedWorkflow: [
       `officegen edit ${quoteCommandValue(targetPath)} --ops ${quoteCommandValue(path.join(outDir, "ops.json"))} --dry-run --resolve-selectors --agent --json`,
       `officegen edit ${quoteCommandValue(targetPath)} --ops ${quoteCommandValue(path.join(outDir, "ops.json"))} --out ${quoteCommandValue(path.join(outDir, `edited.${targetInspect.trusted.format}`))} --json`,
@@ -1842,6 +1919,7 @@ async function prepareReferencePayload(context: RuntimeContext): Promise<unknown
     await artifactRecord(capabilitiesPath, "capabilities", "json", "run prepare-reference"),
     await artifactRecord(editOpsSchemaPath, "schema", "json", "run prepare-reference"),
     await artifactRecord(combinedObjectMapPath, "object-map", "json", "run prepare-reference"),
+    await artifactRecord(gatesPath, "verify-gates", "json", "run prepare-reference"),
     ...referenceArtifacts,
     ...targetArtifacts
   ];
@@ -2174,10 +2252,26 @@ async function artifactRecord(filePath: string, kind: string, format: string, cr
   try {
     const stats = await fs.stat(filePath);
     const sha256 = stats.isFile() ? await sha256File(filePath).catch(() => undefined) : undefined;
-    return { path: filePath, exists: true, bytes: stats.size, sha256, kind, format, createdByCommand, input };
+    return {
+      artifactId: artifactIdFor(filePath, kind),
+      role: kind,
+      path: filePath,
+      exists: true,
+      bytes: stats.size,
+      sha256: sha256 ? `sha256:${sha256}` : undefined,
+      kind,
+      format,
+      createdByCommand,
+      input,
+      createdByAgent: process.env.OFFICEGEN_AGENT_NAME
+    };
   } catch {
-    return { path: filePath, exists: false, kind, format, createdByCommand, input, reason: "artifact does not exist" };
+    return { artifactId: artifactIdFor(filePath, kind), role: kind, path: filePath, exists: false, kind, format, createdByCommand, input, reason: "artifact does not exist" };
   }
+}
+
+function artifactIdFor(filePath: string, kind: string): string {
+  return `${kind}:${createHash("sha1").update(path.resolve(filePath)).digest("hex").slice(0, 12)}`;
 }
 
 function inputArtifactForStep(step: Record<string, unknown>): string | undefined {

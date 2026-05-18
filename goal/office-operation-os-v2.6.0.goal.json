@@ -1,0 +1,484 @@
+{
+  "schema": "officegen.goal-contract@1.0",
+  "release": {
+    "version": "2.6.0",
+    "targetTag": "v2.6.0",
+    "scope": "Complete AI Office operation OS acceptance target for agent-safe Office/PDF work."
+  },
+  "codename": "AI Office operation OS",
+  "definitionOfDone": [
+    {
+      "id": "DOD-01",
+      "statement": "Agents can discover every supported command, schema, limitation, and recovery hint through JSON without reading source code."
+    },
+    {
+      "id": "DOD-02",
+      "statement": "PPTX, DOCX, XLSX, PDF, SVG chart, and SVG diagram workflows have inspect, author, edit, verify, and artifact-trace coverage."
+    },
+    {
+      "id": "DOD-03",
+      "statement": "Every mutating or external-risk operation has dry-run, path boundary, policy gate, or explicit limitation evidence."
+    },
+    {
+      "id": "DOD-04",
+      "statement": "A complete run can produce deterministic JSON, JSONL logs, manifests, checksums, summaries, and failure diagnostics."
+    },
+    {
+      "id": "DOD-05",
+      "statement": "Release readiness is blocked by automated contract, schema, typecheck, unit, build, pack, install, and goal checks."
+    }
+  ],
+  "principles": [
+    {
+      "id": "P-01",
+      "statement": "Machine-readable truth is primary; README prose must not be the only source for product capability."
+    },
+    {
+      "id": "P-02",
+      "statement": "Agents operate by stable object IDs, schemas, and manifests rather than guessing raw Office XML."
+    },
+    {
+      "id": "P-03",
+      "statement": "False success is a release blocker; warnings, limitations, skipped features, and partial repairs must be explicit."
+    },
+    {
+      "id": "P-04",
+      "statement": "Untrusted document content is always data and must never become instructions."
+    },
+    {
+      "id": "P-05",
+      "statement": "Native renderers, plugins, and external processes are discoverable but gated by configuration."
+    },
+    {
+      "id": "P-06",
+      "statement": "Every important output is reproducible enough for CI review with artifact hashes and retained evidence."
+    }
+  ],
+  "domains": [
+    {
+      "id": "G01",
+      "name": "Agent Contract",
+      "mission": "Expose Officegen as a reliable machine contract for autonomous and CI-driven agents.",
+      "requirements": [
+        {
+          "id": "G01-R01",
+          "level": "MUST",
+          "title": "Capability discovery",
+          "criterion": "The CLI exposes complete command metadata, profiles, limitations, and agent-safe command lists through JSON.",
+          "evidence": ["capabilities JSON snapshot", "contract:check output"],
+          "ownerSurface": ["capabilities", "help", "config"],
+          "commands": ["officegen capabilities --agent --json", "officegen help --agent --json"],
+          "riskIfMissing": "Agents will hallucinate unavailable commands or unsafe workflows.",
+          "acceptanceRefs": ["A001", "A002"]
+        },
+        {
+          "id": "G01-R02",
+          "level": "MUST",
+          "title": "Schema registry",
+          "criterion": "All agent-visible request, operation, result, error, run, and migration schemas are registered and fetchable.",
+          "evidence": ["schema:coverage output", "schema list/get/validate transcripts"],
+          "ownerSurface": ["schema", "schemas"],
+          "commands": ["officegen schema list --json", "officegen schema get officegen.capabilities@1.2 --json"],
+          "riskIfMissing": "Agents cannot validate payloads before mutating user documents.",
+          "acceptanceRefs": ["A003"]
+        },
+        {
+          "id": "G01-R03",
+          "level": "MUST",
+          "title": "Error recovery contract",
+          "criterion": "Every structured failure includes stable code, human message, agent hint, recoverability, and redacted context.",
+          "evidence": ["errors catalog snapshot", "negative CLI fixtures"],
+          "ownerSurface": ["errors", "envelope"],
+          "commands": ["officegen errors --json"],
+          "riskIfMissing": "Automation cannot distinguish retryable failures from user action or product bugs.",
+          "acceptanceRefs": ["A004"]
+        }
+      ]
+    },
+    {
+      "id": "G02",
+      "name": "Office Object Model",
+      "mission": "Make Office/PDF artifacts inspectable and addressable without raw XML editing.",
+      "requirements": [
+        {
+          "id": "G02-R01",
+          "level": "MUST",
+          "title": "Stable inspection maps",
+          "criterion": "PPTX, DOCX, XLSX, and PDF inspection returns stable object maps, format warnings, and untrusted-content markers.",
+          "evidence": ["format fixture inspect JSON", "untrusted marker assertions"],
+          "ownerSurface": ["inspect"],
+          "commands": ["officegen inspect <file> --depth summary --agent --json"],
+          "riskIfMissing": "Agents cannot safely identify edit targets.",
+          "acceptanceRefs": ["A005"]
+        },
+        {
+          "id": "G02-R02",
+          "level": "MUST",
+          "title": "Preview and view artifacts",
+          "criterion": "View commands generate inspectable preview artifacts and object-map overlays for supported document formats.",
+          "evidence": ["view output directory manifest", "artifact existence and hashes"],
+          "ownerSurface": ["view", "asset"],
+          "commands": ["officegen view <file> --format svg --out <dir> --json"],
+          "riskIfMissing": "Human and vision-assisted review loses document context.",
+          "acceptanceRefs": ["A006"]
+        },
+        {
+          "id": "G02-R03",
+          "level": "SHOULD",
+          "title": "Known limitation reporting",
+          "criterion": "Unsupported Office constructs are reported as warnings or limitations rather than silent omissions.",
+          "evidence": ["complex fixture warning snapshots"],
+          "ownerSurface": ["inspect", "view", "verify"],
+          "commands": ["officegen inspect <complex-file> --agent --json"],
+          "riskIfMissing": "Users may trust incomplete analysis.",
+          "acceptanceRefs": ["A005", "A006"]
+        }
+      ]
+    },
+    {
+      "id": "G03",
+      "name": "Authoring Runtime",
+      "mission": "Create first-class business documents and visual assets from structured IR.",
+      "requirements": [
+        {
+          "id": "G03-R01",
+          "level": "MUST",
+          "title": "Structured render",
+          "criterion": "Structured IR renders PPTX, DOCX, XLSX, and PDF outputs with schema validation and explicit artifact metadata.",
+          "evidence": ["render fixture outputs", "verify output JSON"],
+          "ownerSurface": ["scaffold", "render", "verify"],
+          "commands": ["officegen scaffold --kind <kind> --out <ir> --json", "officegen render <ir> --target <target> --out <file> --json"],
+          "riskIfMissing": "Officegen is only an editor, not an operation OS.",
+          "acceptanceRefs": ["A007"]
+        },
+        {
+          "id": "G03-R02",
+          "level": "MUST",
+          "title": "Charts and diagrams",
+          "criterion": "Chart and diagram commands produce deterministic SVG artifacts from structured inputs with validation errors for invalid input.",
+          "evidence": ["chart SVG", "diagram SVG", "negative validation transcript"],
+          "ownerSurface": ["chart", "diagram"],
+          "commands": ["officegen chart render <spec> --out <svg> --json", "officegen diagram render <spec> --out <svg> --json"],
+          "riskIfMissing": "Agents cannot generate common office visuals without external tooling.",
+          "acceptanceRefs": ["A008"]
+        },
+        {
+          "id": "G03-R03",
+          "level": "SHOULD",
+          "title": "Template and design authoring",
+          "criterion": "Template, design, and layout commands capture reusable design signals and disclose best-effort limits.",
+          "evidence": ["template/design/layout command snapshots"],
+          "ownerSurface": ["template", "design", "layout"],
+          "commands": ["officegen design capture <file> --out <dir> --json"],
+          "riskIfMissing": "Authoring cannot preserve brand and layout intent across documents.",
+          "acceptanceRefs": ["A009"]
+        }
+      ]
+    },
+    {
+      "id": "G04",
+      "name": "Mutation Runtime",
+      "mission": "Apply scoped, reviewable Office/PDF changes with dry-run and selector safety.",
+      "requirements": [
+        {
+          "id": "G04-R01",
+          "level": "MUST",
+          "title": "Dry-run edit planning",
+          "criterion": "Edit operations support dry-run, selector resolution, target counts, and no-output mutation guarantees.",
+          "evidence": ["edit dry-run transcript", "source hash unchanged"],
+          "ownerSurface": ["edit"],
+          "commands": ["officegen edit <file> --ops <ops> --dry-run --resolve-selectors --agent --json"],
+          "riskIfMissing": "Agents may mutate the wrong document object.",
+          "acceptanceRefs": ["A010"]
+        },
+        {
+          "id": "G04-R02",
+          "level": "MUST",
+          "title": "Format edit coverage",
+          "criterion": "PPTX, DOCX, XLSX, and PDF edit fixtures cover representative text, table, chart, image, style, comment, redline, formula, and overlay operations.",
+          "evidence": ["format edit fixtures", "semantic diff output", "verify output"],
+          "ownerSurface": ["edit", "diff", "verify"],
+          "commands": ["officegen edit <file> --ops <ops> --out <file> --json", "officegen diff <before> <after> --json"],
+          "riskIfMissing": "The product cannot claim complete Office operation behavior.",
+          "acceptanceRefs": ["A011"]
+        },
+        {
+          "id": "G04-R03",
+          "level": "MUST",
+          "title": "Asset operations",
+          "criterion": "Embedded assets can be inspected, extracted, replaced, and repaired with path-safe outputs and trust annotations.",
+          "evidence": ["asset inspect/extract/replace transcripts", "sha256 evidence"],
+          "ownerSurface": ["asset"],
+          "commands": ["officegen asset inspect <file> --embedded --agent --json", "officegen asset replace <file> --asset <id> <replacement> --out <file> --json"],
+          "riskIfMissing": "Media-heavy decks and documents remain outside the OS.",
+          "acceptanceRefs": ["A012"]
+        }
+      ]
+    },
+    {
+      "id": "G05",
+      "name": "Verification and Quality",
+      "mission": "Prove that outputs open, preserve intent, and surface quality problems before release or handoff.",
+      "requirements": [
+        {
+          "id": "G05-R01",
+          "level": "MUST",
+          "title": "Verification gates",
+          "criterion": "Verify reports openability, repair risk, warning aggregation, native-renderer availability, and visual mode evidence where enabled.",
+          "evidence": ["verify JSON for clean and damaged fixtures"],
+          "ownerSurface": ["verify", "renderer doctor"],
+          "commands": ["officegen verify <file> --visual --json", "officegen renderer doctor --json"],
+          "riskIfMissing": "Broken documents can be shipped as successful outputs.",
+          "acceptanceRefs": ["A013"]
+        },
+        {
+          "id": "G05-R02",
+          "level": "MUST",
+          "title": "Diagnose repair diff loop",
+          "criterion": "Diagnose, repair, and diff provide actionable issue lists, conservative repair behavior, and semantic or visual change evidence.",
+          "evidence": ["diagnose report", "repair dry-run or output", "diff report"],
+          "ownerSurface": ["diagnose", "repair", "diff"],
+          "commands": ["officegen diagnose <file> --json", "officegen repair <file> --out <file> --json", "officegen diff <a> <b> --visual --json"],
+          "riskIfMissing": "The system cannot close the loop after finding quality issues.",
+          "acceptanceRefs": ["A014"]
+        },
+        {
+          "id": "G05-R03",
+          "level": "SHOULD",
+          "title": "Business critique",
+          "criterion": "Critique and improve commands produce plan-first recommendations with executable skeletons and no hidden mutations.",
+          "evidence": ["critique result", "improve plan result"],
+          "ownerSurface": ["critique", "improve"],
+          "commands": ["officegen critique <file> --json", "officegen improve <file> --plan --json"],
+          "riskIfMissing": "Agents lack a structured quality improvement workflow.",
+          "acceptanceRefs": ["A015"]
+        }
+      ]
+    },
+    {
+      "id": "G06",
+      "name": "Workflow OS",
+      "mission": "Run repeatable multi-step document operations with traceable artifacts and failure summaries.",
+      "requirements": [
+        {
+          "id": "G06-R01",
+          "level": "MUST",
+          "title": "Manifested runs",
+          "criterion": "Workflow runs produce strict JSON, JSONL event logs, manifest entries with exists/bytes/sha256, and a human summary.",
+          "evidence": ["run manifest", "events.jsonl", "summary.md"],
+          "ownerSurface": ["run"],
+          "commands": ["officegen run <workflow.json> --strict-json --log-jsonl <events> --manifest <manifest> --summary <summary> --json"],
+          "riskIfMissing": "CI cannot audit or reproduce agent actions.",
+          "acceptanceRefs": ["A016"]
+        },
+        {
+          "id": "G06-R02",
+          "level": "MUST",
+          "title": "Output-root boundaries",
+          "criterion": "Workflow and artifact-producing commands can deny writes outside the declared output root.",
+          "evidence": ["negative outside-root fixture", "structured failure code"],
+          "ownerSurface": ["run", "paths"],
+          "commands": ["officegen run <workflow.json> --deny-outside-output-root --output-root <dir> --json"],
+          "riskIfMissing": "Automated runs can overwrite unintended user files.",
+          "acceptanceRefs": ["A017"]
+        },
+        {
+          "id": "G06-R03",
+          "level": "SHOULD",
+          "title": "Workflow help",
+          "criterion": "Workflow help explains recommended inspect-edit-export and run-manifest loops in both human and JSON modes.",
+          "evidence": ["help workflow snapshot"],
+          "ownerSurface": ["help"],
+          "commands": ["officegen help workflow inspect-edit-export --agent --json"],
+          "riskIfMissing": "Agents cannot bootstrap reliable multi-step behavior.",
+          "acceptanceRefs": ["A002"]
+        }
+      ]
+    },
+    {
+      "id": "G07",
+      "name": "Safety and Trust",
+      "mission": "Keep document automation safe under untrusted inputs, unsafe archives, external tools, and sensitive content.",
+      "requirements": [
+        {
+          "id": "G07-R01",
+          "level": "MUST",
+          "title": "Untrusted content boundary",
+          "criterion": "Document-derived text, metadata, macros, embedded files, and hyperlinks are marked or handled as untrusted data.",
+          "evidence": ["untrusted fixture snapshots", "asset trust annotations"],
+          "ownerSurface": ["inspect", "asset", "redaction"],
+          "commands": ["officegen inspect <hostile-file> --agent --json"],
+          "riskIfMissing": "Prompt injection or unsafe content can steer agent behavior.",
+          "acceptanceRefs": ["A018"]
+        },
+        {
+          "id": "G07-R02",
+          "level": "MUST",
+          "title": "Archive and path safety",
+          "criterion": "Zip traversal, absolute paths, oversized entries, and output escape attempts are rejected with structured errors.",
+          "evidence": ["zip safety tests", "path boundary tests"],
+          "ownerSurface": ["zipSafety", "paths"],
+          "commands": ["npm test -- zipSafety paths"],
+          "riskIfMissing": "Office files can become filesystem attacks.",
+          "acceptanceRefs": ["A019"]
+        },
+        {
+          "id": "G07-R03",
+          "level": "MUST",
+          "title": "Gated external capabilities",
+          "criterion": "Native renderers, MCP, plugins, and external processes are disabled by default or explicitly policy-gated.",
+          "evidence": ["config profile snapshot", "disabled command transcript", "renderer doctor transcript"],
+          "ownerSurface": ["config", "renderer", "plugin", "mcp"],
+          "commands": ["officegen config --json", "officegen renderer doctor --json"],
+          "riskIfMissing": "A default install can invoke untrusted local integrations.",
+          "acceptanceRefs": ["A020"]
+        },
+        {
+          "id": "G07-R04",
+          "level": "SHOULD",
+          "title": "Redaction discipline",
+          "criterion": "Structured errors and logs redact configured secrets while retaining enough context for debugging.",
+          "evidence": ["redaction unit tests", "negative error fixture"],
+          "ownerSurface": ["redaction", "envelope"],
+          "commands": ["npm test -- redaction"],
+          "riskIfMissing": "CI logs can leak sensitive document or environment data.",
+          "acceptanceRefs": ["A021"]
+        }
+      ]
+    },
+    {
+      "id": "G08",
+      "name": "Release and Packaging",
+      "mission": "Ship a deterministic CLI that installs and reports the intended v2.6.0 release.",
+      "requirements": [
+        {
+          "id": "G08-R01",
+          "level": "MUST",
+          "title": "Version consistency",
+          "criterion": "Root/workspace manifests, lockfile, runtime version constant, README release examples, and tag version are synchronized by the version script.",
+          "evidence": ["version:check output"],
+          "ownerSurface": ["version scripts", "release workflow"],
+          "commands": ["npm run version:check"],
+          "riskIfMissing": "Release artifacts and tags can describe different products.",
+          "acceptanceRefs": ["A022"]
+        },
+        {
+          "id": "G08-R02",
+          "level": "MUST",
+          "title": "Pack and install smoke",
+          "criterion": "The release tarball and GitHub install paths contain runnable dist files, bin entrypoints, and expected version output.",
+          "evidence": ["pack:smoke output", "github install smoke output"],
+          "ownerSurface": ["packaging", "bin"],
+          "commands": ["npm run pack:smoke", "npm run github-install:head-smoke"],
+          "riskIfMissing": "Users cannot install the product that passed local tests.",
+          "acceptanceRefs": ["A023"]
+        },
+        {
+          "id": "G08-R03",
+          "level": "MUST",
+          "title": "Release gate suite",
+          "criterion": "Goal, contract, schema, remediation, typecheck, unit, build, binary, pack, and install smoke checks are green before tag creation.",
+          "evidence": ["release gate transcript"],
+          "ownerSurface": ["scripts", "CI"],
+          "commands": ["npm run goal:check", "npm run contract:check", "npm run schema:coverage", "npm run remediation:check", "npm run typecheck", "npm test", "npm run build", "npm run pack:smoke"],
+          "riskIfMissing": "The release can regress a critical acceptance surface.",
+          "acceptanceRefs": ["A024"]
+        }
+      ]
+    },
+    {
+      "id": "G09",
+      "name": "Evidence and Benchmarking",
+      "mission": "Keep product claims grounded in repeatable fixtures, corpus review, and remediation evidence.",
+      "requirements": [
+        {
+          "id": "G09-R01",
+          "level": "MUST",
+          "title": "Acceptance evidence bundle",
+          "criterion": "Acceptance runs retain command transcripts, JSON outputs, generated artifacts, checksums, and reviewer notes under a stable evidence root.",
+          "evidence": ["evidence directory index", "sha256 list"],
+          "ownerSurface": ["acceptance suite", "run"],
+          "commands": ["officegen run <acceptance-workflow> --manifest <manifest> --summary <summary> --json"],
+          "riskIfMissing": "A release cannot prove what was actually tested.",
+          "acceptanceRefs": ["A025"]
+        },
+        {
+          "id": "G09-R02",
+          "level": "SHOULD",
+          "title": "Corpus benchmark review",
+          "criterion": "Representative Office corpus runs produce benchmark results and comparison reports with known limitations tracked.",
+          "evidence": ["benchmark run result", "benchmark review report"],
+          "ownerSurface": ["benchmark"],
+          "commands": ["npm run benchmark:local-fixtures", "npm run benchmark:review"],
+          "riskIfMissing": "Quality claims only cover toy fixtures.",
+          "acceptanceRefs": ["A026"]
+        },
+        {
+          "id": "G09-R03",
+          "level": "MUST",
+          "title": "Remediation closure",
+          "criterion": "The v2.6.0 remediation matrix classifies review findings with evidence and no undecided draft rows.",
+          "evidence": ["remediation:check output", "v2.6.0 matrix"],
+          "ownerSurface": ["docs/reviews"],
+          "commands": ["npm run remediation:check"],
+          "riskIfMissing": "Known gaps can disappear from release decision-making.",
+          "acceptanceRefs": ["A027"]
+        }
+      ]
+    },
+    {
+      "id": "G10",
+      "name": "User Experience",
+      "mission": "Make the CLI useful to humans while preserving deterministic agent behavior.",
+      "requirements": [
+        {
+          "id": "G10-R01",
+          "level": "MUST",
+          "title": "Human and JSON parity",
+          "criterion": "Important commands support human-readable output and stable JSON/agent mode without losing decision-critical fields.",
+          "evidence": ["paired human/json snapshots"],
+          "ownerSurface": ["cli", "envelope"],
+          "commands": ["officegen <command> --json", "officegen <command> --agent --json"],
+          "riskIfMissing": "The tool is either pleasant for humans or reliable for agents, but not both.",
+          "acceptanceRefs": ["A028"]
+        },
+        {
+          "id": "G10-R02",
+          "level": "SHOULD",
+          "title": "Progressive disclosure",
+          "criterion": "Help, error hints, and workflow guidance lead users from simple commands to advanced safe loops without overwhelming output.",
+          "evidence": ["help snapshots", "error recovery snapshots"],
+          "ownerSurface": ["help", "errors"],
+          "commands": ["officegen help workflow inspect-edit-export --json", "officegen errors --json"],
+          "riskIfMissing": "Users cannot learn the OS without source-code archaeology.",
+          "acceptanceRefs": ["A002", "A004"]
+        },
+        {
+          "id": "G10-R03",
+          "level": "MAY",
+          "title": "Readable summaries",
+          "criterion": "Workflow and quality commands produce concise Markdown summaries suitable for review artifacts.",
+          "evidence": ["summary.md artifacts"],
+          "ownerSurface": ["run", "critique", "improve"],
+          "commands": ["officegen run <workflow.json> --summary <summary.md> --json"],
+          "riskIfMissing": "Release evidence remains machine-only and hard to review.",
+          "acceptanceRefs": ["A016", "A025"]
+        }
+      ]
+    }
+  ],
+  "nonGoals": [
+    "This contract does not require editing package versions or creating the v2.6.0 release tag.",
+    "This contract does not require a full desktop publishing engine or perfect PowerPoint design reconstruction.",
+    "This contract does not allow silent success for unsupported Office features.",
+    "This contract does not require external native renderers to be present on every developer machine."
+  ],
+  "requiredEvidence": [
+    "Goal spec check output from npm run goal:check.",
+    "Contract and schema coverage output from npm run contract:check and npm run schema:coverage.",
+    "Typecheck, unit test, build, binary smoke, pack smoke, and install smoke transcripts.",
+    "Acceptance suite artifacts with JSON outputs, manifests, hashes, and summaries.",
+    "Manual reviewer notes for native-renderer or platform-dependent cases.",
+    "v2.6.0 remediation matrix with each item classified and evidenced."
+  ]
+}

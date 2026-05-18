@@ -4,7 +4,7 @@ import { commandFromArgv, positionalArgs } from "../shared/argv.js";
 import { makeEnvelope, writeResult } from "../shared/envelope.js";
 import { COMMAND_METADATA, metadataFor } from "../shared/metadata.js";
 import { CliFailure } from "../shared/types.js";
-import { agentPayload, assetPayload, capabilitiesPayload, chartPayload, configPayload, designPayload, diagnosePayload, diffPayload, manifestPayload, selectPayload, planPayload, rollbackPayload, lockPayload, mergePayload, critiquePayload, improvePayload, benchmarkPayload, diagramPayload, doctorPayload, editPayload, errorInspectPayload, errorsListPayload, exportPayload, groupPayload, helpPayload, inspectPayload, layoutPayload, mcpPayload, pluginPayload, renderPayload, rendererPayload, repairPayload, runPayload, scaffoldPayload, schemaGetPayload, schemaListPayload, schemaMigratePayload, templatePayload, validatePayload, verifyPayload, viewPayload } from "./payloads.js";
+import { agentPayload, assetPayload, capabilitiesPayload, chartPayload, configPayload, designPayload, diagnosePayload, diffPayload, preparePayload, manifestPayload, selectPayload, planPayload, rollbackPayload, lockPayload, mergePayload, critiquePayload, improvePayload, benchmarkPayload, diagramPayload, doctorPayload, editPayload, errorInspectPayload, errorsListPayload, exportPayload, groupPayload, helpPayload, inspectPayload, layoutPayload, mcpPayload, pluginPayload, renderPayload, rendererPayload, repairPayload, runPayload, scaffoldPayload, schemaGetPayload, schemaListPayload, schemaMigratePayload, templatePayload, validatePayload, verifyPayload, viewPayload } from "./payloads.js";
 const leafPayloads = {
     capabilities: capabilitiesPayload,
     help: (ctx) => helpPayload(ctx, positionalArgs(ctx.argv, 3)),
@@ -20,6 +20,7 @@ const leafPayloads = {
     diagnose: diagnosePayload,
     repair: repairPayload,
     diff: diffPayload,
+    prepare: preparePayload,
     manifest: (ctx) => manifestPayload(ctx),
     select: selectPayload,
     plan: planPayload,
@@ -177,6 +178,8 @@ function usageSuffix(commandGroup, subcommand) {
         return " <input>";
     if (commandGroup === "diff")
         return " <before> <after>";
+    if (commandGroup === "prepare")
+        return " --reference <file> --target <file> --out <dir>";
     if (commandGroup === "render" || commandGroup === "validate")
         return " <input.json>";
     if (commandGroup === "edit")
@@ -214,6 +217,8 @@ function commandExamples(commandGroup, subcommand) {
         return ["officegen render deck.ir.json --target pptx --out deck.pptx --json"];
     if (commandGroup === "diff")
         return ["officegen diff before.pptx after.pptx --visual --json"];
+    if (commandGroup === "prepare")
+        return ["officegen prepare --reference problem.pdf --target deck.pptx --out .officegen/run --json"];
     if (commandGroup === "run")
         return ["officegen run plan.json --manifest .officegen/run-manifest.json --json", "officegen run prepare-reference --reference problem.pdf --target deck.pptx --out .officegen/run --json"];
     if (commandGroup === "verify")
@@ -291,6 +296,15 @@ function commandSpecificHelpOptions(commandGroup, subcommand) {
             "  --summary <path>              write Markdown summary for plan mode",
             "  --output-root <path>          restrict plan outputs to a directory",
             "  --expected-artifacts <path>   expected artifact list for plan mode"
+        ];
+    if (commandGroup === "prepare")
+        return [
+            "  --reference <path>            reference file path",
+            "  --target <path>               target Office/PDF file path",
+            "  --out <dir>                   output directory for prepared artifacts",
+            "  --max-pages <number>          maximum preview pages",
+            "  --output-root <path>          restrict outputs to a directory",
+            "  --deny-outside-output-root    fail outputs outside --output-root"
         ];
     if (commandGroup === "asset" && subcommand === "inspect")
         return [

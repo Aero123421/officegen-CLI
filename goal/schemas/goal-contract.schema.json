@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://officegen.dev/schemas/goal-contract.schema.json",
+  "title": "Officegen Goal Contract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "release", "codename", "definitionOfDone", "principles", "domains", "nonGoals", "requiredEvidence"],
+  "properties": {
+    "schema": { "const": "officegen.goal-contract@1.0" },
+    "release": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "targetTag", "scope"],
+      "properties": {
+        "version": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
+        "targetTag": { "type": "string", "pattern": "^v\\d+\\.\\d+\\.\\d+$" },
+        "scope": { "type": "string", "minLength": 12 }
+      }
+    },
+    "codename": { "type": "string", "minLength": 3 },
+    "definitionOfDone": { "type": "array", "minItems": 5, "items": { "$ref": "#/$defs/criterion" } },
+    "principles": { "type": "array", "minItems": 5, "items": { "$ref": "#/$defs/principle" } },
+    "domains": { "type": "array", "minItems": 8, "items": { "$ref": "#/$defs/domain" } },
+    "nonGoals": { "type": "array", "minItems": 3, "items": { "type": "string", "minLength": 8 } },
+    "requiredEvidence": { "type": "array", "minItems": 5, "items": { "type": "string", "minLength": 8 } }
+  },
+  "$defs": {
+    "criterion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "statement"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^DOD-[0-9]{2}$" },
+        "statement": { "type": "string", "minLength": 12 }
+      }
+    },
+    "principle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "statement"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^P-[0-9]{2}$" },
+        "statement": { "type": "string", "minLength": 12 }
+      }
+    },
+    "domain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "mission", "requirements"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^G[0-9]{2}$" },
+        "name": { "type": "string", "minLength": 3 },
+        "mission": { "type": "string", "minLength": 20 },
+        "requirements": { "type": "array", "minItems": 2, "items": { "$ref": "#/$defs/requirement" } }
+      }
+    },
+    "requirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "level", "title", "criterion", "evidence", "ownerSurface", "acceptanceRefs"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^G[0-9]{2}-R[0-9]{2}$" },
+        "level": { "enum": ["MUST", "SHOULD", "MAY"] },
+        "title": { "type": "string", "minLength": 4 },
+        "criterion": { "type": "string", "minLength": 20 },
+        "evidence": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 6 } },
+        "ownerSurface": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 2 } },
+        "commands": { "type": "array", "items": { "type": "string", "minLength": 2 } },
+        "riskIfMissing": { "type": "string", "minLength": 10 },
+        "acceptanceRefs": { "type": "array", "minItems": 1, "items": { "type": "string", "pattern": "^A[0-9]{3}$" } }
+      }
+    }
+  }
+}
