@@ -89,7 +89,7 @@ const substrateBooleans = {
     layout: true,
     agent: true,
     mcp: false,
-    renderer: false,
+    renderer: true,
     plugin: false
 };
 const authoringBooleans = {

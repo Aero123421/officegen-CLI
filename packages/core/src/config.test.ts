@@ -16,7 +16,8 @@ describe("config and capabilities", () => {
     expect(config.features.design.visibleToAgents).toBe(true);
     expect(capabilities.visibleCommands).toContain("inspect");
     expect(capabilities.visibleCommands).toContain("template candidates");
-    expect(capabilities.disabled).toEqual(expect.arrayContaining(["plugin", "renderer"]));
+    expect(capabilities.visibleCommands).toContain("renderer doctor");
+    expect(capabilities.disabled).toEqual(expect.arrayContaining(["plugin"]));
   });
 
   it("provides authoring and enterprise built-in profiles", () => {

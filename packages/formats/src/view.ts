@@ -1,4 +1,10 @@
+import path from "node:path";
+import { createRequire } from "node:module";
+import { pathToFileURL } from "node:url";
+import { createCanvas } from "@napi-rs/canvas";
+import * as pdfjs from "pdfjs-dist/legacy/build/pdf.mjs";
 import { inspect, type InspectResult } from "./inspect.js";
+import { exportDocument, type ExportMode } from "./export.js";
 import {
   AGENT_UNTRUSTED_INSTRUCTION,
   type InputLike,
@@ -6,26 +12,36 @@ import {
   type ObjectMapEntry,
   escapeHtml,
   escapeXml,
-  makeStableObjectId
+  makeStableObjectId,
+  normalizeInput
 } from "./shared.js";
 
+export type ViewFormat = "svg" | "html" | "png" | "jpeg" | "jpg";
+
 export interface ViewOptions {
-  format?: "svg" | "html";
+  format?: ViewFormat;
   maxPages?: number;
+  dpi?: number;
+  mode?: ExportMode;
+  timeoutMs?: number;
   config?: OfficegenConfig;
 }
 
 export interface ViewPage {
   page: number;
   stableObjectId: string;
-  format: "svg" | "html";
+  format: "svg" | "html" | "png" | "jpeg";
   content: string;
+  bytes?: Uint8Array;
+  width?: number;
+  height?: number;
+  renderer?: string;
   objectMap: ObjectMapEntry[];
 }
 
 export interface ViewResult {
   schema: "officegen.view.result@1.2";
-  fidelity: "approximate";
+  fidelity: "approximate" | "internal" | "native";
   caveats: string[];
   pages: ViewPage[];
   objectMap: ObjectMapEntry[];
@@ -39,6 +55,9 @@ export interface ViewResult {
 
 export async function view(input: InputLike | InspectResult, options: ViewOptions = {}): Promise<ViewResult> {
   const inspected = isInspectResult(input) ? input : await inspect(input, { format: undefined, depth: "shallow", config: options.config });
+  if (isRasterFormat(options.format)) {
+    return rasterView(input, inspected, options);
+  }
   const pages = toPages(inspected, options);
   return {
     schema: "officegen.view.result@1.2",
@@ -65,7 +84,7 @@ function isInspectResult(value: unknown): value is InspectResult {
 }
 
 function toPages(inspected: InspectResult, options: ViewOptions): ViewPage[] {
-  const format = options.format ?? "svg";
+  const format = options.format === "html" ? "html" : "svg";
   const maxPages = options.maxPages ?? 50;
   if (inspected.trusted.format === "pptx") {
     const slides = ((inspected.untrusted.slides as Array<Record<string, unknown>>) ?? []).slice(0, maxPages);
@@ -83,6 +102,128 @@ function toPages(inspected: InspectResult, options: ViewOptions): ViewPage[] {
     const pages = ((inspected.untrusted.pages as Array<Record<string, unknown>>) ?? []).slice(0, pdfMaxPages);
     return pages.map((page, index) => buildPdfPage(page, index + 1, format, inspected.objectMap));
   }
+  return [];
+}
+
+async function rasterView(input: InputLike | InspectResult, inspected: InspectResult, options: ViewOptions): Promise<ViewResult> {
+  const format = normalizeRasterFormat(options.format);
+  const source = isInspectResult(input) ? inspected.trusted.inputPath : input;
+  if (!source) {
+    throw new Error("VIEW_RASTER_SOURCE_REQUIRED: PNG/JPEG view requires an input file path or bytes, not an inspect-only result without inputPath.");
+  }
+  const normalized = await normalizeInput(source as InputLike, inspected.trusted.format);
+  const maxPages = options.maxPages ?? 50;
+  const dpi = options.dpi ?? 144;
+  let pdfBytes: Uint8Array = normalized.bytes;
+  let fidelity: ViewResult["fidelity"] = "internal";
+  let renderer = "officegen-pdfjs-canvas";
+  const caveats = [...inspected.trusted.caveats];
+
+  if (normalized.format !== "pdf") {
+    const exported = await exportDocument(source as InputLike, {
+      to: "pdf",
+      mode: options.mode ?? "native",
+      config: options.config,
+      timeoutMs: options.timeoutMs
+    });
+    if (!exported.bytes) {
+      throw new Error("VIEW_RASTER_EXPORT_EMPTY: native Office-to-PDF export did not return PDF bytes.");
+    }
+    pdfBytes = exported.bytes;
+    fidelity = exported.fidelity === "native" ? "native" : "internal";
+    renderer = exported.renderer?.id ? `${exported.renderer.id}+pdfjs-canvas` : "officegen-office-pdfjs-canvas";
+    caveats.push(...exported.caveats);
+  }
+
+  const rasterPages = await renderPdfToRasterPages(pdfBytes, {
+    format,
+    dpi,
+    maxPages,
+    objectMap: inspected.objectMap,
+    sourceFormat: inspected.trusted.format
+  });
+  return {
+    schema: "officegen.view.result@1.2",
+    fidelity,
+    caveats: [
+      normalized.format === "pdf"
+        ? "PDF pages were rasterized with PDF.js canvas rendering."
+        : "Office pages were converted through the configured native renderer and rasterized with PDF.js canvas rendering.",
+      ...caveats
+    ],
+    pages: rasterPages.map((page) => ({ ...page, renderer })),
+    objectMap: inspected.objectMap,
+    trusted: {
+      sourceSchema: inspected.schema,
+      sourceFormat: inspected.trusted.format,
+      generatedAt: new Date().toISOString()
+    },
+    agentInstruction: AGENT_UNTRUSTED_INSTRUCTION
+  };
+}
+
+function isRasterFormat(format?: ViewFormat): boolean {
+  return format === "png" || format === "jpeg" || format === "jpg";
+}
+
+function normalizeRasterFormat(format?: ViewFormat): "png" | "jpeg" {
+  return format === "jpeg" || format === "jpg" ? "jpeg" : "png";
+}
+
+async function renderPdfToRasterPages(
+  pdfBytes: Uint8Array,
+  options: {
+    format: "png" | "jpeg";
+    dpi: number;
+    maxPages: number;
+    objectMap: ObjectMapEntry[];
+    sourceFormat: string;
+  }
+): Promise<ViewPage[]> {
+  const require = createRequire(import.meta.url);
+  const pdfjsRoot = path.dirname(require.resolve("pdfjs-dist/package.json"));
+  const standardFontDataUrl = pathToFileURL(path.join(pdfjsRoot, "standard_fonts") + path.sep).href;
+  const loadingTask = pdfjs.getDocument({
+    data: new Uint8Array(pdfBytes),
+    disableWorker: true,
+    useSystemFonts: true,
+    standardFontDataUrl
+  } as any);
+  const document = await loadingTask.promise;
+  const pages: ViewPage[] = [];
+  const pageCount = Math.min(document.numPages, options.maxPages);
+  const scale = Math.max(1, options.dpi / 72);
+  for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
+    const page = await document.getPage(pageNumber);
+    const viewport = page.getViewport({ scale });
+    const width = Math.ceil(viewport.width);
+    const height = Math.ceil(viewport.height);
+    const canvas = createCanvas(width, height);
+    const canvasContext = canvas.getContext("2d");
+    await page.render({ canvasContext: canvasContext as any, viewport } as any).promise;
+    const bytes = options.format === "png" ? await canvas.encode("png") : await canvas.encode("jpeg");
+    const objectMap = pageObjectMap(options.objectMap, options.sourceFormat, pageNumber);
+    pages.push({
+      page: pageNumber,
+      stableObjectId: makeStableObjectId(String(options.sourceFormat) as any, "document", "page", pageNumber),
+      format: options.format,
+      content: `data:image/${options.format};base64,${Buffer.from(bytes).toString("base64")}`,
+      bytes: new Uint8Array(bytes),
+      width,
+      height,
+      renderer: "pdfjs-canvas",
+      objectMap
+    });
+  }
+  await document.destroy();
+  return pages;
+}
+
+function pageObjectMap(objectMap: ObjectMapEntry[], sourceFormat: string, page: number): ObjectMapEntry[] {
+  if (sourceFormat === "pptx") return objectMap.filter((entry) => Number(entry.selectorHints?.slide) === page);
+  if (sourceFormat === "xlsx") return objectMap.filter((entry) => Number(entry.selectorHints?.sheet) === page);
+  if (sourceFormat === "pdf") return objectMap.filter((entry) => Number(entry.selectorHints?.page) === page);
+  if (sourceFormat === "docx") return page === 1 ? objectMap : [];
   return [];
 }
 

@@ -103,7 +103,7 @@ const substrateBooleans: Record<FeatureName, boolean> = {
   layout: true,
   agent: true,
   mcp: false,
-  renderer: false,
+  renderer: true,
   plugin: false
 };
 

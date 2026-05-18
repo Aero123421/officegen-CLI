@@ -49,6 +49,9 @@ try {
   })}\n`, "utf8");
   const renderEnvelope = JSON.parse(run(npxOfficegen(prefix), ["render", "deck.ir.json", "--target", "pptx", "--out", "deck.pptx", "--json"], { cwd: smokeDir, capture: true }));
   const inspectEnvelope = JSON.parse(run(npxOfficegen(prefix), ["inspect", "deck.pptx", "--depth", "summary", "--agent", "--json"], { cwd: smokeDir, capture: true }));
+  const pdfEnvelope = JSON.parse(run(npxOfficegen(prefix), ["render", "deck.ir.json", "--target", "pdf", "--out", "deck.pdf", "--json"], { cwd: smokeDir, capture: true }));
+  const viewEnvelope = JSON.parse(run(npxOfficegen(prefix), ["view", "deck.pdf", "--format", "png", "--out", "view-png", "--json"], { cwd: smokeDir, capture: true }));
+  const pngBytes = await readFile(path.join(smokeDir, "view-png", "page-001.png"));
 
   if (version !== manifest.version) {
     throw new Error(`officegen --version (${version}) did not match package version (${manifest.version}).`);
@@ -65,13 +68,22 @@ try {
   if (!inspectEnvelope.ok || inspectEnvelope.result?.trusted?.summary?.slides !== 1) {
     throw new Error("installed CLI could not inspect the PPTX smoke artifact.");
   }
+  if (!pdfEnvelope.ok || pdfEnvelope.result?.target !== "pdf") {
+    throw new Error("installed CLI could not render a PDF smoke artifact.");
+  }
+  if (!viewEnvelope.ok || viewEnvelope.result?.pages?.[0]?.format !== "png") {
+    throw new Error("installed CLI could not render a PDF page PNG view artifact.");
+  }
+  if (pngBytes.subarray(0, 8).join(",") !== "137,80,78,71,13,10,26,10") {
+    throw new Error("installed CLI wrote an invalid PNG page artifact.");
+  }
 
   console.log(JSON.stringify({
     ok: true,
     tarball,
     packageName: manifest.name,
     version,
-    command: "officegen capabilities/render/inspect smoke"
+    command: "officegen capabilities/render/inspect/view-png smoke"
   }, null, 2));
 } finally {
   if (process.platform === "win32" && process.env.CI) {

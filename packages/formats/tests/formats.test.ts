@@ -791,6 +791,19 @@ describe("@officegen/formats MVP", () => {
     expect(viewed.pages).toHaveLength(10);
   });
 
+  it("rasterizes PDF pages to PNG for multimodal view artifacts", async () => {
+    const pdfDoc = await PDFDocument.create();
+    pdfDoc.addPage([200, 100]);
+    const bytes = await pdfDoc.save();
+    const viewed = await view({ data: bytes, format: "pdf" }, { format: "png", dpi: 72 });
+
+    expect(viewed.fidelity).toBe("internal");
+    expect(viewed.pages).toHaveLength(1);
+    expect(viewed.pages[0]?.format).toBe("png");
+    expect(viewed.pages[0]?.width).toBe(200);
+    expect([...Buffer.from(viewed.pages[0]?.bytes ?? []).subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
+  });
+
   it("verifies openability, repair risk, and approximate visual readiness", async () => {
     const rendered = await render({ title: "Verify", slides: [{ title: "Ready", body: "Body" }] }, { target: "pptx" });
     const result = await verify({ data: rendered.bytes, format: "pptx" }, { visual: true });

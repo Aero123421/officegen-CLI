@@ -577,26 +577,39 @@ export async function inspectPayload(context: RuntimeContext): Promise<unknown> 
 export async function viewPayload(context: RuntimeContext): Promise<unknown> {
   const input = requireInput(context, 3, "view");
   const requestedFormat = optionValue(context.argv, "--format") ?? "svg";
-  if (requestedFormat !== "svg" && requestedFormat !== "html") {
+  if (!["svg", "html", "png", "jpeg", "jpg"].includes(requestedFormat)) {
     throw new CliFailure({
       code: "EXPORT_UNSUPPORTED",
       command: "view",
-      message: `view --format ${requestedFormat} is not supported. Supported formats are svg and html.`,
-      details: { format: requestedFormat, supported: ["svg", "html"] }
+      message: `view --format ${requestedFormat} is not supported. Supported formats are svg, html, png, jpeg, and jpg.`,
+      details: { format: requestedFormat, supported: ["svg", "html", "png", "jpeg", "jpg"] }
     }, 3);
   }
-  const format: "svg" | "html" = requestedFormat === "html" ? "html" : "svg";
+  const format = requestedFormat as "svg" | "html" | "png" | "jpeg" | "jpg";
   const result = await view(await validateInputPath(context, input), withFormatConfig(context, {
     format,
-    maxPages: numberOption(context, "--max-pages")
+    maxPages: numberOption(context, "--max-pages"),
+    dpi: numberOption(context, "--dpi"),
+    timeoutMs: numberOption(context, "--timeout-ms")
   }));
   const out = optionValue(context.argv, "--out");
   if (out) {
     const outDir = await validateOutputPath(context, out, { directory: true });
     const artifacts = await writeViewArtifacts(context, outDir, result, "view");
-    return maybeWriteReport(context, { ...result, artifacts, pages: result.pages.map((page) => ({ ...page, content: undefined })) }, "view");
+    return maybeWriteReport(context, { ...result, artifacts, pages: result.pages.map(publicViewPage) }, "view");
+  }
+  if (format === "png" || format === "jpeg" || format === "jpg") {
+    return maybeWriteReport(context, { ...result, pages: result.pages.map((page) => {
+      const { bytes: _bytes, ...rest } = page;
+      return rest;
+    }) }, "view");
   }
   return maybeWriteReport(context, result, "view");
+}
+
+function publicViewPage(page: Awaited<ReturnType<typeof view>>["pages"][number]): Record<string, unknown> {
+  const { content: _content, bytes: _bytes, ...rest } = page;
+  return rest;
 }
 
 async function writeViewArtifacts(context: RuntimeContext, outDir: string, result: Awaited<ReturnType<typeof view>>, sourceCommand: string): Promise<Array<Record<string, unknown>>> {
@@ -605,8 +618,12 @@ async function writeViewArtifacts(context: RuntimeContext, outDir: string, resul
   for (const page of result.pages) {
     const fileName = `page-${String(page.page).padStart(3, "0")}.${page.format}`;
     const filePath = path.join(outDir, fileName);
-    await writeGeneratedText(context, filePath, page.content);
-    const dimensions = viewPageDimensions(page.content);
+    if (page.bytes) {
+      await writeGeneratedBytes(context, filePath, page.bytes);
+    } else {
+      await writeGeneratedText(context, filePath, page.content);
+    }
+    const dimensions = page.width && page.height ? { width: page.width, height: page.height } : viewPageDimensions(page.content);
     const pageSha256 = await sha256File(filePath).catch(() => undefined);
     pageRecords.push({
       artifactId: `view-page-${String(page.page).padStart(3, "0")}`,
@@ -619,7 +636,7 @@ async function writeViewArtifacts(context: RuntimeContext, outDir: string, resul
       sha256: pageSha256,
       width: dimensions.width,
       height: dimensions.height,
-      renderer: result.fidelity === "approximate" ? "officegen-approximate-svg-html" : "native",
+      renderer: page.renderer ?? (result.fidelity === "approximate" ? "officegen-approximate-svg-html" : "native"),
       fidelity: result.fidelity,
       coordinateSystem: "px",
       objectMapEntries: page.objectMap.length
@@ -633,7 +650,7 @@ async function writeViewArtifacts(context: RuntimeContext, outDir: string, resul
   const manifest = {
     schema: "officegen.view.manifest@1.2",
     fidelity: result.fidelity,
-    renderer: "officegen-approximate-svg-html",
+    renderer: pageRecords.find((page) => page.renderer)?.renderer ?? "officegen-approximate-svg-html",
     sourceFormat: result.trusted.sourceFormat,
     generatedAt: result.trusted.generatedAt,
     pages: pageRecords,
@@ -664,6 +681,12 @@ async function writeGeneratedText(context: RuntimeContext, filePath: string, val
   await fs.writeFile(filePath, value, "utf8");
 }
 
+async function writeGeneratedBytes(context: RuntimeContext, filePath: string, value: Uint8Array): Promise<void> {
+  await validateGeneratedOutputFile(context, filePath);
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.writeFile(filePath, value);
+}
+
 async function validateGeneratedOutputFile(context: RuntimeContext, filePath: string): Promise<void> {
   await validateOutputPath(context, outputPathForValidation(context, filePath), { directory: true });
 }
@@ -683,12 +706,17 @@ function viewPageDimensions(content: string): { width?: number; height?: number 
   };
 }
 
-function contactSheetHtml(pages: Array<{ page: number; fileName: string; stableObjectId: string; width?: number; height?: number; objectMapEntries: number }>): string {
+function contactSheetHtml(pages: Array<{ page: number; fileName: string; format?: unknown; stableObjectId: string; width?: number; height?: number; objectMapEntries: number }>): string {
   return [
     "<!doctype html><meta charset=\"utf-8\"><title>officegen contact sheet</title>",
-    "<style>body{font-family:Arial,sans-serif;margin:24px;background:#f6f8fa;color:#111}main{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:16px}.page{background:#fff;border:1px solid #d0d7de;padding:12px}.frame{width:100%;aspect-ratio:16/9;border:1px solid #d0d7de;background:#fff;overflow:hidden}iframe{width:100%;height:100%;border:0}p{margin:8px 0 0;color:#57606a;font-size:12px}</style>",
+    "<style>body{font-family:Arial,sans-serif;margin:24px;background:#f6f8fa;color:#111}main{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:16px}.page{background:#fff;border:1px solid #d0d7de;padding:12px}.frame{width:100%;aspect-ratio:16/9;border:1px solid #d0d7de;background:#fff;overflow:hidden}iframe,img{width:100%;height:100%;border:0;object-fit:contain}p{margin:8px 0 0;color:#57606a;font-size:12px}</style>",
     "<main>",
-    ...pages.map((page) => `<section class="page"><div class="frame"><iframe src="${escapeHtmlAttr(page.fileName)}" title="page ${page.page}"></iframe></div><p>page ${page.page} · ${escapeHtmlAttr(page.stableObjectId)} · ${page.objectMapEntries} objects${page.width && page.height ? ` · ${page.width}x${page.height}` : ""}</p></section>`),
+    ...pages.map((page) => {
+      const media = page.format === "png" || page.format === "jpeg"
+        ? `<img src="${escapeHtmlAttr(page.fileName)}" alt="page ${page.page}">`
+        : `<iframe src="${escapeHtmlAttr(page.fileName)}" title="page ${page.page}"></iframe>`;
+      return `<section class="page"><div class="frame">${media}</div><p>page ${page.page} · ${escapeHtmlAttr(page.stableObjectId)} · ${page.objectMapEntries} objects${page.width && page.height ? ` · ${page.width}x${page.height}` : ""}</p></section>`;
+    }),
     "</main>"
   ].join("");
 }
@@ -1138,7 +1166,19 @@ async function selectorFromCli(context: RuntimeContext): Promise<Record<string, 
 }
 
 function intentOpsFromGoal(goal: string, target: string): ReturnType<typeof normalizeEditOperations> {
+  const explicitOps = editOpsFromJsonGoal(goal, target);
+  if (explicitOps) return explicitOps;
+
   const ops: Array<Record<string, unknown>> = [];
+  const titleFont = /(?:スライド|slide)\s*([0-9０-９]+)\s*(?:の)?\s*(?:タイトル|title)\s*(?:を|to|=|:)?\s*([0-9０-９]+)\s*(?:pt|ポイント)?\s*(?:にする|に|へ|font\s*size)?/iu.exec(goal);
+  if (target === "pptx" && titleFont) {
+    ops.push({
+      op: "pptx.formatTitle",
+      selector: { slide: Number(toAsciiDigits(titleFont[1])), placeholder: "title" },
+      fontSize: Number(toAsciiDigits(titleFont[2])),
+      ...(/(?:bold|太字|ボールド)/iu.test(goal) ? { bold: true } : {})
+    });
+  }
   const quotedReplace = /(?:replace|置換)\s+["'“”「](.+?)["'“”」]\s+(?:with|to|を|=>)\s+["'“”「](.+?)["'“”」]/i.exec(goal);
   const japaneseReplace = /(.+?)を(.+?)に置換/.exec(goal);
   const from = quotedReplace?.[1] ?? japaneseReplace?.[1]?.trim();
@@ -1151,6 +1191,32 @@ function intentOpsFromGoal(goal: string, target: string): ReturnType<typeof norm
     target,
     ops
   });
+}
+
+function editOpsFromJsonGoal(goal: string, target: string): ReturnType<typeof normalizeEditOperations> | undefined {
+  const trimmed = goal.trim();
+  if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return undefined;
+  try {
+    const parsed = JSON.parse(trimmed);
+    const document = Array.isArray(parsed)
+      ? { schema: "officegen.edit.ops@1.2", target, ops: parsed }
+      : asRecord(parsed);
+    if (Array.isArray(document.ops)) {
+      return normalizeEditOperations({
+        schema: "officegen.edit.ops@1.2",
+        target: typeof document.target === "string" ? document.target : target,
+        options: asRecord(document.options ?? {}),
+        ops: document.ops
+      });
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+function toAsciiDigits(value: string): string {
+  return value.replace(/[０-９]/g, (char) => String(char.charCodeAt(0) - 0xff10));
 }
 
 export async function planPayload(context: RuntimeContext): Promise<unknown> {
@@ -1222,7 +1288,7 @@ export async function lockPayload(context: RuntimeContext): Promise<unknown> {
     input: inputPath,
     inputSha256: await sha256File(inputPath),
     scope: optionValue(context.argv, "--scope") ?? "document",
-    agent: optionValue(context.argv, "--name") ?? "agent",
+    agent: lockOwnerFromArgv(context.argv) ?? optionValue(context.argv, "--name") ?? "agent",
     createdAt: new Date().toISOString(),
     mode: "exclusive"
   };
@@ -1230,6 +1296,18 @@ export async function lockPayload(context: RuntimeContext): Promise<unknown> {
   const outPath = out ? await validateOutputPath(context, out) : undefined;
   if (outPath) await writeGeneratedJson(context, outPath, lock);
   return maybeWriteReport(context, { ...lock, out: outPath }, "lock");
+}
+
+function lockOwnerFromArgv(argv: string[]): string | undefined {
+  const owner = optionValue(argv, "--owner");
+  if (owner) return owner;
+  const topIndex = argv.findIndex((value, index) => index >= 2 && value === "lock");
+  const agentIndex = argv.indexOf("--agent");
+  if (topIndex >= 0 && agentIndex > topIndex) {
+    const value = argv[agentIndex + 1];
+    if (value && !value.startsWith("-")) return value;
+  }
+  return undefined;
 }
 
 export async function mergePayload(context: RuntimeContext): Promise<unknown> {
@@ -1840,6 +1918,7 @@ async function prepareReferencePayload(context: RuntimeContext): Promise<unknown
     }, 4);
   }
   const maxPages = numberOption(context, "--max-pages");
+  const prepareViewFormat = normalizePrepareViewFormat(optionValue(context.argv, "--format"));
   await fs.mkdir(outDir, { recursive: true });
 
   const [referenceInspect, targetInspect] = await Promise.all([
@@ -1847,8 +1926,8 @@ async function prepareReferencePayload(context: RuntimeContext): Promise<unknown
     inspect(targetPath, withFormatConfig(context, { depth: "full" as const }))
   ]);
   const [referenceView, targetView] = await Promise.all([
-    view(referenceInspect, withFormatConfig(context, { format: "svg" as const, maxPages })),
-    view(targetInspect, withFormatConfig(context, { format: "svg" as const, maxPages }))
+    prepareReferenceView(context, referencePath, referenceInspect, prepareViewFormat, maxPages),
+    prepareReferenceView(context, targetPath, targetInspect, prepareViewFormat, maxPages)
   ]);
   const referenceArtifacts = await writeViewArtifacts(context, path.join(outDir, "reference-view"), referenceView, "run prepare-reference");
   const targetArtifacts = await writeViewArtifacts(context, path.join(outDir, "target-view"), targetView, "run prepare-reference");
@@ -1880,6 +1959,7 @@ async function prepareReferencePayload(context: RuntimeContext): Promise<unknown
       format: referenceInspect.trusted.format,
       inspect: referenceInspectPath,
       view: path.join(outDir, "reference-view", "manifest.json"),
+      viewFormat: prepareViewFormat,
       pages: referenceView.pages.length,
       totalPages: totalPageLikeCount(referenceInspect),
       truncated: isViewTruncated(referenceInspect, referenceView.pages.length),
@@ -1890,6 +1970,7 @@ async function prepareReferencePayload(context: RuntimeContext): Promise<unknown
       format: targetInspect.trusted.format,
       inspect: targetInspectPath,
       view: path.join(outDir, "target-view", "manifest.json"),
+      viewFormat: targetView.pages[0]?.format ?? prepareViewFormat,
       pages: targetView.pages.length,
       totalPages: totalPageLikeCount(targetInspect),
       truncated: isViewTruncated(targetInspect, targetView.pages.length),
@@ -1906,7 +1987,9 @@ async function prepareReferencePayload(context: RuntimeContext): Promise<unknown
       `officegen verify ${quoteCommandValue(path.join(outDir, `edited.${targetInspect.trusted.format}`))} --visual --gates ${quoteCommandValue(path.join(outDir, "gates.json"))} --json`
     ],
     caveats: [
-      "View artifacts are approximate SVG/HTML previews unless a native renderer/export step is explicitly run.",
+      prepareViewFormat === "svg"
+        ? "View artifacts are approximate SVG/HTML previews unless --format png/jpeg is requested and renderer policy allows it."
+        : "PNG/JPEG view artifacts are real PDF rasterizations for PDF inputs; Office inputs require native renderer policy and may fall back to SVG if unavailable.",
       "Use target objectMap stableObjectId or high-confidence selector hints before mutating Office files."
     ]
   };
@@ -1939,6 +2022,35 @@ function totalPageLikeCount(inspected: Awaited<ReturnType<typeof inspect>>): num
   return Number(summary.pages ?? summary.slides ?? summary.sheets ?? 0);
 }
 
+function normalizePrepareViewFormat(value?: string): "svg" | "html" | "png" | "jpeg" | "jpg" {
+  if (value === "svg" || value === "html" || value === "png" || value === "jpeg" || value === "jpg") return value;
+  return "png";
+}
+
+async function prepareReferenceView(
+  context: RuntimeContext,
+  inputPath: string,
+  inspected: Awaited<ReturnType<typeof inspect>>,
+  format: "svg" | "html" | "png" | "jpeg" | "jpg",
+  maxPages?: number
+): Promise<Awaited<ReturnType<typeof view>>> {
+  try {
+    return await view(inputPath, withFormatConfig(context, {
+      format,
+      maxPages,
+      dpi: numberOption(context, "--dpi"),
+      timeoutMs: numberOption(context, "--timeout-ms")
+    }));
+  } catch (error) {
+    if ((format === "png" || format === "jpeg" || format === "jpg") && inspected.trusted.format !== "pdf") {
+      const fallback = await view(inspected, withFormatConfig(context, { format: "svg" as const, maxPages }));
+      fallback.caveats.push(`PNG/JPEG native view fallback: ${String(asRecord(error).message ?? error)}`);
+      return fallback;
+    }
+    throw error;
+  }
+}
+
 function isViewTruncated(inspected: Awaited<ReturnType<typeof inspect>>, renderedPages: number): boolean {
   const total = totalPageLikeCount(inspected);
   return total > renderedPages;
@@ -1967,10 +2079,16 @@ async function executeRunStep(
     timeoutMs
   }));
   if (command === "view") {
-    const result = await view(requireRunInput(command, input), withFormatConfig(context, { format: "svg" as const, maxPages: typeof step.maxPages === "number" ? step.maxPages : undefined }));
+    const stepFormat = typeof step.format === "string" && ["svg", "html", "png", "jpeg", "jpg"].includes(step.format) ? step.format as "svg" | "html" | "png" | "jpeg" | "jpg" : "svg";
+    const result = await view(requireRunInput(command, input), withFormatConfig(context, {
+      format: stepFormat,
+      maxPages: typeof step.maxPages === "number" ? step.maxPages : undefined,
+      dpi: typeof step.dpi === "number" ? step.dpi : undefined,
+      timeoutMs
+    }));
     const viewDir = out ?? path.join(folder.viewsDir, `${String(index + 1).padStart(2, "0")}-view`);
     const artifacts = await writeViewArtifacts(context, viewDir, result, "run view");
-    return { ...result, out: viewDir, artifacts, pages: result.pages.map((page) => ({ ...page, content: undefined })) };
+    return { ...result, out: viewDir, artifacts, pages: result.pages.map(publicViewPage) };
   }
   if (command === "render") {
     const ir = await readInputJson(context, requireRunInput(command, input));

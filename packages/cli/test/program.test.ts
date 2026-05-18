@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import JSZip from "jszip";
 import { afterEach, describe, expect, it } from "vitest";
+import { PDFDocument } from "pdf-lib";
 import { validateSchema } from "@officegen/core";
 import { runCli } from "../src/program.js";
 
@@ -651,6 +652,22 @@ describe("officegen CLI command surface", () => {
     expect(JSON.parse(await readFile(path.join(cwd, ".officegen", "prep", "edit-ops.schema.json"), "utf8")).$id).toBe("officegen.edit.ops@1.2");
   });
 
+  it("writes real PNG view artifacts for PDF inputs", async () => {
+    const cwd = await tempWorkspace();
+    const pdf = await PDFDocument.create();
+    pdf.addPage([160, 80]);
+    await writeFile(path.join(cwd, "reference.pdf"), await pdf.save());
+
+    const captured = await run(["view", "reference.pdf", "--format", "png", "--out", ".officegen/view", "--json"], cwd);
+    const envelope = parseEnvelope(captured);
+    const page = await readFile(path.join(cwd, ".officegen", "view", "page-001.png"));
+    const manifest = JSON.parse(await readFile(path.join(cwd, ".officegen", "view", "manifest.json"), "utf8"));
+
+    expect(envelope.ok).toBe(true);
+    expect(manifest.pages[0].format).toBe("png");
+    expect([...page.subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
+  });
+
   it("resolves selectors through the select command", async () => {
     const cwd = await tempWorkspace();
     await writeFile(path.join(cwd, "deck.pptx"), await minimalPptxWithImage(false));
@@ -672,14 +689,35 @@ describe("officegen CLI command surface", () => {
 
     const manifest = parseEnvelope(await run(["manifest", "deck.pptx", "--out", ".officegen/manifest.json", "--json"], cwd));
     const lock = parseEnvelope(await run(["lock", "deck.pptx", "--scope", "slide:1", "--name", "agent-a", "--out", ".officegen/lock.json", "--json"], cwd));
+    const agentLock = parseEnvelope(await run(["lock", "deck.pptx", "--scope", "slide:1", "--agent", "codex-test", "--json"], cwd));
     const verified = parseEnvelope(await run(["manifest", "verify", ".officegen/manifest.json", "--json"], cwd));
 
     expect(manifest.ok).toBe(true);
     expect(manifest.result.schema).toBe("officegen.artifact.manifest@1.2");
     expect(lock.ok).toBe(true);
     expect(lock.result.scope).toBe("slide:1");
+    expect(agentLock.result.agent).toBe("codex-test");
     expect(verified.ok).toBe(true);
     expect(verified.result.schema).toBe("officegen.manifest.verify.result@1.2");
+  });
+
+  it("plans simple Japanese PPTX title formatting and explicit JSON EditOps", async () => {
+    const cwd = await tempWorkspace();
+    await writeFile(path.join(cwd, "deck.pptx"), await minimalPptxWithImage(false));
+    await writeFile(path.join(cwd, "goal.md"), "スライド2のタイトルを44ptにする\n", "utf8");
+    await writeFile(path.join(cwd, "goal.json"), `${JSON.stringify({
+      schema: "officegen.edit.ops@1.2",
+      target: "pptx",
+      ops: [{ op: "pptx.formatTitle", selector: { slide: 1, placeholder: "title" }, fontSize: 40 }]
+    })}\n`, "utf8");
+
+    const natural = parseEnvelope(await run(["plan", "deck.pptx", "--goal", "goal.md", "--json"], cwd));
+    const explicit = parseEnvelope(await run(["plan", "deck.pptx", "--goal", "goal.json", "--json"], cwd));
+
+    expect(natural.result.ops.ops[0]).toMatchObject({ op: "pptx.formatTitle", fontSize: 44 });
+    expect(natural.result.warnings).toEqual([]);
+    expect(explicit.result.ops.ops[0]).toMatchObject({ op: "pptx.formatTitle", fontSize: 40 });
+    expect(explicit.result.warnings).toEqual([]);
   });
 
   it("does not attach output artifacts to dry-run edits with --out", async () => {
