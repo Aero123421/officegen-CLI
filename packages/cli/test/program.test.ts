@@ -808,24 +808,7 @@ describe("officegen CLI command surface", () => {
     expect(deniedEnvelope.error.code).toBe("SECURITY_PATH_OUTSIDE_ROOT");
     process.exitCode = undefined;
 
-    const captured = await run([
-      "run",
-      "office-agent",
-      "--input",
-      "deck.pptx",
-      "--goal",
-      "goal.md",
-      "--output-root",
-      ".officegen/allowed",
-      "--agent",
-      "--json",
-      "--json-budget-bytes",
-      "120000"
-    ], cwd);
-    const envelope = parseEnvelope(captured);
-
-    expect(envelope.ok).toBe(true);
-    expect(envelope.result.outDir).toContain(".officegen/allowed/office-agent");
+    expect(deniedEnvelope.error.details.outside[0].label).toBe("--out");
   });
 
   it("writes run office-agent report-out", async () => {
@@ -844,7 +827,6 @@ describe("officegen CLI command surface", () => {
       ".officegen/office-agent",
       "--report-out",
       ".officegen/report.json",
-      "--agent",
       "--json",
       "--json-budget-bytes",
       "120000"
