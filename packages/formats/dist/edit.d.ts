@@ -53,6 +53,7 @@ export type PptxBulletListItem = string | {
     bold?: boolean;
     numbering?: boolean;
 };
+type XlsxSheetRef = number | string;
 export type EditOperation = {
     type: "replaceText";
     from: string;
@@ -79,6 +80,11 @@ export type EditOperation = {
     width?: number;
     height?: number;
 } | {
+    type: "pdf.redact";
+    page?: number;
+    text?: string;
+    selector?: EditSelector;
+} | {
     op: "replaceText";
     from: string;
     to: string;
@@ -87,6 +93,11 @@ export type EditOperation = {
     op: "setText";
     text: string;
     selector: EditSelector;
+} | {
+    op: "pdf.redact";
+    page?: number;
+    text?: string;
+    selector?: EditSelector;
 } | {
     op: "pptx.duplicateSlide";
     slide?: number;
@@ -282,24 +293,28 @@ export type EditOperation = {
     text: string;
 } | {
     op: "xlsx.insertRows";
-    sheet?: number;
+    sheet?: XlsxSheetRef;
+    sheetName?: string;
     rowIndex: number;
     rows: unknown[][];
     selector?: EditSelector;
 } | {
     op: "xlsx.appendRows";
-    sheet?: number;
+    sheet?: XlsxSheetRef;
+    sheetName?: string;
     rows: unknown[][];
     selector?: EditSelector;
 } | {
     op: "xlsx.setCell";
-    sheet?: number;
+    sheet?: XlsxSheetRef;
+    sheetName?: string;
     cell: string;
     value: unknown;
     selector?: EditSelector;
 } | {
     op: "xlsx.setFormula";
-    sheet?: number;
+    sheet?: XlsxSheetRef;
+    sheetName?: string;
     cell: string;
     formula: string;
     selector?: EditSelector;
@@ -312,19 +327,22 @@ export type EditOperation = {
     name: string;
 } | {
     op: "xlsx.setRange";
-    sheet?: number;
+    sheet?: XlsxSheetRef;
+    sheetName?: string;
     startCell: string;
     values: unknown[][];
     selector?: EditSelector;
 } | {
     op: "xlsx.updateTable";
-    sheet?: number;
+    sheet?: XlsxSheetRef;
+    sheetName?: string;
     startCell: string;
     rows: unknown[][];
     selector?: EditSelector;
 } | {
     op: "xlsx.writeTable";
-    sheet?: number;
+    sheet?: XlsxSheetRef;
+    sheetName?: string;
     startCell: string;
     rows: unknown[][];
     tableName?: string;

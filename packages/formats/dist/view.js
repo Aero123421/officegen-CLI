@@ -1,7 +1,7 @@
 import path from "node:path";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
-import { createCanvas } from "@napi-rs/canvas";
+import { createCanvas, Path2D as CanvasPath2D } from "@napi-rs/canvas";
 import * as pdfjs from "pdfjs-dist/legacy/build/pdf.mjs";
 import { inspect } from "./inspect.js";
 import { exportDocument } from "./export.js";
@@ -118,6 +118,7 @@ async function renderPdfToRasterPages(pdfBytes, options) {
     const require = createRequire(import.meta.url);
     const pdfjsRoot = path.dirname(require.resolve("pdfjs-dist/package.json"));
     const standardFontDataUrl = pathToFileURL(path.join(pdfjsRoot, "standard_fonts") + path.sep).href;
+    ensurePdfjsPath2D();
     const loadingTask = pdfjs.getDocument({
         data: new Uint8Array(pdfBytes),
         disableWorker: true,
@@ -134,7 +135,7 @@ async function renderPdfToRasterPages(pdfBytes, options) {
         const width = Math.ceil(viewport.width);
         const height = Math.ceil(viewport.height);
         const canvas = createCanvas(width, height);
-        const canvasContext = canvas.getContext("2d");
+        const canvasContext = pdfjsCanvasContext(canvas.getContext("2d"));
         await page.render({ canvasContext: canvasContext, viewport }).promise;
         const bytes = options.format === "png" ? await canvas.encode("png") : await canvas.encode("jpeg");
         const objectMap = pageObjectMap(options.objectMap, options.sourceFormat, pageNumber);
@@ -152,6 +153,46 @@ async function renderPdfToRasterPages(pdfBytes, options) {
     }
     await document.destroy();
     return pages;
+}
+function pdfjsCanvasContext(context) {
+    const ctx = context;
+    // PDF.js uses browser Canvas overloads that @napi-rs/canvas does not fully accept.
+    const fill = ctx.fill?.bind(ctx);
+    if (fill) {
+        ctx.fill = (pathOrRule, fillRule) => {
+            if (pathOrRule === undefined || pathOrRule === "nonzero" || pathOrRule === "evenodd")
+                return fill();
+            return invokePdfjsCanvasPathMethod(fill, fillRule === undefined ? [pathOrRule] : [pathOrRule, fillRule]);
+        };
+    }
+    const stroke = ctx.stroke?.bind(ctx);
+    if (stroke) {
+        ctx.stroke = (path) => path === undefined ? stroke() : invokePdfjsCanvasPathMethod(stroke, [path]);
+    }
+    const clip = ctx.clip?.bind(ctx);
+    if (clip) {
+        ctx.clip = (pathOrRule, fillRule) => {
+            if (pathOrRule === undefined || pathOrRule === "nonzero" || pathOrRule === "evenodd")
+                return clip();
+            return invokePdfjsCanvasPathMethod(clip, fillRule === undefined ? [pathOrRule] : [pathOrRule, fillRule]);
+        };
+    }
+    return context;
+}
+function invokePdfjsCanvasPathMethod(method, args) {
+    try {
+        return method(...args);
+    }
+    catch (error) {
+        if (error instanceof Error && /none of these types `String`, `Path`/i.test(error.message))
+            return method();
+        throw error;
+    }
+}
+function ensurePdfjsPath2D() {
+    const globalWithPath = globalThis;
+    if (!globalWithPath.Path2D)
+        globalWithPath.Path2D = CanvasPath2D;
 }
 function pageObjectMap(objectMap, sourceFormat, page) {
     if (sourceFormat === "pptx")

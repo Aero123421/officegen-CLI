@@ -126,21 +126,33 @@ export async function normalizeInput(input: InputLike, defaultFormat: OfficeForm
     };
   }
 
-  if (input.data === undefined && input.path === undefined) {
+  const objectInput = input as InputObject & { data?: InputObject["data"] | string };
+  if (objectInput.data === undefined && objectInput.path === undefined) {
     throw new Error("InputObject requires either path or data.");
   }
 
+  if (typeof objectInput.data === "string") {
+    const inputPath = objectInput.path ?? objectInput.data;
+    const bytes = await readFile(inputPath);
+    return {
+      bytes,
+      path: inputPath,
+      format: detectFormat(inputPath, objectInput.format ?? defaultFormat),
+      trusted: false
+    };
+  }
+
   const bytes =
-    input.data !== undefined
-      ? input.data instanceof ArrayBuffer
-        ? new Uint8Array(input.data)
-        : input.data
-      : await readFile(input.path as string);
+    objectInput.data !== undefined
+      ? objectInput.data instanceof ArrayBuffer
+        ? new Uint8Array(objectInput.data)
+        : objectInput.data
+      : await readFile(objectInput.path as string);
 
   return {
     bytes,
-    path: input.path,
-    format: detectFormat(input.path, input.format ?? defaultFormat),
+    path: objectInput.path,
+    format: detectFormat(objectInput.path, objectInput.format ?? defaultFormat),
     trusted: false
   };
 }

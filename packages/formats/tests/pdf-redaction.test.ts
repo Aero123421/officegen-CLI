@@ -1,6 +1,9 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { PDFDocument, rgb } from "pdf-lib";
-import { edit, inspect, scanPdfForForbiddenText } from "../src/index.js";
+import { edit, inspect, scanPdfForForbiddenText, verify, view } from "../src/index.js";
 
 describe("PDF object graph and redaction safety", () => {
   it("inspects PDF text, metadata, annotations, and risk flags", async () => {
@@ -70,5 +73,31 @@ describe("PDF object graph and redaction safety", () => {
     expect(scan.found).toEqual([
       expect.objectContaining({ pattern: "SECRET-789" })
     ]);
+  });
+
+  it("views an edited PDF artifact as PNG after verify passes", async () => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), "officegen-pdf-view-"));
+    try {
+      const sourcePath = path.join(cwd, "source.pdf");
+      const editedPath = path.join(cwd, "edited.pdf");
+      const pdf = await PDFDocument.create();
+      const page = pdf.addPage([300, 200]);
+      page.drawText("Review packet", { x: 32, y: 150, size: 12 });
+      await writeFile(sourcePath, await pdf.save({ useObjectStreams: false }));
+
+      const edited = await edit(sourcePath, [
+        { op: "pdf.textOverlay", page: 1, text: "APPROVED", x: 32, y: 118, size: 12 },
+        { op: "pdf.annotation", page: 1, text: "Checked", x: 28, y: 72, width: 120, height: 36 }
+      ], { out: editedPath });
+      const verified = await verify(editedPath);
+      const viewed = await view({ data: editedPath as unknown as Uint8Array, format: "pdf" }, { format: "png", dpi: 72 });
+
+      expect(edited.changed).toBe(true);
+      expect(verified.readiness).toBe("pass");
+      expect(viewed.pages[0]?.format).toBe("png");
+      expect([...Buffer.from(viewed.pages[0]?.bytes ?? []).subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
   });
 });

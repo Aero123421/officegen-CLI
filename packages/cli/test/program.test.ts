@@ -87,6 +87,18 @@ describe("officegen CLI command surface", () => {
     expect(envelope.result.schema).toBe("officegen.capabilities@1.2");
     expect(envelope.result.enabled).toContain("inspect");
     expect(envelope.result.enabled).toContain("template");
+    expect(envelope.result.commands).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        commandGroup: "benchmark",
+        commands: expect.arrayContaining(["benchmark run", "benchmark compare"]),
+        examples: expect.arrayContaining([expect.stringContaining("officegen benchmark run --manifest")])
+      }),
+      expect.objectContaining({
+        commandGroup: "chart",
+        commands: expect.arrayContaining(["chart render"]),
+        examples: expect.arrayContaining(["officegen chart render specs/revenue.chart.json --out .officegen/assets/revenue.svg --json"])
+      })
+    ]));
     expect(envelope.availableCommands).toContain("inspect");
     expect(envelope.availableCommands).toContain("template");
     expect(envelope.nextSuggestedCommands).toContain("officegen capabilities --agent --json");
@@ -206,6 +218,24 @@ describe("officegen CLI command surface", () => {
     expect(envelope.error.code).toBe("BENCHMARK_MANIFEST_PATH_DENIED");
     expect(envelope.error.details.field).toBe("--manifest");
     expect(process.exitCode).toBe(4);
+  });
+
+  it("accepts a positional benchmark manifest as a run alias", async () => {
+    const cwd = await tempWorkspace();
+    await writeFile(path.join(cwd, "custom-benchmark.json"), `${JSON.stringify({
+      storageRoot: ".officegen/benchmark-corpus",
+      documents: [{ id: "missing", kind: "pptx", path: "missing.pptx" }]
+    }, null, 2)}\n`, "utf8");
+
+    const captured = await run(["benchmark", "custom-benchmark.json", "--json"], cwd);
+    const envelope = parseEnvelope(captured);
+
+    expect(envelope.error.code).toBe("RUN_STEP_FAILED");
+    expect(envelope.result.schema).toBe("officegen.benchmark.run.result@2.5");
+    expect(envelope.result.manifestPath).toBe("custom-benchmark.json");
+    expect(envelope.result.nextSuggestedCommands).toEqual(expect.arrayContaining([
+      expect.stringContaining("officegen benchmark run --manifest custom-benchmark.json")
+    ]));
   });
 
   it("denies benchmark storageRoot traversal with benchmark path policy code", async () => {
@@ -412,13 +442,20 @@ describe("officegen CLI command surface", () => {
     const improve = await run(["improve", "--help"]);
     const asset = await run(["asset", "inspect", "--help"]);
     const design = await run(["design", "capture", "--help"]);
+    const chart = await run(["chart", "render", "--help"]);
+    const diagram = await run(["diagram", "render", "--help"]);
+    const layout = await run(["layout", "apply", "--help"]);
 
     expect(benchmark.stdout[0]).toContain("--manifest <path>");
+    expect(benchmark.stdout[0]).toContain("officegen benchmark run --manifest");
     expect(benchmark.stdout[0]).toContain("npm run benchmark:fetch");
     expect(improve.stdout[0]).toContain("planOnly: true");
     expect(improve.stdout[0]).toContain("--dry-run");
     expect(asset.stdout[0]).toContain("--embedded");
     expect(design.stdout[0]).toContain("design init");
+    expect(chart.stdout[0]).toContain("officegen chart render specs/revenue.chart.json --out .officegen/assets/revenue.svg --json");
+    expect(diagram.stdout[0]).toContain("officegen diagram render specs/process.mmd --out .officegen/assets/process.svg --json");
+    expect(layout.stdout[0]).toContain("officegen layout apply plans/title-slide.layout.json --out .officegen/runs/title-slide.layout.apply.json --json");
   });
 
   it("returns JSON help for subcommand help flags and help topics", async () => {
@@ -431,6 +468,25 @@ describe("officegen CLI command surface", () => {
     expect(helpTopic.ok).toBe(true);
     expect(helpTopic.result.commands).toEqual(expect.arrayContaining([
       expect.objectContaining({ commandGroup: "inspect" })
+    ]));
+  });
+
+  it("returns concrete examples for chart, diagram, and layout help topics", async () => {
+    const chart = parseEnvelope(await run(["help", "chart", "render", "--json"]));
+    const diagram = parseEnvelope(await run(["help", "diagram", "render", "--json"]));
+    const layout = parseEnvelope(await run(["help", "layout", "apply", "--json"]));
+
+    expect(chart.result.examples).toEqual(expect.arrayContaining([
+      "officegen chart render specs/revenue.chart.json --out .officegen/assets/revenue.svg --json"
+    ]));
+    expect(chart.result.commands).toEqual(expect.arrayContaining([
+      expect.objectContaining({ commandGroup: "chart", effectiveOptions: expect.arrayContaining(["--out"]) })
+    ]));
+    expect(diagram.result.examples).toEqual(expect.arrayContaining([
+      "officegen diagram render specs/process.mmd --out .officegen/assets/process.svg --json"
+    ]));
+    expect(layout.result.examples).toEqual(expect.arrayContaining([
+      "officegen layout apply plans/title-slide.layout.json --out .officegen/runs/title-slide.layout.apply.json --json"
     ]));
   });
 
@@ -692,6 +748,34 @@ describe("officegen CLI command surface", () => {
     expect([...page.subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
   });
 
+  it("views an edited PDF as PNG after verify passes", async () => {
+    const cwd = await tempWorkspace();
+    const pdf = await PDFDocument.create();
+    const page = pdf.addPage([240, 120]);
+    page.drawText("Source PDF", { x: 24, y: 84, size: 12 });
+    await writeFile(path.join(cwd, "source.pdf"), await pdf.save({ useObjectStreams: false }));
+    await writeFile(path.join(cwd, "ops.json"), `${JSON.stringify({
+      schema: "officegen.edit.ops@1.2",
+      target: "pdf",
+      ops: [
+        { op: "pdf.textOverlay", page: 1, text: "APPROVED", x: 24, y: 56, size: 12 },
+        { op: "pdf.annotation", page: 1, text: "Checked", x: 20, y: 20, width: 100, height: 28 }
+      ]
+    })}\n`, "utf8");
+
+    const edited = parseEnvelope(await run(["edit", "source.pdf", "--ops", "ops.json", "--out", "edited.pdf", "--json"], cwd));
+    const verified = parseEnvelope(await run(["verify", "edited.pdf", "--json"], cwd));
+    const viewed = parseEnvelope(await run(["view", "edited.pdf", "--format", "png", "--out", ".officegen/view-edited", "--json"], cwd));
+    const png = await readFile(path.join(cwd, ".officegen", "view-edited", "page-001.png"));
+
+    expect(edited.ok).toBe(true);
+    expect(verified.ok).toBe(true);
+    expect(verified.result.readiness).toBe("pass");
+    expect(viewed.ok).toBe(true);
+    expect(viewed.result.pages[0].format).toBe("png");
+    expect([...png.subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
+  });
+
   it("uses fast mode by default for raster view of Office inputs", async () => {
     const cwd = await tempWorkspace();
     await writeFile(path.join(cwd, "deck.pptx"), await minimalPptxWithImage(false));
@@ -720,6 +804,24 @@ describe("officegen CLI command surface", () => {
     expect(envelope.result.inputSha256).toMatch(/^sha256:/);
     expect(envelope.result.objectMapHash).toMatch(/^sha256:/);
     expect(envelope.result.resolution.matched).toBe(true);
+  });
+
+  it("compacts select output to matches without the object map", async () => {
+    const cwd = await tempWorkspace();
+    await writeFile(path.join(cwd, "deck.pptx"), await minimalPptxWithImage(false));
+    await writeFile(path.join(cwd, "selector.json"), `${JSON.stringify({ contains: "Title" })}\n`, "utf8");
+
+    const captured = await run(["select", "deck.pptx", "--selector", "selector.json", "--matches-only", "--no-object-map", "--json"], cwd);
+    const envelope = parseEnvelope(captured);
+
+    expect(envelope.ok).toBe(true);
+    expect(envelope.result.schema).toBe("officegen.edit.selectors@1.2");
+    expect(envelope.result.matched).toBe(true);
+    expect(envelope.result.matchCount).toBe(1);
+    expect(envelope.result.matches[0]).toMatchObject({ kind: "shape" });
+    expect(envelope.result.objectMap).toBeUndefined();
+    expect(envelope.result.resolutions).toBeUndefined();
+    expect(validateSchema("officegen.envelope@1.2", envelope).ok).toBe(true);
   });
 
   it("creates and verifies manifests and scoped locks", async () => {
@@ -1001,6 +1103,28 @@ describe("officegen CLI command surface", () => {
     expect(firstError.schemaPath).toMatch(/^#\//);
   });
 
+  it("returns compact oneOf diagnostics for agent schema validation", async () => {
+    const cwd = await tempWorkspace();
+    await writeFile(path.join(cwd, "bad-ops.json"), `${JSON.stringify({
+      schema: "officegen.edit.ops@1.2",
+      target: "xlsx",
+      ops: [{ op: "xlsx.setCell", sheetName: "Data", cell: "A1", values: [["wrong"]] }]
+    })}\n`, "utf8");
+
+    const captured = await run(["schema", "validate", "bad-ops.json", "--schema", "officegen.edit.ops@1.2", "--agent", "--json"], cwd);
+    const envelope = parseEnvelope(captured);
+    const diagnostics = envelope.error.details.diagnostics;
+
+    expect(envelope.ok).toBe(false);
+    expect(envelope.error.details.rawErrorCount).toBeGreaterThan(envelope.error.details.errors.length);
+    expect(diagnostics[0]).toMatchObject({
+      instancePath: "/ops/0",
+      bestMatch: { op: "xlsx.setCell" },
+      missing: ["value"],
+      unexpected: ["values"]
+    });
+  });
+
   it("returns concrete workflow steps for workflow help topics", async () => {
     const captured = await run(["help", "workflow", "edit-existing", "--json"]);
     const envelope = parseEnvelope(captured);
@@ -1054,6 +1178,27 @@ describe("officegen CLI command surface", () => {
     });
     expect(envelope.result.mapping.title).not.toBe("[object Object]");
     expect(written.mapping.title).toEqual(envelope.result.mapping.title);
+  });
+
+  it("returns summary-only template candidates without bulky candidate payloads", async () => {
+    const cwd = await tempWorkspace();
+    await writeFile(path.join(cwd, "deck.pptx"), await minimalPptxWithImage(false));
+
+    const captured = await run(["template", "candidates", "deck.pptx", "--summary-only", "--json"], cwd);
+    const envelope = parseEnvelope(captured);
+    const firstCandidate = envelope.result.candidates[0];
+
+    expect(envelope.ok).toBe(true);
+    expect(envelope.result.schema).toBe("officegen.template.candidates.result@2.5");
+    expect(envelope.result.summaryOnly).toBe(true);
+    expect(envelope.result.artifacts).toEqual([]);
+    expect(firstCandidate.generatedFromSource).toBe(true);
+    expect(firstCandidate.artifactPaths).toBeUndefined();
+    expect(firstCandidate.previewCandidates).toBeUndefined();
+    expect(firstCandidate.template.fieldCount).toBeGreaterThan(0);
+    expect(firstCandidate.counts.schemaCandidates).toBeGreaterThan(0);
+    expect(firstCandidate.schemaCandidates.items.length).toBeGreaterThan(0);
+    expect(validateSchema("officegen.envelope@1.2", envelope).ok).toBe(true);
   });
 
   it("returns concrete inspect-edit-export workflow help", async () => {

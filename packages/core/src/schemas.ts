@@ -1,6 +1,23 @@
 import { Ajv, type ErrorObject, type ValidateFunction } from "ajv/dist/ajv.js";
 import type { FeatureName, JsonObject, OfficegenConfig, SchemaRegistryEntry } from "./types.js";
 
+export interface SchemaOneOfDiagnostic {
+  instancePath: string;
+  schemaPath: string;
+  bestMatch?: {
+    schemaPath: string;
+    op?: string;
+    score: number;
+  };
+  missing: string[];
+  unexpected: string[];
+  expectedTypes: Record<string, string[]>;
+}
+
+export type SchemaValidationResult =
+  | { ok: true }
+  | { ok: false; errors: ErrorObject[]; diagnostics?: SchemaOneOfDiagnostic[] };
+
 const commonSchemaField = { const: "" };
 
 function schemaField(id: string): JsonObject {
@@ -208,7 +225,8 @@ function editOperationSchemas(): JsonObject[] {
     after: { type: "integer", minimum: 0 },
     order: { type: "array", minItems: 1, items: { type: "integer", minimum: 1 } },
     items: { type: "array", minItems: 1, items: { type: "string" } },
-    sheet: { type: "integer", minimum: 1 },
+    sheet: { oneOf: [{ type: "integer", minimum: 1 }, { type: "string", minLength: 1 }] },
+    sheetName: { type: "string", minLength: 1 },
     rowIndex: { type: "integer", minimum: 1 },
     rows: { type: "array", minItems: 1, items: { type: "array" } },
     cell: { type: "string", pattern: "^[A-Za-z]+[1-9][0-9]*$" },
@@ -390,17 +408,17 @@ function editOperationSchemas(): JsonObject[] {
     op("docx.redline.replace", ["selector", "text"], ["selector", "text", "author"]),
     op("docx.applyStyle", ["selector", "styleId"], ["selector", "styleId"]),
     op("docx.headerFooter.setText", ["kind", "text"], ["kind", "text"]),
-    op("xlsx.insertRows", ["rowIndex", "rows"], ["sheet", "rowIndex", "rows"]),
-    op("xlsx.appendRows", ["rows"], ["sheet", "rows"]),
-    op("xlsx.setCell", ["cell", "value"], ["sheet", "cell", "value"]),
-    op("xlsx.setFormula", ["cell", "formula"], ["sheet", "cell", "formula"]),
+    op("xlsx.insertRows", ["rowIndex", "rows"], ["sheet", "sheetName", "rowIndex", "rows"]),
+    op("xlsx.appendRows", ["rows"], ["sheet", "sheetName", "rows"]),
+    op("xlsx.setCell", ["cell", "value"], ["sheet", "sheetName", "cell", "value"]),
+    op("xlsx.setFormula", ["cell", "formula"], ["sheet", "sheetName", "cell", "formula"]),
     op("xlsx.definedName.set", ["name", "ref"], ["name", "ref"]),
     op("xlsx.definedName.delete", ["name"], ["name"]),
-    op("xlsx.setRange", ["startCell", "values"], ["sheet", "startCell"], {
+    op("xlsx.setRange", ["startCell", "values"], ["sheet", "sheetName", "startCell"], {
       values: { type: "array", minItems: 1, items: { type: "array" } }
     }),
-    op("xlsx.updateTable", ["startCell", "rows"], ["sheet", "startCell", "rows"]),
-    op("xlsx.writeTable", ["startCell", "rows"], ["sheet", "startCell", "rows", "tableName"]),
+    op("xlsx.updateTable", ["startCell", "rows"], ["sheet", "sheetName", "startCell", "rows"]),
+    op("xlsx.writeTable", ["startCell", "rows"], ["sheet", "sheetName", "startCell", "rows", "tableName"]),
     op("xlsx.table.resize", ["selector", "ref"], ["selector", "ref"]),
     op("xlsx.chart.setData", ["selector", "categories", "values"], ["selector", "categories", "values", "seriesName"], {}, {
       description: "Updates one existing XLSX chart series by replacing categories and values. Multi-series, secondary-axis, and combo-chart editing are unsupported.",
@@ -934,8 +952,9 @@ export class SchemaRegistry {
     return this.entriesById.get(id);
   }
 
-  validate(id: string, value: unknown): { ok: true } | { ok: false; errors: ErrorObject[] } {
+  validate(id: string, value: unknown, options: { diagnostics?: boolean } = {}): SchemaValidationResult {
     const validate = this.validators.get(id);
+    const entry = this.entriesById.get(id);
     if (!validate) {
       return {
         ok: false,
@@ -951,7 +970,14 @@ export class SchemaRegistry {
       };
     }
     const ok = validate(value);
-    return ok ? { ok: true } : { ok: false, errors: cloneErrors(validate.errors ?? []) };
+    const errors = cloneErrors(validate.errors ?? []);
+    return ok
+      ? { ok: true }
+      : {
+          ok: false,
+          errors,
+          ...(options.diagnostics && entry ? { diagnostics: oneOfDiagnostics(entry.schema, value, errors) } : {})
+        };
   }
 }
 
@@ -972,8 +998,159 @@ export function getSchema(id: string): SchemaRegistryEntry | undefined {
   return defaultSchemaRegistry.get(id);
 }
 
-export function validateSchema(id: string, value: unknown): { ok: true } | { ok: false; errors: ErrorObject[] } {
-  return defaultSchemaRegistry.validate(id, value);
+export function validateSchema(id: string, value: unknown, options: { diagnostics?: boolean } = {}): SchemaValidationResult {
+  return defaultSchemaRegistry.validate(id, value, options);
 }
 
 void commonSchemaField;
+
+export function compactSchemaErrors(errors: ErrorObject[], diagnostics: SchemaOneOfDiagnostic[] = []): ErrorObject[] {
+  const diagnosticPaths = new Set(diagnostics.map((diagnostic) => diagnostic.instancePath));
+  const compacted: ErrorObject[] = [];
+  for (const error of errors) {
+    if (!diagnosticPaths.has(parentInstancePath(error.instancePath))) compacted.push(error);
+    else if (error.keyword === "oneOf") compacted.push(error);
+  }
+  return compacted.length > 0 ? compacted : errors.slice(0, 10);
+}
+
+function oneOfDiagnostics(rootSchema: JsonObject, value: unknown, errors: ErrorObject[]): SchemaOneOfDiagnostic[] {
+  return errors
+    .filter((error) => error.keyword === "oneOf")
+    .map((error) => oneOfDiagnostic(rootSchema, value, error))
+    .filter((diagnostic): diagnostic is SchemaOneOfDiagnostic => Boolean(diagnostic));
+}
+
+function oneOfDiagnostic(rootSchema: JsonObject, value: unknown, error: ErrorObject): SchemaOneOfDiagnostic | undefined {
+  const schemaPath = error.schemaPath.replace(/^#/, "");
+  const oneOf = schemaAtPointer(rootSchema, schemaPath);
+  if (!Array.isArray(oneOf)) return undefined;
+  const instance = valueAtPointer(value, error.instancePath);
+  const matches = oneOf
+    .map((schema, index) => scoreOneOfCandidate(schema, instance, `${error.schemaPath}/${index}`))
+    .sort((left, right) => right.score - left.score);
+  const best = matches[0];
+  if (!best) return undefined;
+  return {
+    instancePath: error.instancePath,
+    schemaPath: error.schemaPath,
+    bestMatch: {
+      schemaPath: best.schemaPath,
+      ...(best.op ? { op: best.op } : {}),
+      score: best.score
+    },
+    missing: best.missing,
+    unexpected: best.unexpected,
+    expectedTypes: best.expectedTypes
+  };
+}
+
+function scoreOneOfCandidate(schema: unknown, value: unknown, schemaPath: string): {
+  schemaPath: string;
+  op?: string;
+  score: number;
+  missing: string[];
+  unexpected: string[];
+  expectedTypes: Record<string, string[]>;
+} {
+  const objectSchema = asRecord(schema);
+  const properties = asRecord(objectSchema.properties);
+  const required = Array.isArray(objectSchema.required) ? objectSchema.required.map(String) : [];
+  const input = asRecord(value);
+  const allowed = new Set(Object.keys(properties));
+  const missing = required.filter((field) => !(field in input));
+  const unexpected = objectSchema.additionalProperties === false
+    ? Object.keys(input).filter((field) => !allowed.has(field))
+    : [];
+  const expectedTypes: Record<string, string[]> = {};
+  let score = 0;
+  const opConst = asRecord(properties.op).const;
+  if (typeof opConst === "string") {
+    if (input.op === opConst) score += 100;
+    else score -= 10;
+  }
+  for (const field of required) {
+    const fieldSchema = properties[field];
+    if (!(field in input)) {
+      expectedTypes[field] = expectedTypeLabels(fieldSchema);
+      score -= 6;
+    } else {
+      score += 4;
+    }
+  }
+  for (const [field, fieldValue] of Object.entries(input)) {
+    const fieldSchema = properties[field];
+    if (!fieldSchema) continue;
+    if (schemaAcceptsValue(fieldSchema, fieldValue)) {
+      score += field === "op" ? 5 : 2;
+    } else {
+      expectedTypes[field] = expectedTypeLabels(fieldSchema);
+      score -= 4;
+    }
+  }
+  score -= unexpected.length * 3;
+  return {
+    schemaPath,
+    op: typeof opConst === "string" ? opConst : undefined,
+    score,
+    missing,
+    unexpected,
+    expectedTypes
+  };
+}
+
+function schemaAcceptsValue(schema: unknown, value: unknown): boolean {
+  const record = asRecord(schema);
+  if ("const" in record) return value === record.const;
+  if (Array.isArray(record.enum)) return record.enum.includes(value);
+  if (Array.isArray(record.oneOf)) return record.oneOf.some((candidate) => schemaAcceptsValue(candidate, value));
+  if (Array.isArray(record.anyOf)) return record.anyOf.some((candidate) => schemaAcceptsValue(candidate, value));
+  const types = Array.isArray(record.type) ? record.type.map(String) : typeof record.type === "string" ? [record.type] : [];
+  if (types.length === 0) return true;
+  return types.some((type) => jsonType(value) === type || (type === "integer" && Number.isInteger(value)));
+}
+
+function expectedTypeLabels(schema: unknown): string[] {
+  const record = asRecord(schema);
+  if ("const" in record) return [`const:${String(record.const)}`];
+  if (Array.isArray(record.enum)) return record.enum.map((item) => `enum:${String(item)}`);
+  if (Array.isArray(record.oneOf)) return [...new Set(record.oneOf.flatMap(expectedTypeLabels))];
+  if (Array.isArray(record.anyOf)) return [...new Set(record.anyOf.flatMap(expectedTypeLabels))];
+  if (Array.isArray(record.type)) return record.type.map(String);
+  if (typeof record.type === "string") return [record.type];
+  return [];
+}
+
+function schemaAtPointer(root: unknown, pointer: string): unknown {
+  return pointerTokens(pointer).reduce<unknown>((current, token) => {
+    if (Array.isArray(current)) return current[Number(token)];
+    if (current && typeof current === "object") return (current as Record<string, unknown>)[token];
+    return undefined;
+  }, root);
+}
+
+function valueAtPointer(root: unknown, pointer: string): unknown {
+  return schemaAtPointer(root, pointer);
+}
+
+function pointerTokens(pointer: string): string[] {
+  return pointer
+    .split("/")
+    .slice(1)
+    .map((token) => token.replace(/~1/g, "/").replace(/~0/g, "~"));
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function jsonType(value: unknown): string {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  return typeof value;
+}
+
+function parentInstancePath(path: string): string {
+  const index = path.lastIndexOf("/");
+  return index <= 0 ? "" : path.slice(0, index);
+}

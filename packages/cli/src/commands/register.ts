@@ -249,6 +249,9 @@ function usageSuffix(commandGroup: string, subcommand: string | undefined): stri
   if (commandGroup === "diff") return " <before> <after>";
   if (commandGroup === "prepare") return " --reference <file> --target <file> --out <dir>";
   if (commandGroup === "render" || commandGroup === "validate") return " <input.json>";
+  if (commandGroup === "chart" && subcommand === "render") return " <chart-spec.json>";
+  if (commandGroup === "diagram" && subcommand === "render") return " <diagram.mmd>";
+  if (commandGroup === "layout" && subcommand === "apply") return " <layout-plan.json>";
   if (commandGroup === "edit") return " <input> --ops <ops.json>";
   if (commandGroup === "asset" && subcommand === "replace") return " <input> --asset <zip-path> <replacement>";
   if (commandGroup === "asset" && subcommand === "inspect") return " <input> [--embedded]";
@@ -257,6 +260,9 @@ function usageSuffix(commandGroup: string, subcommand: string | undefined): stri
   if (commandGroup === "schema" && subcommand === "validate") return " <input.json> --schema <schema-id>";
   if (commandGroup === "template" && subcommand === "candidates") return " [source.pptx|query]";
   if (commandGroup === "design" && subcommand === "capture") return " <source.pptx> --name <design>";
+  if (commandGroup === "benchmark" && subcommand === "run") return " --manifest <manifest.json>";
+  if (commandGroup === "benchmark" && subcommand === "compare") return " <before.json> <after.json>";
+  if (commandGroup === "benchmark") return " [manifest.json]";
   return "";
 }
 
@@ -283,14 +289,30 @@ function commandExamples(commandGroup: string, subcommand: string | undefined): 
     "officegen benchmark run --manifest benchmarks/office-corpus/manifest.json --report-out .officegen/benchmark-results/v2.5.0.json --agent --json",
     "officegen benchmark compare old.json .officegen/benchmark-results/v2.5.0.json --json"
   ];
+  if (commandGroup === "benchmark" && subcommand === "compare") return [
+    "officegen benchmark compare .officegen/benchmark-results/before.json .officegen/benchmark-results/after.json --agent --json"
+  ];
   if (commandGroup === "benchmark") return [
     "officegen benchmark run --manifest benchmarks/office-corpus/manifest.json --agent --json",
+    "officegen benchmark benchmarks/office-corpus/manifest.json --agent --json",
     "officegen benchmark compare before.json after.json --json"
   ];
   if (commandGroup === "improve") return ["officegen improve deck.pptx --agent --json", "officegen improve workbook.xlsx --profile dashboard --agent --json"];
   if (commandGroup === "template") return ["officegen template candidates source.pptx --agent --json"];
   if (commandGroup === "design") return ["officegen design init --name corp --json", "officegen design capture source.pptx --name corp --json"];
-  if (commandGroup === "layout") return ["officegen layout apply layout-plan.json --out .officegen/runs/layout.apply.json --json"];
+  if (commandGroup === "chart" && subcommand === "render") return [
+    "officegen chart render specs/revenue.chart.json --out .officegen/assets/revenue.svg --json"
+  ];
+  if (commandGroup === "chart") return ["officegen chart render specs/revenue.chart.json --out .officegen/assets/revenue.svg --json"];
+  if (commandGroup === "diagram" && subcommand === "render") return [
+    "officegen diagram render specs/process.mmd --out .officegen/assets/process.svg --json"
+  ];
+  if (commandGroup === "diagram") return ["officegen diagram render specs/process.mmd --out .officegen/assets/process.svg --json"];
+  if (commandGroup === "layout" && subcommand === "apply") return [
+    "officegen layout apply plans/title-slide.layout.json --out .officegen/runs/title-slide.layout.apply.json --json",
+    "officegen layout apply plans/title-slide.layout.json --out edited.pptx --overwrite --json"
+  ];
+  if (commandGroup === "layout") return ["officegen layout apply plans/title-slide.layout.json --out .officegen/runs/title-slide.layout.apply.json --json"];
   if (commandGroup === "schema") return ["officegen schema list --agent --json", "officegen schema validate deck.ir.json --schema officegen.ir.document@1.2 --json"];
   return [`officegen ${subcommand ? `${commandGroup} ${subcommand}` : commandGroup} --json`];
 }
@@ -322,7 +344,21 @@ function commandSpecificHelpOptions(commandGroup: string, subcommand: string | u
   if (commandGroup === "benchmark") return [
     "  --manifest <path>              benchmark manifest JSON",
     "  --report-out <path>            write benchmark JSON report",
+    "  positional manifest.json       alias for benchmark run --manifest manifest.json",
     "  setup: run npm run benchmark:fetch before public corpus runs"
+  ];
+  if (commandGroup === "chart" && subcommand === "render") return [
+    "  --out <path>                   write rendered SVG to disk",
+    "  input: JSON chart spec with title, data.values, and encoding fields"
+  ];
+  if (commandGroup === "diagram" && subcommand === "render") return [
+    "  --out <path>                   write rendered SVG to disk",
+    "  input: Mermaid-like text with simple A-->B edges"
+  ];
+  if (commandGroup === "layout" && subcommand === "apply") return [
+    "  --out <path>                   write plan JSON or mutate PPTX when output ends in .pptx",
+    "  --overwrite                    allow overwriting an existing PPTX output",
+    "  input: JSON plan with boxes, constraints, and optional targetPath"
   ];
   if (commandGroup === "run") return [
     "  --reference <path>            reference file for prepare-reference mode",
@@ -473,6 +509,9 @@ function baseCommand(name: string, description: string): Command {
     .option("--slides <range>", "limit PPTX operations to slides")
     .option("--pages <range>", "limit PDF/page operations to pages")
     .option("--object-map-limit <number>", "limit object map entries in output")
+    .option("--no-object-map", "omit object map arrays from output")
+    .option("--matches-only", "emit only selector matches for select output")
+    .option("--summary-only", "emit compact summaries for large candidate outputs")
     .option("--fields <csv>", "project selected top-level result fields")
     .option("--out <path>", "output path")
     .option("--overwrite", "allow overwriting an existing output")

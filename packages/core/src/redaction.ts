@@ -112,7 +112,7 @@ function redactValue(value: JsonValue, config: OfficegenConfig, location: string
   if (typeof value === "string") {
     let text = value;
     const redactions: RedactionRecord[] = [];
-    if (config.security.redactAbsolutePathsInJson && !isMarkupPayload(text, location)) {
+    if (config.security.redactAbsolutePathsInJson && !isMarkupPayload(text, location) && !isJsonPointerLocation(location)) {
       const pathResult = redactPathsInText(text, config, location, run);
       text = pathResult.value;
       redactions.push(...pathResult.redactions);
@@ -161,4 +161,8 @@ function isMarkupPayload(text: string, location: string): boolean {
   if (/\.html?$/i.test(location) && /^(?:<!doctype\s+html|<html\b)/i.test(trimmed)) return true;
   if (/\.xml$/i.test(location) && /^<\?xml\b/i.test(trimmed)) return true;
   return false;
+}
+
+function isJsonPointerLocation(location: string): boolean {
+  return /\.(?:instancePath|schemaPath)$/.test(location);
 }

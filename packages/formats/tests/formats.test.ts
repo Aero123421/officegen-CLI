@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import JSZip from "jszip";
 import { PDFDocument } from "pdf-lib";
 import { getBuiltinConfig } from "@officegen/core";
-import { DEFAULT_NATIVE_RENDERER_TIMEOUT_MS, MIN_NATIVE_RENDERER_TIMEOUT_MS, diffDocuments, diagnose, edit, exportDocument, extractAssets, inspect, inspectEmbeddedAssets, inspectInputZipSafety, render, renderChart, renderDiagram, replaceAsset, resolveEditSelectors, resolveNativeRendererTimeoutMs, verify, view } from "../src/index.js";
+import { DEFAULT_NATIVE_RENDERER_TIMEOUT_MS, MIN_NATIVE_RENDERER_TIMEOUT_MS, diffDocuments, diagnose, edit, exportDocument, extractAssets, inspect, inspectEmbeddedAssets, inspectInputZipSafety, render, renderChart, renderDiagram, replaceAsset, resolveEditSelectors, resolveNativeRendererTimeoutMs, validateOoxml, verify, view } from "../src/index.js";
 
 describe("@officegen/formats MVP", () => {
   it("renders and inspects a basic PPTX with untrusted text separation", async () => {
@@ -264,6 +264,31 @@ describe("@officegen/formats MVP", () => {
     expect(valuesByRef.get("C2")).toBe("");
   });
 
+  it("accepts XLSX sheet names from selector hints in direct edit ops", async () => {
+    const rendered = await render({
+      title: "Named sheets",
+      sheets: [
+        { name: "Summary", rows: [["Metric"], ["Old"]] },
+        { name: "Data", rows: [["Metric"], ["Old"]] }
+      ]
+    }, { target: "xlsx" });
+    const inspected = await inspect({ data: rendered.bytes, format: "xlsx" });
+    const dataA2 = inspected.objectMap.find((entry) => entry.selectorHints?.sheetName === "Data" && entry.selectorHints?.cell === "A2");
+    const edited = await edit(
+      { data: rendered.bytes, format: "xlsx" },
+      [
+        { op: "xlsx.setCell", sheetName: String(dataA2?.selectorHints?.sheetName), cell: "A2", value: "By sheetName" },
+        { op: "xlsx.setCell", sheet: "Summary", cell: "A2", value: "By sheet string" }
+      ]
+    );
+    const reinspected = await inspect({ data: edited.bytes, format: "xlsx" }, { depth: "full" });
+    const values = new Map(reinspected.objectMap.map((entry) => [`${entry.selectorHints?.sheetName}:${entry.selectorHints?.cell}`, entry.text]));
+
+    expect(dataA2?.selectorHints?.sheetName).toBe("Data");
+    expect(values.get("Data:A2")).toBe("By sheetName");
+    expect(values.get("Summary:A2")).toBe("By sheet string");
+  });
+
   it("sets XLSX ranges and resolves sheet/cell selectors with fingerprints", async () => {
     const rendered = await render({ title: "Range", sheets: [{ rows: [["A", "B"], ["old", "old"]] }] }, { target: "xlsx" });
     const edited = await edit(
@@ -312,6 +337,64 @@ describe("@officegen/formats MVP", () => {
 
     expect(sheetXml).toContain('<c r="C2"><f>SUM(A2:B2)</f></c>');
     expect(sheetXml?.match(/<row\b[^>]*\br="2"/g)).toHaveLength(1);
+  });
+
+  it("keeps workbook calcPr valid when XLSX setCell and setFormula run together", async () => {
+    const zip = new JSZip();
+    zip.file("[Content_Types].xml", [
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+      '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">',
+      '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>',
+      '<Default Extension="xml" ContentType="application/xml"/>',
+      '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>',
+      '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>',
+      "</Types>"
+    ].join(""));
+    zip.file("_rels/.rels", [
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">',
+      '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>',
+      "</Relationships>"
+    ].join(""));
+    zip.file("xl/_rels/workbook.xml.rels", [
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">',
+      '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>',
+      "</Relationships>"
+    ].join(""));
+    zip.file("xl/workbook.xml", [
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+      '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">',
+      '<sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets>',
+      '<calcPr calcId="171027"/>',
+      "</workbook>"
+    ].join(""));
+    zip.file("xl/worksheets/sheet1.xml", [
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+      '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">',
+      '<sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>A</t></is></c><c r="B1" t="inlineStr"><is><t>B</t></is></c></row><row r="2"><c r="A2"><v>2</v></c></row></sheetData>',
+      "</worksheet>"
+    ].join(""));
+    const input = await zip.generateAsync({ type: "uint8array" });
+    const operations = [
+      { op: "xlsx.setCell" as const, sheet: 1, cell: "B2", value: 3 },
+      { op: "xlsx.setFormula" as const, sheet: 1, cell: "C2", formula: "=SUM(A2:B2)" }
+    ];
+
+    const dryRun = await edit({ data: input, format: "xlsx" }, operations, { dryRun: true });
+    const edited = await edit({ data: input, format: "xlsx" }, operations);
+    const validation = await validateOoxml({ data: edited.bytes, format: "xlsx" });
+    const editedZip = await JSZip.loadAsync(edited.bytes as Uint8Array);
+    const workbookXml = await editedZip.file("xl/workbook.xml")?.async("string");
+    const sheetXml = await editedZip.file("xl/worksheets/sheet1.xml")?.async("string");
+
+    expect(dryRun).toMatchObject({ dryRun: true, changed: true, applied: 2 });
+    expect(validation.ok).toBe(true);
+    expect(validation.issues).toEqual([]);
+    expect(workbookXml).toContain('<calcPr calcId="171027" fullCalcOnLoad="1" forceFullCalc="1"/>');
+    expect(workbookXml?.match(/<calcPr\b/g)).toHaveLength(1);
+    expect(sheetXml).toContain('<c r="B2"><v>3</v></c>');
+    expect(sheetXml).toContain('<c r="C2"><f>SUM(A2:B2)</f></c>');
   });
 
   it("updates shifted XLSX formula references when inserting rows", async () => {
@@ -903,6 +986,33 @@ describe("@officegen/formats MVP", () => {
     expect(xml).toContain("<a:tabLst>");
     expect(xml).toContain("<a:t>Changed rich text</a:t>");
     expect(reinspected.objectMap.map((entry) => entry.text)).toContain("Changed rich text");
+  });
+
+  it("applies PPTX setBold to a selector-resolved field text shape", async () => {
+    const zip = new JSZip();
+    zip.file(
+      "ppt/slides/slide1.xml",
+      [
+        "<p:sld><p:sp><p:nvSpPr><p:cNvPr id=\"11\" name=\"Date Field\"/></p:nvSpPr><p:txBody>",
+        "<a:p><a:fld id=\"{11111111-1111-1111-1111-111111111111}\" type=\"datetime\"><a:rPr/><a:t>May 2026</a:t></a:fld></a:p>",
+        "</p:txBody></p:sp></p:sld>"
+      ].join("")
+    );
+    const bytes = await zip.generateAsync({ type: "uint8array" });
+    const operations = [{ op: "pptx.setBold" as const, selector: { contains: "May 2026" }, bold: true }];
+    const resolved = await resolveEditSelectors({ data: bytes, format: "pptx" }, operations);
+
+    expect(resolved.resolutions[0]).toMatchObject({ matched: true, matchCount: 1 });
+    expect(resolved.resolutions[0]?.matches[0]).toMatchObject({ kind: "shape", sourcePath: "ppt/slides/slide1.xml" });
+    expect(resolved.objectMap[0]?.selectorHints).toMatchObject({ slide: 1, shapeIndex: 1, shapeId: "11" });
+
+    const edited = await edit({ data: bytes, format: "pptx" }, operations, { resolveSelectors: true });
+    const editedZip = await JSZip.loadAsync(edited.bytes as Uint8Array);
+    const xml = await editedZip.file("ppt/slides/slide1.xml")?.async("string");
+
+    expect(edited.opResults?.[0]).toMatchObject({ applied: true });
+    expect(edited.errors).toBeUndefined();
+    expect(xml).toContain('<a:rPr b="1"/>');
   });
 
   it("replaces all text runs in a selected PPTX shape instead of leaving stale run text behind", async () => {

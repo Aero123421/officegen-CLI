@@ -84,6 +84,8 @@ export function gateTopLevelCommand(command, context) {
         return undefined;
     if (entry.commandGroup === "manifest" && second !== "inspect" && second !== "verify")
         return undefined;
+    if (entry.commandGroup === "benchmark" && second && looksLikeManifestPath(second))
+        return undefined;
     if (second && entry.commands.length > 1) {
         const allowed = new Set(entry.commands.map((registered) => registered.split(" ")[1]).filter(Boolean));
         if (allowed.size > 0 && !allowed.has(second)) {
@@ -108,6 +110,9 @@ function closestCommand(command, context) {
     if (command === "bench")
         return "benchmark";
     return commands.find((candidate) => candidate.startsWith(command) || command.startsWith(candidate));
+}
+function looksLikeManifestPath(value) {
+    return /\.[A-Za-z0-9]+$/.test(value) || value.includes("/") || value.includes("\\");
 }
 const NO_POSITIONAL_LEAF_COMMANDS = new Set([
     "capabilities",

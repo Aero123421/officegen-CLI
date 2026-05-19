@@ -59,6 +59,7 @@ export async function inspectSheets(zip) {
                 bbox: bounds ? [bounds.x, bounds.y, bounds.width, bounds.height] : undefined,
                 selectorHints: {
                     sheet: sheetIndex + 1,
+                    sheetName,
                     cell: cell.ref,
                     formula: formulaCell?.formula,
                     formulaType: formulaCell?.formulaType,
@@ -103,7 +104,7 @@ export async function inspectSheets(zip) {
                 label: range,
                 sourcePath: sheetPath,
                 xmlPath: sheetPath,
-                selectorHints: { sheet: sheetIndex + 1, range, regionRole: "validation" },
+                selectorHints: { sheet: sheetIndex + 1, sheetName, range, regionRole: "validation" },
                 editableOps: ["xlsx.validation.set", "xlsx.validation.delete"],
                 trust: { level: "untrusted", reason: "document-content" },
                 untrusted: true

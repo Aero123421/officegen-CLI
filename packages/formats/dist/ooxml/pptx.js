@@ -50,6 +50,7 @@ export async function inspectSlides(zip) {
                 bbox: shape.bounds ? [shape.bounds.x, shape.bounds.y, shape.bounds.width, shape.bounds.height] : undefined,
                 selectorHints: {
                     slide: slideNo,
+                    shapeIndex: shape.shapeIndex,
                     shapeId: shape.shapeId,
                     name: shape.name,
                     placeholder: shape.placeholderType,

@@ -37,6 +37,16 @@ describe("schema registry", () => {
     }).ok).toBe(true);
     expect(validateSchema("officegen.edit.ops@1.2", {
       schema: "officegen.edit.ops@1.2",
+      target: "xlsx",
+      ops: [{ op: "xlsx.setCell", sheetName: "Data", cell: "A1", value: "ok" }]
+    }).ok).toBe(true);
+    expect(validateSchema("officegen.edit.ops@1.2", {
+      schema: "officegen.edit.ops@1.2",
+      target: "xlsx",
+      ops: [{ op: "xlsx.setCell", sheet: "Data", cell: "A1", value: "ok" }]
+    }).ok).toBe(true);
+    expect(validateSchema("officegen.edit.ops@1.2", {
+      schema: "officegen.edit.ops@1.2",
       target: "pptx",
       ops: [{ op: "pptx.duplicateSlide", slide: 1 }]
     }).ok).toBe(true);
@@ -181,6 +191,25 @@ describe("schema registry", () => {
     expect(mismatch.ok).toBe(false);
     if (!mismatch.ok) {
       expect(mismatch.errors.some((error) => error.instancePath === "/schema" && error.keyword === "const")).toBe(true);
+    }
+  });
+
+  it("summarizes oneOf edit-op failures with the closest operation schema", () => {
+    const validation = validateSchema("officegen.edit.ops@1.2", {
+      schema: "officegen.edit.ops@1.2",
+      target: "xlsx",
+      ops: [{ op: "xlsx.setCell", sheetName: "Data", cell: "A1", values: [["wrong"]] }]
+    }, { diagnostics: true });
+
+    expect(validation.ok).toBe(false);
+    if (!validation.ok) {
+      expect(validation.diagnostics?.[0]).toMatchObject({
+        instancePath: "/ops/0",
+        bestMatch: { op: "xlsx.setCell" },
+        missing: ["value"],
+        unexpected: ["values"]
+      });
+      expect(validation.diagnostics?.[0]?.expectedTypes.value).toEqual(["string", "number", "boolean", "null"]);
     }
   });
 

@@ -1,10 +1,10 @@
-import { getLoadedZipSafetyReport, isOfficeFormat, loadZip, normalizeInput, readZipBytes, readZipText, stripXmlTags, writeOutput, zipSafetyCaveats, zipToBytes } from "./shared.js";
+import { decodeXmlEntities, getLoadedZipSafetyReport, isOfficeFormat, loadZip, normalizeInput, readZipBytes, readZipText, stripXmlTags, writeOutput, zipSafetyCaveats, zipToBytes } from "./shared.js";
 import { inspect } from "./inspect.js";
 import { commentXml, insertParagraphAfter, insertedParagraphXml, replaceOrCreateHeaderFooter, setParagraphText } from "./ooxml/docx.js";
 import { embedPdfFonts } from "./pdfFonts.js";
 import { addBlankSlide, addTextBox, duplicateSlide, extractShapes, getSlidePaths, reorderSlides, replaceShapeBulletItems } from "./ooxml/pptx.js";
 import { appendRows, insertRows, setCell, sheetPath } from "./ooxml/xlsx.js";
-import { escapeXmlText, pxToEmu, replaceAllXmlText, setFirstTextInBlock } from "./ooxml/xml.js";
+import { escapeXmlText, pxToEmu, replaceAllXmlText, setFirstTextInBlock, xmlAttr } from "./ooxml/xml.js";
 import { nextRelationshipId } from "./ooxml/relationships.js";
 import { PackageGraph } from "./ooxml/packageGraph.js";
 import { applyXmlPatches } from "./ooxml/patchEngine.js";
@@ -344,7 +344,8 @@ async function applyOfficeOperation(context, format, operation, objectMap, index
     }
     if (format === "xlsx" && op === "xlsx.insertRows") {
         const rowOp = operation;
-        const path = sheetPath(rowOp.sheet);
+        const sheetNo = await resolveXlsxSheet(zip, rowOp);
+        const path = sheetPath(sheetNo);
         const xml = (await readZipText(zip, path)) ?? "";
         const next = insertRows(xml, rowOp.rowIndex, rowOp.rows);
         if (next.changed)
@@ -353,7 +354,8 @@ async function applyOfficeOperation(context, format, operation, objectMap, index
     }
     if (format === "xlsx" && op === "xlsx.appendRows") {
         const rowOp = operation;
-        const path = sheetPath(rowOp.sheet);
+        const sheetNo = await resolveXlsxSheet(zip, rowOp);
+        const path = sheetPath(sheetNo);
         const xml = (await readZipText(zip, path)) ?? "";
         const next = appendRows(xml, rowOp.rows);
         if (next.changed)
@@ -362,11 +364,11 @@ async function applyOfficeOperation(context, format, operation, objectMap, index
     }
     if (format === "xlsx" && op === "xlsx.setCell") {
         const cellOp = operation;
-        return editXlsxSetCell(zip, cellOp.sheet, cellOp.cell, cellOp.value);
+        return editXlsxSetCell(zip, await resolveXlsxSheet(zip, cellOp), cellOp.cell, cellOp.value);
     }
     if (format === "xlsx" && op === "xlsx.setFormula") {
         const formulaOp = operation;
-        return editXlsxSetFormula(zip, formulaOp.sheet, formulaOp.cell, formulaOp.formula);
+        return editXlsxSetFormula(zip, await resolveXlsxSheet(zip, formulaOp), formulaOp.cell, formulaOp.formula);
     }
     if (format === "xlsx" && op === "xlsx.definedName.set") {
         return editXlsxDefinedName(zip, operation, "set");
@@ -376,10 +378,11 @@ async function applyOfficeOperation(context, format, operation, objectMap, index
     }
     if (format === "xlsx" && op === "xlsx.setRange") {
         const rangeOp = operation;
-        return editXlsxSetRange(zip, rangeOp.sheet, rangeOp.startCell, rangeOp.values);
+        return editXlsxSetRange(zip, await resolveXlsxSheet(zip, rangeOp), rangeOp.startCell, rangeOp.values);
     }
     if (format === "xlsx" && (op === "xlsx.updateTable" || op === "xlsx.writeTable")) {
         const tableOp = operation;
+        const sheetNo = await resolveXlsxSheet(zip, tableOp);
         let changed = false;
         const start = /^([A-Z]+)(\d+)$/i.exec(tableOp.startCell);
         if (!start)
@@ -388,10 +391,10 @@ async function applyOfficeOperation(context, format, operation, objectMap, index
         const startRow = Number(start[2]);
         for (const [r, row] of tableOp.rows.entries()) {
             for (const [c, value] of row.entries()) {
-                changed = (await editXlsxSetCell(zip, tableOp.sheet, `${columnName(startCol + c)}${startRow + r}`, value)) || changed;
+                changed = (await editXlsxSetCell(zip, sheetNo, `${columnName(startCol + c)}${startRow + r}`, value)) || changed;
             }
         }
-        changed = (await ensureXlsxTable(zip, tableOp.sheet, tableOp.startCell, tableOp.rows, tableOp.tableName)) || changed;
+        changed = (await ensureXlsxTable(zip, sheetNo, tableOp.startCell, tableOp.rows, tableOp.tableName)) || changed;
         return changed;
     }
     if (format === "xlsx" && op === "xlsx.table.resize") {
@@ -1098,6 +1101,32 @@ function smartReplaceDocxParagraph(paragraph, from, to) {
         return `<w:t${attrs}>${escapeXmlText(replaced)}</w:t>`;
     });
 }
+async function resolveXlsxSheet(zip, operation) {
+    if (typeof operation.sheet === "number")
+        return operation.sheet;
+    const requested = typeof operation.sheetName === "string" && operation.sheetName.trim()
+        ? operation.sheetName
+        : typeof operation.sheet === "string"
+            ? operation.sheet
+            : undefined;
+    if (!requested)
+        return undefined;
+    const workbook = (await readZipText(zip, "xl/workbook.xml")) ?? "";
+    const names = readXlsxWorkbookSheetNames(workbook);
+    const requestedKey = requested.trim().toLowerCase();
+    const index = names.findIndex((name) => name.toLowerCase() === requestedKey);
+    if (index >= 0)
+        return index + 1;
+    const numeric = Number(requested);
+    if (Number.isInteger(numeric) && numeric > 0)
+        return numeric;
+    throw new Error(`SELECTOR_NOT_FOUND: XLSX sheet '${requested}' was not found.`);
+}
+function readXlsxWorkbookSheetNames(workbookXml) {
+    return [...workbookXml.matchAll(/<sheet\b[^>]*\bname="([^"]*)"/g)]
+        .map((match) => decodeXmlEntities(match[1] ?? ""))
+        .filter(Boolean);
+}
 async function editXlsxSetCell(zip, sheet, ref, value) {
     if (!ref)
         throw new Error("SELECTOR_NOT_FOUND: xlsx cell ref is required.");
@@ -1128,20 +1157,32 @@ async function editXlsxSetFormula(zip, sheet, ref, formula) {
     assertSafeXlsxFormula(formula);
     const path = sheetPath(sheet);
     const xml = (await readZipText(zip, path)) ?? "";
-    const cellXml = `<c r="${escapeXmlText(ref)}"><f>${escapeXmlText(formula.replace(/^=/, ""))}</f></c>`;
     const pattern = new RegExp(`<c\\b[^>]*\\br=["']${escapeRegExp(ref)}["'][^>]*?(?:\\/>|>[\\s\\S]*?<\\/c>)`);
     const rowNo = rowFromRef(ref);
     const rowPattern = new RegExp(`<row\\b([^>]*)\\br=["']${rowNo}["'][^>]*>[\\s\\S]*?<\\/row>`);
     const next = pattern.test(xml)
-        ? xml.replace(pattern, cellXml)
+        ? xml.replace(pattern, (cell) => formulaCellXml(ref, formula, /^<c\b([^>]*)/.exec(cell)?.[1] ?? ""))
         : rowPattern.test(xml)
-            ? xml.replace(rowPattern, (row) => row.replace(/<\/row>$/, `${cellXml}</row>`))
-            : xml.replace(/<\/sheetData>/, `<row r="${rowNo}">${cellXml}</row></sheetData>`);
+            ? xml.replace(rowPattern, (row) => row.replace(/<\/row>$/, `${formulaCellXml(ref, formula)}</row>`))
+            : xml.replace(/<\/sheetData>/, `<row r="${rowNo}">${formulaCellXml(ref, formula)}</row></sheetData>`);
     if (next !== xml) {
         zip.file(path, next);
         await markXlsxRecalcNeeded(zip);
     }
     return next !== xml;
+}
+function formulaCellXml(ref, formula, existingAttrs = "") {
+    const preservedAttrs = preserveXlsxCellAttrs(existingAttrs);
+    return `<c r="${escapeXmlText(ref)}"${preservedAttrs}><f>${escapeXmlText(formula.replace(/^=/, ""))}</f></c>`;
+}
+function preserveXlsxCellAttrs(attrs) {
+    const preserved = [];
+    for (const name of ["s", "cm", "vm", "ph"]) {
+        const value = xmlAttr(attrs, name);
+        if (value !== undefined)
+            preserved.push(`${name}="${escapeXmlText(value)}"`);
+    }
+    return preserved.length ? ` ${preserved.join(" ")}` : "";
 }
 async function editXlsxDefinedName(zip, operation, mode) {
     const path = "xl/workbook.xml";
@@ -1185,13 +1226,39 @@ async function markXlsxRecalcNeeded(zip) {
     const workbookPath = "xl/workbook.xml";
     const workbook = (await readZipText(zip, workbookPath)) ?? "";
     if (workbook) {
-        const next = /<calcPr\b[^>]*\/>/.test(workbook)
-            ? workbook.replace(/<calcPr\b([^>]*)\/>/, (_match, attrs) => `<calcPr${upsertXmlAttr(upsertXmlAttr(attrs, "fullCalcOnLoad", "1"), "forceFullCalc", "1")}/>`)
-            : workbook.replace(/<\/workbook>/, '<calcPr fullCalcOnLoad="1" forceFullCalc="1"/></workbook>');
+        const next = updateXlsxWorkbookCalcPr(workbook);
         if (next !== workbook)
             zip.file(workbookPath, next);
     }
     zip.remove("xl/calcChain.xml");
+}
+function updateXlsxWorkbookCalcPr(workbook) {
+    const workbookPrefix = /^<\?xml\b[\s\S]*?\?>\s*<([A-Za-z_][\w.-]*:)?workbook\b|<([A-Za-z_][\w.-]*:)?workbook\b/.exec(workbook)?.[1]
+        ?? /^<\?xml\b[\s\S]*?\?>\s*<([A-Za-z_][\w.-]*:)?workbook\b|<([A-Za-z_][\w.-]*:)?workbook\b/.exec(workbook)?.[2]
+        ?? "";
+    const calcName = `${workbookPrefix}calcPr`;
+    const calcPattern = new RegExp(`<${escapeRegExp(calcName)}\\b([^>]*?)(?:\\s*\\/\\s*>|>[\\s\\S]*?<\\/${escapeRegExp(calcName)}>)`, "i");
+    if (calcPattern.test(workbook)) {
+        return workbook.replace(calcPattern, (_match, attrs) => calcPrXml(calcName, attrs));
+    }
+    const genericCalcPattern = /<([A-Za-z_][\w.-]*:)?calcPr\b([^>]*?)(?:\s*\/\s*>|>[\s\S]*?<\/(?:[A-Za-z_][\w.-]*:)?calcPr>)/i;
+    if (genericCalcPattern.test(workbook)) {
+        return workbook.replace(genericCalcPattern, (_match, prefix, attrs) => calcPrXml(`${prefix ?? ""}calcPr`, attrs));
+    }
+    return insertXlsxCalcPr(workbook, calcName);
+}
+function calcPrXml(tagName, attrs) {
+    const nextAttrs = upsertXmlAttr(upsertXmlAttr(attrs, "fullCalcOnLoad", "1"), "forceFullCalc", "1");
+    return `<${tagName}${nextAttrs ? ` ${nextAttrs}` : ""}/>`;
+}
+function insertXlsxCalcPr(workbook, tagName) {
+    const calcPr = calcPrXml(tagName, "");
+    if (/<(?:[A-Za-z_][\w.-]*:)?extLst\b/i.test(workbook)) {
+        return workbook.replace(/<([A-Za-z_][\w.-]*:)?extLst\b/i, `${calcPr}<$1extLst`);
+    }
+    const workbookPrefix = tagName.includes(":") ? `${tagName.split(":")[0]}:` : "";
+    const closePattern = new RegExp(`</${escapeRegExp(workbookPrefix)}workbook>`, "i");
+    return workbook.replace(closePattern, `${calcPr}</${workbookPrefix}workbook>`);
 }
 function updatePictureCrop(slideXml, target, pictureIndex, fit, crop, replacement, mediaType) {
     const shapeId = String(target.selectorHints?.shapeId ?? "");
@@ -1259,13 +1326,19 @@ function richBulletParagraphXml(item, index, spaceBeforeForLevel1ExceptFirst) {
     return `<a:p><a:pPr lvl="${level}">${spaceBefore}${bullet}</a:pPr><a:r><a:rPr${bold}/><a:t>${escapeXmlText(record.text)}</a:t></a:r></a:p>`;
 }
 function updateShapeRunProperties(shape, options) {
-    return shape.replace(/<a:r\b[^>]*>[\s\S]*?<\/a:r>/g, (run) => {
-        if (/<a:rPr\b/.test(run)) {
-            return run.replace(/<a:rPr\b([^>]*)\/>/, (_match, attrs) => `<a:rPr${runPropertyAttrs(attrs, options)}/>`)
-                .replace(/<a:rPr\b([^>]*)>/, (_match, attrs) => `<a:rPr${runPropertyAttrs(attrs, options)}>`);
-        }
-        return run.replace(/(<a:r\b[^>]*>)/, `$1<a:rPr${runPropertyAttrs("", options)}/>`);
-    });
+    return shape
+        .replace(/<a:r\b[^>]*>[\s\S]*?<\/a:r>/g, (run) => updateTextRunPropertyBlock(run, "a:r", options))
+        .replace(/<a:fld\b[^>]*>[\s\S]*?<\/a:fld>/g, (field) => updateTextRunPropertyBlock(field, "a:fld", options));
+}
+function updateTextRunPropertyBlock(block, tag, options) {
+    if (/<a:rPr\b[^>]*\/>/.test(block)) {
+        return block.replace(/<a:rPr\b([^>]*)\/>/, (_match, attrs) => `<a:rPr${runPropertyAttrs(attrs, options)}/>`);
+    }
+    if (/<a:rPr\b/.test(block)) {
+        return block.replace(/<a:rPr\b([^>]*)>/, (_match, attrs) => `<a:rPr${runPropertyAttrs(attrs, options)}>`);
+    }
+    const escapedTag = escapeRegExp(tag);
+    return block.replace(new RegExp(`(<${escapedTag}\\b[^>]*>)`), `$1<a:rPr${runPropertyAttrs("", options)}/>`);
 }
 function runPropertyAttrs(attrs, options) {
     let next = attrs;
