@@ -2713,6 +2713,7 @@ async function officeAgentPayload(context: RuntimeContext): Promise<unknown> {
   const manifestOut = optionValue(context.argv, "--manifest") ? await validateOutputPath(context, optionValue(context.argv, "--manifest")!) : undefined;
   const summaryOut = optionValue(context.argv, "--summary") ? await validateOutputPath(context, optionValue(context.argv, "--summary")!) : undefined;
   const logJsonlOut = optionValue(context.argv, "--log-jsonl") ? await validateOutputPath(context, optionValue(context.argv, "--log-jsonl")!) : undefined;
+  const reportOut = optionValue(context.argv, "--report-out") ? await validateOutputPath(context, optionValue(context.argv, "--report-out")!) : undefined;
   const inputPath = input ? await validateInputPath(context, input) : undefined;
   const goalPath = goal ? await validateInputPath(context, goal) : undefined;
   const targetOut = optionValue(context.argv, "--target")
@@ -2723,7 +2724,8 @@ async function officeAgentPayload(context: RuntimeContext): Promise<unknown> {
     { label: "--target", path: targetOut },
     ...(manifestOut ? [{ label: "--manifest", path: manifestOut }] : []),
     ...(summaryOut ? [{ label: "--summary", path: summaryOut }] : []),
-    ...(logJsonlOut ? [{ label: "--log-jsonl", path: logJsonlOut }] : [])
+    ...(logJsonlOut ? [{ label: "--log-jsonl", path: logJsonlOut }] : []),
+    ...(reportOut ? [{ label: "--report-out", path: reportOut }] : [])
   ]);
   await fs.mkdir(outDir, { recursive: true });
 
@@ -2812,7 +2814,23 @@ async function officeAgentPayload(context: RuntimeContext): Promise<unknown> {
       "officegen edit <input> --ops <run>/ops.json --dry-run --resolve-selectors --agent --json"
     ]
   };
-  return maybeWriteReport(context, result, "run office-agent");
+  if (reportOut) return writeReportPayload(context, result, reportOut, "run office-agent");
+  return applyOutputProjection(context, result);
+}
+
+async function writeReportPayload(context: RuntimeContext, payload: unknown, reportPath: string, sourceCommand: string): Promise<unknown> {
+  const limited = applyOutputProjection(context, payload);
+  const safeReport = redactJson(limited as JsonValue, context.config).value;
+  await fs.mkdir(path.dirname(reportPath), { recursive: true });
+  await fs.writeFile(reportPath, `${JSON.stringify(safeReport, null, 2)}\n`, "utf8");
+  return {
+    ...(asRecord(safeReport)),
+    reportOut: reportPath,
+    artifacts: [
+      ...asArray(asRecord(safeReport).artifacts),
+      { path: reportPath, exists: true, kind: "report", format: "json", sourceCommand }
+    ]
+  };
 }
 
 function assertRunOutputRoot(command: string, outputRoot: string | undefined, denyOutsideOutputRoot: boolean, outputs: Array<{ label: string; path: string }>): void {
