@@ -334,6 +334,8 @@ npm run typecheck
 npm test
 npm run build
 npm run pack:smoke
+npm run perfect-spec:evidence
+npm run perfect-spec:check
 npm run github-install:smoke
 npm run release-tarball:smoke
 npm run remediation:check
@@ -349,10 +351,17 @@ OFFICEGEN_GITHUB_INSTALL_SPEC=github:Aero123421/officegen-CLI#<commit-sha> npm r
 Post-tag checks:
 
 ```bash
+npm run perfect-spec:post-tag-smoke
+npm run perfect-spec:evidence
+npm run perfect-spec:check -- --gate=publish
 npm run github-install:tag-smoke
 npm run github-install:remote-smoke
 OFFICEGEN_RELEASE_TARBALL_SPEC=https://github.com/Aero123421/officegen-CLI/releases/download/v3.0.0/officegen-v3.0.0.tgz npm run release-tarball:smoke
 ```
+
+The pre-tag visibility gate may show `L7-A009` as pending because tag and release install checks need a real tag or released asset. The release workflow must collect `.officegen/acceptance/perfect-spec/post-tag-smoke.json` plus the tag/remote smoke logs, regenerate the perfect-spec evidence bundle, and pass `npm run perfect-spec:check -- --gate=publish` before packaging release assets. The workflow uploads `.officegen/acceptance/perfect-spec` as CI evidence.
+
+This project intentionally does not publish the `officegen` package name to npm. `npm publish` is blocked by `prepublishOnly`; use `npm pack`, `npm run pack:smoke`, and the GitHub Release tarball flow instead.
 
 Optional public corpus benchmark:
 

@@ -23,6 +23,10 @@
     "release-tarball:smoke": "node scripts/release-tarball-smoke.mjs",
     "benchmark:fetch": "node scripts/benchmark-fetch.mjs",
     "benchmark:review": "node scripts/benchmark-review.mjs",
+    "perfect-spec:cli-parity": "node scripts/capture-cli-parity.mjs",
+    "perfect-spec:post-tag-smoke": "node scripts/perfect-spec-post-tag-smoke.mjs",
+    "perfect-spec:evidence": "node scripts/generate-perfect-spec-evidence.mjs",
+    "perfect-spec:check": "node scripts/check-perfect-spec.mjs",
     "remediation:check": "node scripts/check-remediation-matrix.mjs",
     "goal:check": "node scripts/check-goal.mjs",
     "contract:check": "node scripts/check-contract.mjs",
@@ -30,7 +34,8 @@
     "security:fixtures": "node scripts/security-fixtures.mjs",
     "benchmark:local-fixtures": "node scripts/benchmark-local-fixtures.mjs",
     "version:bump": "node scripts/version-bump.mjs",
-    "version:check": "node scripts/version-bump.mjs --check"
+    "version:check": "node scripts/version-bump.mjs --check",
+    "prepublishOnly": "node scripts/block-npm-publish.mjs"
   },
   "bin": {
     "officegen": "bin/officegen.js"
@@ -50,6 +55,7 @@
     "scripts/check-goal.mjs",
     "scripts/github-install-smoke.mjs",
     "scripts/release-tarball-smoke.mjs",
+    "scripts/block-npm-publish.mjs",
     "benchmarks/office-corpus/manifest.json",
     "goal/**/*.json",
     "goal/**/*.md",

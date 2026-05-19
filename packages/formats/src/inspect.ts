@@ -15,6 +15,7 @@ import {
 import { inspectParagraphs } from "./ooxml/docx.js";
 import { inspectSlides } from "./ooxml/pptx.js";
 import { inspectSheets } from "./ooxml/xlsx.js";
+import { inspectPdfObjectGraph } from "./pdf/objectGraph.js";
 import { PDFDocument } from "pdf-lib";
 
 export type InspectDepth = "summary" | "shallow" | "full";
@@ -164,7 +165,7 @@ function docxStructureObjectMap(structureMap: Record<string, unknown> | undefine
 async function inspectDocx(input: Awaited<ReturnType<typeof normalizeInput>>, options: InspectOptions): Promise<InspectResult> {
   const zip = await loadZip(input, { zipSafety: { config: options.config } });
   const paths = sortedZipFiles(zip);
-  const { paragraphs, objectMap } = await inspectParagraphs(zip);
+  const { paragraphs, objectMap, storyGraph, runGraph } = await inspectParagraphs(zip);
   const mediaPaths = paths.filter((path) => /^word\/media\//i.test(path));
   const headerPaths = paths.filter((path) => /^word\/header\d+\.xml$/i.test(path));
   const footerPaths = paths.filter((path) => /^word\/footer\d+\.xml$/i.test(path));
@@ -194,6 +195,8 @@ async function inspectDocx(input: Awaited<ReturnType<typeof normalizeInput>>, op
     ),
     untrusted: {
       paragraphs: summaryDepth ? paragraphs.slice(0, 50).map((paragraph) => ({ ...paragraph, text: paragraph.text.slice(0, 300) })) : paragraphs,
+      storyGraph,
+      runGraph,
       documentParts: {
         headers: headerPaths,
         footers: footerPaths,
@@ -313,37 +316,67 @@ async function inspectXlsx(input: Awaited<ReturnType<typeof normalizeInput>>, op
 
 async function inspectPdf(input: Awaited<ReturnType<typeof normalizeInput>>, options: InspectOptions): Promise<InspectResult> {
   const pdf = await PDFDocument.load(input.bytes, { ignoreEncryption: true });
-  const extractedText = extractPdfTextPreview(input.bytes);
-  const textPages = extractedText.pages;
   const summaryDepth = options.depth === "summary";
-  const pages = pdf.getPages().map((page, index) => {
-    const size = page.getSize();
-    const text = textPages[index] ?? "";
+  const pageSizes = pdf.getPages().map((page) => page.getSize());
+  const graph = await inspectPdfObjectGraph(input.bytes, pageSizes);
+  const pageText = groupPdfTextByPage(graph.textBlocks);
+  const pages = pageSizes.map((size, index) => {
+    const text = pageText.get(index + 1) ?? "";
     return {
       stableObjectId: makeStableObjectId("pdf", "document", "page", index + 1),
       index: index + 1,
       width: size.width,
       height: size.height,
+      textBlockCount: graph.textBlocks.filter((block) => block.page === index + 1).length,
+      annotationCount: graph.annotations.filter((annotation) => annotation.page === index + 1).length,
       textPreview: text.slice(0, summaryDepth ? 300 : 1000),
       untrusted: true
     };
   });
+  const objectMap = pdfObjectMap(pages, graph, summaryDepth);
+  const metadata = {
+    title: pdf.getTitle(),
+    author: pdf.getAuthor(),
+    subject: pdf.getSubject(),
+    keywords: pdf.getKeywords(),
+    creator: pdf.getCreator(),
+    producer: pdf.getProducer(),
+    creationDate: pdf.getCreationDate()?.toISOString(),
+    modificationDate: pdf.getModificationDate()?.toISOString(),
+    ...graph.metadata
+  };
   return {
     schema: "officegen.inspect.result@1.2",
     trusted: trustedMeta(
       "officegen.inspect.result@1.2",
       input,
-      { pages: pages.length, textBlocks: textPages.filter(Boolean).length, images: extractedText.imageRefs },
+      {
+        pages: pages.length,
+        textBlocks: graph.textBlocks.length,
+        annotations: graph.annotations.length,
+        images: graph.scan.imageObjects,
+        embeddedFiles: graph.scan.embeddedFiles,
+        unsupportedFilters: graph.scan.unsupportedFilters.length,
+        riskFlags: graph.riskFlags.length
+      },
       [
         "PDF text extraction is best-effort; scanned/image PDFs should be reviewed through page preview artifacts.",
-        ...(textPages.some(Boolean) ? [] : ["PDF_QUALITY_TEXT_BLOCKS_ZERO: no extractable text blocks were found; page preview artifacts or native PDF tooling are recommended."]),
-        ...(extractedText.caveats.length ? extractedText.caveats : [])
+        "PDF redact operations are intentionally blocked; overlay text or rectangles do not remove underlying content.",
+        ...graph.caveats
       ]
     ),
     untrusted: {
       pages,
-      ...(summaryDepth ? {} : { text: textPages }),
-      qualityWarnings: textPages.some(Boolean)
+      pdfGraph: {
+        pageCount: graph.pageCount,
+        textBlocks: summaryDepth ? graph.textBlocks.slice(0, 40).map((block) => ({ ...block, text: block.text.slice(0, 240) })) : graph.textBlocks,
+        annotations: summaryDepth ? graph.annotations.slice(0, 40) : graph.annotations,
+        metadata,
+        scan: graph.scan,
+        riskFlags: graph.riskFlags
+      },
+      ...(summaryDepth ? {} : { text: pages.map((page) => pageText.get(page.index) ?? "") }),
+      qualityWarnings: graph.textBlocks.length
         ? []
         : [{
             code: "PDF_TEXT_BLOCKS_ZERO",
@@ -354,21 +387,73 @@ async function inspectPdf(input: Awaited<ReturnType<typeof normalizeInput>>, opt
             doctorCommand: "officegen renderer doctor --json"
           }]
     },
-    objectMap: pages
-      .map((page, index) => textPages[index]
-        ? {
-            stableObjectId: makeStableObjectId("pdf", "document", "text", index + 1),
-            kind: "pdfText",
-            text: summaryDepth ? undefined : textPages[index],
-            textPreview: textPages[index]?.slice(0, 240),
-            selectorHints: { page: page.index },
-            trust: { level: "untrusted" as const, reason: "document-content" },
-            untrusted: true as const
-          }
-        : undefined)
-      .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry)),
+    objectMap: summaryDepth ? compactObjectMap(objectMap, 60) : objectMap,
     agentInstruction: AGENT_UNTRUSTED_INSTRUCTION
   };
+}
+
+function groupPdfTextByPage(textBlocks: Array<{ page: number; text: string }>): Map<number, string> {
+  const pages = new Map<number, string[]>();
+  for (const block of textBlocks) {
+    const text = block.text.trim();
+    if (!text) continue;
+    pages.set(block.page, [...(pages.get(block.page) ?? []), text]);
+  }
+  return new Map([...pages.entries()].map(([page, blocks]) => [page, blocks.join(" ").replace(/\s+/g, " ").trim()]));
+}
+
+function pdfObjectMap(
+  pages: Array<{ stableObjectId: string; index: number; width: number; height: number; textPreview: string }>,
+  graph: Awaited<ReturnType<typeof inspectPdfObjectGraph>>,
+  summaryDepth: boolean
+): InspectResult["objectMap"] {
+  const entries: InspectResult["objectMap"] = [];
+  for (const block of graph.textBlocks) {
+    const width = block.width ?? Math.max(24, block.text.length * 6);
+    const height = block.height ?? 12;
+    const x = block.x ?? 24;
+    const y = block.y ?? (56 + (block.index - 1) * 18);
+    entries.push({
+      stableObjectId: makeStableObjectId("pdf", `page-${String(block.page).padStart(4, "0")}`, "text", block.index),
+      kind: "pdfText",
+      text: summaryDepth ? undefined : block.text,
+      textPreview: block.text.slice(0, 240),
+      bounds: { x, y, width, height },
+      bbox: [x, y, width, height],
+      selectorHints: { page: block.page, textBlock: block.index, source: block.source },
+      editableOps: ["pdf.textOverlay", "pdf.annotation"],
+      trust: { level: "untrusted", reason: "document-content" },
+      untrusted: true
+    });
+  }
+  for (const annotation of graph.annotations) {
+    const [x1 = 24, y1 = 56, x2 = x1 + 120, y2 = y1 + 32] = annotation.rect ?? [];
+    entries.push({
+      stableObjectId: makeStableObjectId("pdf", `page-${String(annotation.page).padStart(4, "0")}`, "annotation", annotation.index),
+      kind: "pdfAnnotation",
+      label: annotation.subtype,
+      text: summaryDepth ? undefined : annotation.contents,
+      textPreview: annotation.contents?.slice(0, 240),
+      bounds: { x: x1, y: y1, width: Math.abs(x2 - x1), height: Math.abs(y2 - y1) },
+      bbox: [x1, y1, Math.abs(x2 - x1), Math.abs(y2 - y1)],
+      selectorHints: { page: annotation.page, annotation: annotation.index, subtype: annotation.subtype },
+      trust: { level: "untrusted", reason: "document-content" },
+      untrusted: true
+    });
+  }
+  entries.push(...pages.map((page) => ({
+    stableObjectId: page.stableObjectId,
+    kind: "pdfPage",
+    label: `Page ${page.index}`,
+    textPreview: page.textPreview,
+    bounds: { x: 0, y: 0, width: page.width, height: page.height },
+    bbox: [0, 0, page.width, page.height] as [number, number, number, number],
+    selectorHints: { page: page.index },
+    editableOps: ["pdf.textOverlay", "pdf.annotation"],
+    trust: { level: "untrusted" as const, reason: "document-content" },
+    untrusted: true as const
+  })));
+  return entries;
 }
 
 function extractPdfTextPreview(bytes: Uint8Array): { pages: string[]; imageRefs: number; caveats: string[] } {

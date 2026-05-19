@@ -91,9 +91,14 @@ jobs:
           OFFICEGEN_GITHUB_INSTALL_SPEC: github:${{ github.repository }}#${{ github.sha }}
         run: npm run github-install:smoke
 
-      - name: Remote tag GitHub install smoke
-        if: github.event_name != 'workflow_dispatch'
-        run: npm run github-install:tag-smoke
+      - name: Post-tag perfect-spec smoke evidence
+        run: npm run perfect-spec:post-tag-smoke
+
+      - name: Perfect spec evidence
+        run: npm run perfect-spec:evidence
+
+      - name: Perfect spec publish gate
+        run: npm run perfect-spec:check -- --gate=publish
 
       - name: Package npm tarball
         shell: bash
@@ -117,6 +122,13 @@ jobs:
         with:
           name: officegen-npm-package
           path: dist/*
+          if-no-files-found: error
+
+      - name: Upload perfect spec evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: officegen-perfect-spec-evidence
+          path: .officegen/acceptance/perfect-spec/**
           if-no-files-found: error
 
   publish:
@@ -163,8 +175,8 @@ jobs:
       - name: Download artifacts
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
+          name: officegen-npm-package
           path: dist
-          merge-multiple: true
 
       - name: Create or update release
         uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3
@@ -174,3 +186,8 @@ jobs:
           name: officegen ${{ steps.version.outputs.tag }}
           files: dist/*
           generate_release_notes: true
+
+      - name: Release asset smoke
+        env:
+          OFFICEGEN_RELEASE_TARBALL_SPEC: https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.tag }}/officegen-v${{ steps.version.outputs.version }}.tgz
+        run: npm run release-tarball:smoke

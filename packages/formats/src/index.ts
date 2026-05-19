@@ -10,6 +10,9 @@ export * from "./diagnose.js";
 export * from "./repair.js";
 export * from "./diff.js";
 export * from "./verify.js";
+export * from "./graphs/objectGraph.js";
+export * from "./graphs/selectorGraph.js";
+export * from "./pdf/objectGraph.js";
 export * from "./ooxml/validator.js";
 export {
   getLoadedZipSafetyReport,
@@ -21,5 +24,6 @@ export {
 export type {
   LoadZipOptions,
   NormalizedInput,
+  ObjectMapEntry,
   ZipSafetyLoadOptions
 } from "./shared.js";

@@ -693,6 +693,75 @@ const verifyGatesSchema: JsonObject = {
   }
 };
 
+const xlsxFormulaDependencySchema: JsonObject = {
+  type: "object",
+  required: ["kind", "sourceText", "untrusted"],
+  additionalProperties: false,
+  properties: {
+    kind: { enum: ["cell", "range", "threeD", "namedRange", "tableStructuredRef"] },
+    ref: { type: "string" },
+    sheet: { type: "string" },
+    workbook: { type: "string" },
+    name: { type: "string" },
+    tableName: { type: "string" },
+    sourceText: { type: "string" },
+    untrusted: { const: true }
+  }
+};
+
+const xlsxFormulaRelatedObjectSchema: JsonObject = {
+  type: "object",
+  required: ["kind", "path", "reason", "untrusted"],
+  additionalProperties: false,
+  properties: {
+    kind: { enum: ["table", "chart", "pivotTable", "slicer"] },
+    name: { type: "string" },
+    path: { type: "string" },
+    ref: { type: "string" },
+    reason: { type: "string" },
+    untrusted: { const: true }
+  }
+};
+
+const xlsxFormulaCellSchema: JsonObject = {
+  type: "object",
+  required: ["stableObjectId", "sheetIndex", "ref", "formula", "dependencies", "unsafeFlags", "relatedObjects", "sourcePath", "untrusted"],
+  additionalProperties: false,
+  properties: {
+    stableObjectId: { type: "string" },
+    sheetIndex: { type: "integer", minimum: 1 },
+    sheetName: { type: "string" },
+    ref: { type: "string", pattern: "^[A-Za-z]+[1-9][0-9]*$" },
+    formula: { type: "string" },
+    formulaType: { type: "string" },
+    sharedIndex: { type: "string" },
+    sharedRef: { type: "string" },
+    dependencies: { type: "array", items: xlsxFormulaDependencySchema },
+    unsafeFlags: { type: "array", items: { enum: ["external", "volatile", "indirect", "unsupported"] } },
+    volatileFunctions: { type: "array", items: { type: "string" } },
+    relatedObjects: { type: "array", items: xlsxFormulaRelatedObjectSchema },
+    sourcePath: { type: "string" },
+    untrusted: { const: true }
+  }
+};
+
+const xlsxFormulaGraphSchema: JsonObject = {
+  $id: "officegen.xlsx.formulaGraph@1.0",
+  type: "object",
+  required: ["schema", "sheetIndex", "formulaCells", "dependencies", "unsafeFlags", "relatedObjects", "untrusted"],
+  additionalProperties: false,
+  properties: {
+    schema: schemaField("officegen.xlsx.formulaGraph@1.0"),
+    sheetIndex: { type: "integer", minimum: 1 },
+    sheetName: { type: "string" },
+    formulaCells: { type: "array", items: xlsxFormulaCellSchema },
+    dependencies: { type: "array", items: xlsxFormulaDependencySchema },
+    unsafeFlags: { type: "array", items: { enum: ["external", "volatile", "indirect", "unsupported"] } },
+    relatedObjects: { type: "array", items: xlsxFormulaRelatedObjectSchema },
+    untrusted: { const: true }
+  }
+};
+
 const transactionSchema: JsonObject = {
   $id: "officegen.transaction@1.2",
   type: "object",
@@ -736,6 +805,9 @@ const entries: SchemaRegistryEntry[] = [
   entry("officegen.template.map@1.2", templateMapSchema, "template"),
   entry("officegen.template.candidates.result@2.5", looseSchema("officegen.template.candidates.result@2.5"), "template"),
   entry("officegen.view.objectMap@1.2", viewObjectMapSchema, "view"),
+  entry("officegen.objectGraph@0.1", looseSchema("officegen.objectGraph@0.1"), "inspect"),
+  entry("officegen.docx.storyGraph@0.1", looseSchema("officegen.docx.storyGraph@0.1"), "inspect"),
+  entry("officegen.docx.runGraph@0.1", looseSchema("officegen.docx.runGraph@0.1"), "inspect"),
   entry("officegen.diagnostics@1.2", diagnosticsSchema, "diagnose"),
   entry("officegen.help@1.2", looseSchema("officegen.help@1.2"), "help"),
   entry("officegen.config@1.2", looseSchema("officegen.config@1.2"), "config"),
@@ -759,6 +831,7 @@ const entries: SchemaRegistryEntry[] = [
   entry("officegen.diagnose.result@1.2", looseSchema("officegen.diagnose.result@1.2"), "diagnose"),
   entry("officegen.verify.result@1.2", looseSchema("officegen.verify.result@1.2"), "verify"),
   entry("officegen.verify.gates@1.2", verifyGatesSchema, "verify"),
+  entry("officegen.xlsx.formulaGraph@1.0", xlsxFormulaGraphSchema, "inspect"),
   entry("officegen.repair.result@1.2", looseSchema("officegen.repair.result@1.2"), "repair"),
   entry("officegen.diff.result@1.2", looseSchema("officegen.diff.result@1.2"), "diff"),
   entry("officegen.diff.artifacts@1.2", looseSchema("officegen.diff.artifacts@1.2"), "diff"),

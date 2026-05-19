@@ -1,0 +1,357 @@
+{
+  "schema": "officegen.perfect-spec.acceptance-suite@2.0",
+  "suiteId": "officegen-v3.0.0-perfect-spec-v2-l7",
+  "release": "3.0.0",
+  "level": "L7",
+  "sourceSuite": "acceptance-suite.v2.6.0.json",
+  "remediationMatrix": "docs/reviews/v3.0.0-remediation-matrix.md",
+  "defaultGate": "visibility",
+  "publishGate": "publish",
+  "minimumPriorityCounts": {
+    "P0": 4,
+    "P1": 3,
+    "P2": 2
+  },
+  "statusPolicy": {
+    "ready": "Static acceptance contract and supporting checks are present now.",
+    "pending": "Visible in the machine-readable suite, but not yet release-blocking in visibility mode.",
+    "blocked": "Visible with an explicit blocker and next action; publish mode fails until resolved.",
+    "publishModeRule": "In --gate=publish, every blocking test must be ready."
+  },
+  "capabilityTruthfulnessChecks": [
+    {
+      "id": "CT-CAPABILITY-FIELDS",
+      "source": "packages/core/src/capabilities.ts",
+      "remediationIds": ["V30-A001", "V30-A002", "V30-F001"],
+      "requiredTerms": ["featureContracts", "formatCapabilities", "knownLimitations", "unsupportedNow"]
+    },
+    {
+      "id": "CT-SMARTART",
+      "source": "packages/core/src/capabilities.ts",
+      "remediationIds": ["V30-B001"],
+      "requiredTerms": ["smartArt: \"unsupported\"", "SmartArt creation and full SmartArt editing are unsupported"]
+    },
+    {
+      "id": "CT-CHARTS",
+      "source": "packages/core/src/capabilities.ts",
+      "remediationIds": ["V30-B002"],
+      "requiredTerms": ["single-series chart data updates only", "No multi-series chart engine.", "No secondary-axis updates.", "No combo-chart authoring"]
+    },
+    {
+      "id": "CT-PIVOT-SLICER",
+      "source": "packages/core/src/capabilities.ts",
+      "remediationIds": ["V30-C001", "V30-C002"],
+      "requiredTerms": ["refresh flags only", "selection updates only", "No pivot field/layout/value editing.", "No slicer creation"]
+    },
+    {
+      "id": "CT-PDF-REDACTION",
+      "source": "packages/core/src/capabilities.ts",
+      "remediationIds": ["V30-D001", "V30-D002"],
+      "requiredTerms": ["unsupported; overlays do not physically remove underlying content", "Overlay text or rectangles are not redaction.", "Underlying PDF content is not removed"]
+    },
+    {
+      "id": "CT-FULL-FIDELITY",
+      "source": "packages/core/src/capabilities.ts",
+      "remediationIds": ["V30-E001", "V30-J001"],
+      "requiredTerms": ["Full-fidelity Office/PDF editing", "Complete DOCX, XLSX, PPTX, and PDF application-level editing engines"]
+    },
+    {
+      "id": "CT-README-SCOPE",
+      "source": "README.md",
+      "remediationIds": ["V30-A003", "V30-B001", "V30-C001", "V30-D001", "V30-E001"],
+      "requiredTerms": ["single-series chart data", "SmartArt editing", "Pivot field/layout/value editing", "Physical redaction", "unsupported"]
+    }
+  ],
+  "tests": [
+    {
+      "id": "L7-A001",
+      "title": "Agent capability truthfulness contract",
+      "priority": "P0",
+      "kind": "contract",
+      "status": "ready",
+      "blocking": true,
+      "remediationIds": ["V30-A001", "V30-A002", "V30-F001", "V30-J001"],
+      "capabilityTruthfulnessIds": ["CT-CAPABILITY-FIELDS", "CT-FULL-FIDELITY"],
+      "steps": [
+        {
+          "run": "npm run perfect-spec:check",
+          "expect": "Static gate confirms agent-visible capabilities expose limitation-bearing contract fields."
+        },
+        {
+          "run": "npm run contract:check",
+          "expect": "Core capabilities, CLI metadata, and wired command exposure remain aligned."
+        }
+      ],
+      "passCriteria": [
+        "Agent-visible capability metadata cannot claim broad complete Office/PDF support without limitations.",
+        "Capability truthfulness checks are machine-readable and tied to remediation IDs."
+      ],
+      "evidence": ["goal/acceptance-suite.perfect-spec-v2.json", "packages/core/src/capabilities.ts", "packages/core/src/schemas.test.ts"]
+    },
+    {
+      "id": "L7-A002",
+      "title": "Unsupported EditOps remain rejected",
+      "priority": "P0",
+      "kind": "contract",
+      "status": "ready",
+      "blocking": true,
+      "remediationIds": ["V30-B002", "V30-C002", "V30-D002"],
+      "capabilityTruthfulnessIds": ["CT-CHARTS", "CT-PIVOT-SLICER", "CT-PDF-REDACTION"],
+      "steps": [
+        {
+          "run": "npm test -- schemas",
+          "expect": "Schema tests reject broad chart, pivot, slicer, and PDF redaction payloads."
+        },
+        {
+          "run": "npm run schema:coverage",
+          "expect": "Runtime schemas and implemented EditOps remain represented in the schema registry."
+        }
+      ],
+      "passCriteria": [
+        "Unsupported operations are absent from accepted EditOps.",
+        "Rejected payloads fail structurally rather than becoming silent no-ops."
+      ],
+      "evidence": ["packages/core/src/schemas.ts", "packages/core/src/schemas.test.ts", "scripts/check-schema-coverage.mjs"]
+    },
+    {
+      "id": "L7-A003",
+      "title": "PDF overlay is not redaction",
+      "priority": "P0",
+      "kind": "security",
+      "status": "ready",
+      "blocking": true,
+      "remediationIds": ["V30-D001", "V30-D002"],
+      "capabilityTruthfulnessIds": ["CT-PDF-REDACTION", "CT-README-SCOPE"],
+      "steps": [
+        {
+          "run": "npm run perfect-spec:check",
+          "expect": "Capabilities and README keep physical redaction/content rewrite unsupported."
+        },
+        {
+          "run": "npm test -- schemas",
+          "expect": "Schema tests reject redaction-like PDF payloads."
+        }
+      ],
+      "passCriteria": [
+        "No acceptance evidence may mark an overlay as physical redaction.",
+        "Capability disclosures and schema behavior agree."
+      ],
+      "evidence": ["README.md", "packages/core/src/capabilities.ts", "packages/core/src/schemas.test.ts"]
+    },
+    {
+      "id": "L7-A004",
+      "title": "Release gate and traceability floor",
+      "priority": "P0",
+      "kind": "packaging",
+      "status": "ready",
+      "blocking": true,
+      "remediationIds": ["V30-G001", "V30-G002", "V30-G003", "V30-H001", "V30-J002"],
+      "capabilityTruthfulnessIds": [],
+      "steps": [
+        {
+          "run": "npm run perfect-spec:check",
+          "expect": "Perfect spec suite covers the v3 remediation matrix and exposes pending or blocked work."
+        },
+        {
+          "run": "npm run version:check && npm run pack:smoke",
+          "expect": "Version surfaces and packaged CLI smoke checks pass before tagging."
+        }
+      ],
+      "passCriteria": [
+        "Every v3 remediation row is represented by at least one L7 acceptance item.",
+        "Release gate commands remain visible in machine-readable evidence."
+      ],
+      "evidence": ["docs/reviews/v3.0.0-remediation-matrix.md", "scripts/check-perfect-spec.mjs", "scripts/pack-smoke.mjs"]
+    },
+    {
+      "id": "L7-A005",
+      "title": "End-to-end evidence bundle manifest",
+      "priority": "P0",
+      "kind": "e2e",
+      "status": "ready",
+      "blocking": true,
+      "remediationIds": ["V30-G001", "V30-J002"],
+      "capabilityTruthfulnessIds": [],
+      "steps": [
+        {
+          "run": "npm run perfect-spec:evidence",
+          "expect": "Acceptance workflow writes a manifest, summary, event log, and static check output."
+        }
+      ],
+      "passCriteria": [
+        "Manifest lists every L7 acceptance item with ready, pending, or blocked state.",
+        "Generated artifacts include bytes and sha256 where applicable."
+      ],
+      "evidence": [
+        ".officegen/acceptance/perfect-spec/manifest.json",
+        ".officegen/acceptance/perfect-spec/summary.md",
+        ".officegen/acceptance/perfect-spec/events.jsonl",
+        ".officegen/acceptance/perfect-spec/check-visibility.json"
+      ]
+    },
+    {
+      "id": "L7-A006",
+      "title": "README feature claim parity",
+      "priority": "P1",
+      "kind": "contract",
+      "status": "ready",
+      "blocking": false,
+      "remediationIds": ["V30-A003", "V30-B001", "V30-C001", "V30-E001"],
+      "capabilityTruthfulnessIds": ["CT-README-SCOPE", "CT-SMARTART", "CT-PIVOT-SLICER", "CT-FULL-FIDELITY"],
+      "steps": [
+        {
+          "run": "npm run perfect-spec:check",
+          "expect": "README limitation wording remains aligned with capability truthfulness checks."
+        }
+      ],
+      "passCriteria": [
+        "README copy uses scoped language for charts, SmartArt, pivot/slicer, PDF, and DOCX support.",
+        "README does not outrun agent-visible capabilities."
+      ],
+      "evidence": ["README.md", "packages/core/src/capabilities.ts"]
+    },
+    {
+      "id": "L7-A007",
+      "title": "Office workflow limitation evidence",
+      "priority": "P1",
+      "kind": "e2e",
+      "status": "ready",
+      "blocking": false,
+      "remediationIds": ["V30-B001", "V30-C001", "V30-E001", "V30-I001"],
+      "capabilityTruthfulnessIds": ["CT-SMARTART", "CT-PIVOT-SLICER", "CT-FULL-FIDELITY"],
+      "steps": [
+        {
+          "run": "npm run perfect-spec:evidence && npm run perfect-spec:check",
+          "expect": "Fixture-level evidence manifest records current implemented PPTX, DOCX, XLSX, and PDF coverage with source hashes."
+        }
+      ],
+      "passCriteria": [
+        "Unsupported constructs are disclosed as limitations rather than silently passing.",
+        "PPTX, DOCX, XLSX, and PDF each have at least one fixture evidence entry with test name, command, target feature, source sha256/bytes, and status.",
+        "Asset replacement behavior remains covered by existing command behavior or explicit not-applicable evidence."
+      ],
+      "evidence": [
+        ".officegen/acceptance/perfect-spec/fixtures.json",
+        ".officegen/acceptance/perfect-spec/office-workflow/*.json"
+      ]
+    },
+    {
+      "id": "L7-A008",
+      "title": "Native renderer optionality remains explicit",
+      "priority": "P1",
+      "kind": "quality",
+      "status": "ready",
+      "blocking": false,
+      "remediationIds": ["V30-I002"],
+      "capabilityTruthfulnessIds": [],
+      "steps": [
+        {
+          "run": "npm run perfect-spec:evidence && npm run perfect-spec:check",
+          "expect": "Native renderer evidence records doctor availability, default external-process denial, and optional native gate requirements without requiring native conversion success."
+        }
+      ],
+      "passCriteria": [
+        "Native renderer absence does not block non-native release gates.",
+        "Optional native evidence is never reported as universally available.",
+        "Default policy evidence confirms native conversion is blocked while externalProcess is deny.",
+        "Tag/release runners that claim native fidelity must document Office COM or LibreOffice availability and opt in to trusted native renderer policy."
+      ],
+      "evidence": [".officegen/acceptance/perfect-spec/native-renderer.json", "README.md"]
+    },
+    {
+      "id": "L7-A009",
+      "title": "Post-tag install smoke is classified",
+      "priority": "P1",
+      "kind": "packaging",
+      "status": "pending",
+      "statusReason": "GitHub tag and remote install smoke can only run after a tag or remote target exists.",
+      "nextAction": "Run github-install tag/remote smoke after publishing and attach logs to release evidence.",
+      "blocking": false,
+      "remediationIds": ["V30-H002"],
+      "capabilityTruthfulnessIds": [],
+      "steps": [
+        {
+          "run": "npm run github-install:tag-smoke && npm run github-install:remote-smoke",
+          "expect": "Post-tag install paths succeed against the published release."
+        }
+      ],
+      "passCriteria": [
+        "Pre-tag gate does not pretend post-tag checks have already passed.",
+        "Post-tag smoke remains visible as release follow-up evidence."
+      ],
+      "evidence": [
+        ".officegen/acceptance/perfect-spec/post-tag-smoke.json",
+        ".officegen/acceptance/perfect-spec/github-install-tag-smoke.txt",
+        ".officegen/acceptance/perfect-spec/github-install-remote-smoke.txt"
+      ]
+    },
+    {
+      "id": "L7-A010",
+      "title": "Remediation matrix coverage",
+      "priority": "P2",
+      "kind": "contract",
+      "status": "ready",
+      "blocking": false,
+      "remediationIds": ["V30-A001", "V30-A002", "V30-A003", "V30-B001", "V30-B002", "V30-C001", "V30-C002", "V30-D001", "V30-D002", "V30-E001", "V30-F001", "V30-G001", "V30-G002", "V30-G003", "V30-H001", "V30-H002", "V30-I001", "V30-I002", "V30-J001", "V30-J002"],
+      "capabilityTruthfulnessIds": [],
+      "steps": [
+        {
+          "run": "npm run perfect-spec:check",
+          "expect": "Every remediation matrix row is covered by at least one L7 test or an explicit coverage exclusion."
+        }
+      ],
+      "passCriteria": [
+        "Coverage is computed from remediation IDs, not prose.",
+        "Unknown remediation IDs in the suite fail the static gate."
+      ],
+      "evidence": ["docs/reviews/v3.0.0-remediation-matrix.md", "goal/acceptance-suite.perfect-spec-v2.json"]
+    },
+    {
+      "id": "L7-A011",
+      "title": "Human and agent output limitation parity",
+      "priority": "P2",
+      "kind": "cli",
+      "status": "ready",
+      "blocking": false,
+      "remediationIds": ["V30-J001", "V30-J002"],
+      "capabilityTruthfulnessIds": ["CT-CAPABILITY-FIELDS", "CT-FULL-FIDELITY"],
+      "steps": [
+        {
+          "run": "npm run perfect-spec:cli-parity && npm run perfect-spec:check",
+          "expect": "CLI parity capture records version, capabilities, schema list, render, inspect, and view transcripts with stdout hashes and parsed status."
+        }
+      ],
+      "passCriteria": [
+        "Human output does not claim success beyond agent JSON status.",
+        "Agent JSON does not drop limitation-bearing capability fields.",
+        "Each captured output records command, exitCode, stdout bytes, stdout sha256, parsed schema id, and parsed ok status."
+      ],
+      "evidence": [
+        ".officegen/acceptance/perfect-spec/cli-parity.json",
+        ".officegen/acceptance/perfect-spec/parity/*.txt"
+      ]
+    },
+    {
+      "id": "L7-A012",
+      "title": "Publish mode non-ready escalation",
+      "priority": "P2",
+      "kind": "smoke",
+      "status": "ready",
+      "blocking": false,
+      "remediationIds": ["V30-G001", "V30-J002"],
+      "capabilityTruthfulnessIds": [],
+      "steps": [
+        {
+          "run": "npm run perfect-spec:check -- --gate=publish",
+          "expect": "Future publish gate fails while blocking L7 items remain pending or blocked."
+        }
+      ],
+      "passCriteria": [
+        "Visibility mode can report non-ready work without failing.",
+        "Publish mode has a deterministic path to fail unresolved blocking acceptance items."
+      ],
+      "evidence": ["scripts/check-perfect-spec.mjs"]
+    }
+  ],
+  "coverageExclusions": []
+}

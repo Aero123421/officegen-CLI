@@ -621,7 +621,7 @@ describe("@officegen/formats MVP", () => {
     const diff = await diffDocuments({ data: before.bytes, format: "pdf" }, { data: after.bytes, format: "pdf" }, { visual: true });
 
     expect(diff.changed).toBe(true);
-    expect(diff.visual?.renderer).toBe("pdf-bytes");
+    expect(diff.visual?.kind).toMatch(/raster-pixel|pdf-byte-window/);
     expect(diff.summary.visualRegressionScore).toBeGreaterThan(0);
   });
 

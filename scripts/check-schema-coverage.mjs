@@ -14,6 +14,9 @@ const registryIds = new Set([...schemasSource.matchAll(/entry\("([^"]+)"/g)].map
 const schemaEditOps = new Set([...schemasSource.matchAll(/op\("([^"]+)"/g)].map((match) => match[1]));
 const implementedEditOps = readImplementedEditOps(editSource);
 const sourceSchemaIds = await readRuntimeSchemaIds();
+const schemaExcludedUnsupportedEditOps = new Set([
+  "pdf.redact"
+]);
 
 const requiredResultSchemas = [
   "officegen.capabilities@1.2",
@@ -68,7 +71,13 @@ for (const id of sourceSchemaIds) {
 }
 
 for (const op of implementedEditOps) {
+  if (schemaExcludedUnsupportedEditOps.has(op)) continue;
   if (!schemaEditOps.has(op)) failures.push(`EditOperation is implemented but missing from officegen.edit.ops@1.2: ${op}`);
+}
+
+for (const op of schemaExcludedUnsupportedEditOps) {
+  if (schemaEditOps.has(op)) failures.push(`unsupported EditOperation must stay out of officegen.edit.ops@1.2: ${op}`);
+  if (!implementedEditOps.has(op)) failures.push(`schema coverage unsupported exclusion no longer matches an implemented EditOperation: ${op}`);
 }
 
 if (failures.length) {

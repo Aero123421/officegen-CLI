@@ -1,12 +1,70 @@
 import type JSZip from "jszip";
 import type { ObjectMapEntry } from "../shared.js";
-import { makeStableObjectId, readZipText, sortedZipFiles, stableHashId } from "../shared.js";
+import { decodeXmlEntities, makeStableObjectId, readZipText, sortedZipFiles, stableHashId } from "../shared.js";
 import { exactText, localText, preview, xmlAttr } from "./xml.js";
+
+export type XlsxFormulaDependencyKind = "cell" | "range" | "threeD" | "namedRange" | "tableStructuredRef";
+export type XlsxFormulaUnsafeFlag = "external" | "volatile" | "indirect" | "unsupported";
+
+export interface XlsxFormulaDependency {
+  kind: XlsxFormulaDependencyKind;
+  ref?: string;
+  sheet?: string;
+  workbook?: string;
+  name?: string;
+  tableName?: string;
+  sourceText: string;
+  untrusted: true;
+}
+
+export interface XlsxFormulaRelatedObject {
+  kind: "table" | "chart" | "pivotTable" | "slicer";
+  name?: string;
+  path: string;
+  ref?: string;
+  reason: string;
+  untrusted: true;
+}
+
+export interface XlsxFormulaCell {
+  stableObjectId: string;
+  sheetIndex: number;
+  sheetName?: string;
+  ref: string;
+  formula: string;
+  formulaType?: string;
+  sharedIndex?: string;
+  sharedRef?: string;
+  dependencies: XlsxFormulaDependency[];
+  unsafeFlags: XlsxFormulaUnsafeFlag[];
+  volatileFunctions?: string[];
+  relatedObjects: XlsxFormulaRelatedObject[];
+  sourcePath: string;
+  untrusted: true;
+}
+
+export interface XlsxFormulaGraph {
+  schema: "officegen.xlsx.formulaGraph@1.0";
+  sheetIndex: number;
+  sheetName?: string;
+  formulaCells: XlsxFormulaCell[];
+  dependencies: XlsxFormulaDependency[];
+  unsafeFlags: XlsxFormulaUnsafeFlag[];
+  relatedObjects: XlsxFormulaRelatedObject[];
+  untrusted: true;
+}
 
 export interface XlsxCell {
   stableObjectId: string;
   ref: string;
   value: string;
+  formula?: string;
+  formulaType?: string;
+  sharedIndex?: string;
+  sharedRef?: string;
+  dependencies?: XlsxFormulaDependency[];
+  unsafeFlags?: XlsxFormulaUnsafeFlag[];
+  relatedObjects?: XlsxFormulaRelatedObject[];
   sourcePath: string;
   untrusted: true;
 }
@@ -14,8 +72,10 @@ export interface XlsxCell {
 export interface XlsxSheet {
   stableObjectId: string;
   index: number;
+  name?: string;
   sourcePath: string;
   cells: XlsxCell[];
+  formulaGraph?: XlsxFormulaGraph;
   untrusted: true;
 }
 
@@ -25,23 +85,101 @@ interface WorksheetCell {
   ref: string;
 }
 
+interface FormulaInfo {
+  formula: string;
+  type?: string;
+  sharedIndex?: string;
+  sharedRef?: string;
+  unsupported?: boolean;
+}
+
+interface WorkbookObjectInventory {
+  tables: WorkbookTableObject[];
+  charts: WorkbookChartObject[];
+  pivotTables: WorkbookPivotObject[];
+  slicers: WorkbookSlicerObject[];
+}
+
+interface WorkbookTableObject {
+  kind: "table";
+  name: string;
+  path: string;
+  ref?: string;
+  sheetIndex?: number;
+  untrusted: true;
+}
+
+interface WorkbookChartObject {
+  kind: "chart";
+  path: string;
+  formulas: string[];
+  ranges: XlsxFormulaDependency[];
+  untrusted: true;
+}
+
+interface WorkbookPivotObject {
+  kind: "pivotTable";
+  name?: string;
+  path: string;
+  sourceRef?: string;
+  sourceSheet?: string;
+  untrusted: true;
+}
+
+interface WorkbookSlicerObject {
+  kind: "slicer";
+  name?: string;
+  path: string;
+  tableName?: string;
+  untrusted: true;
+}
+
 export async function inspectSheets(zip: JSZip): Promise<{ sheets: XlsxSheet[]; objectMap: ObjectMapEntry[]; sharedStrings: string[] }> {
   const paths = sortedZipFiles(zip);
   const sheetPaths = paths.filter((path) => /^xl\/worksheets\/sheet\d+\.xml$/i.test(path)).sort(naturalSort);
   const sharedStrings = await readSharedStrings(zip);
+  const workbookXml = (await readZipText(zip, "xl/workbook.xml")) ?? "";
+  const sheetNames = readWorkbookSheetNames(workbookXml);
+  const definedNames = readDefinedNameRefs(workbookXml);
+  const externalLinkPaths = paths.filter((path) => /^xl\/externalLinks\//i.test(path));
+  const workbookObjects = await readWorkbookObjectInventory(zip, paths);
   const objectMap: ObjectMapEntry[] = [];
   const sheets: XlsxSheet[] = [];
   for (const [sheetIndex, sheetPath] of sheetPaths.entries()) {
     const xml = (await readZipText(zip, sheetPath)) ?? "";
+    const sheetName = sheetNames[sheetIndex] ?? `Sheet${sheetIndex + 1}`;
+    const formulaCells: XlsxFormulaCell[] = [];
+    const sharedFormulas = new Map<string, string>();
     const cells = extractWorksheetCells(xml).map((cell) => {
       const type = xmlAttr(cell.attrs, "t");
       const raw = exactText(cell.body, "v")[0] ?? "";
       const inlineText = localText(cell.body, "t").join("");
-      const formula = exactText(cell.body, "f")[0];
+      const formulaInfo = readFormulaInfo(cell.body);
+      if (formulaInfo?.type === "shared" && formulaInfo.sharedIndex && formulaInfo.formula) {
+        sharedFormulas.set(formulaInfo.sharedIndex, formulaInfo.formula);
+      }
+      if (formulaInfo?.type === "shared" && formulaInfo.sharedIndex && !formulaInfo.formula) {
+        formulaInfo.formula = sharedFormulas.get(formulaInfo.sharedIndex) ?? "";
+        formulaInfo.unsupported = !formulaInfo.formula;
+      }
       const value = type === "s" ? sharedStrings[Number(raw)] ?? raw : type === "inlineStr" ? inlineText : type === "b" ? booleanText(raw) : raw;
       const sheetScope = `s${String(sheetIndex + 1).padStart(3, "0")}`;
       const stableObjectId = stableHashId("xlsx", sheetScope, "cell", `${sheetPath}#${cell.ref}`);
       const bounds = boundsFromRef(cell.ref);
+      const formulaCell = formulaInfo
+        ? buildFormulaCell({
+            stableObjectId,
+            sheetIndex: sheetIndex + 1,
+            sheetName,
+            cellRef: cell.ref,
+            sourcePath: sheetPath,
+            formulaInfo,
+            definedNames,
+            externalLinkPaths,
+            workbookObjects
+          })
+        : undefined;
+      if (formulaCell) formulaCells.push(formulaCell);
       const entry: ObjectMapEntry = {
         stableObjectId,
         kind: "cell",
@@ -52,13 +190,42 @@ export async function inspectSheets(zip: JSZip): Promise<{ sheets: XlsxSheet[]; 
         xmlPath: sheetPath,
         bounds,
         bbox: bounds ? [bounds.x, bounds.y, bounds.width, bounds.height] : undefined,
-        selectorHints: { sheet: sheetIndex + 1, cell: cell.ref, formula, regionRole: formula ? "formula" : undefined },
+        selectorHints: {
+          sheet: sheetIndex + 1,
+          cell: cell.ref,
+          formula: formulaCell?.formula,
+          formulaType: formulaCell?.formulaType,
+          sharedFormula: formulaCell?.formulaType === "shared" ? true : undefined,
+          sharedIndex: formulaCell?.sharedIndex,
+          sharedRef: formulaCell?.sharedRef,
+          formulaDependencies: formulaCell?.dependencies,
+          formulaUnsafeFlags: formulaCell?.unsafeFlags,
+          formulaRelatedObjects: formulaCell?.relatedObjects,
+          regionRole: formulaCell ? "formula" : undefined
+        },
         editableOps: ["setText", "xlsx.setCell"],
         trust: { level: "untrusted", reason: "document-content" },
         untrusted: true
       };
       objectMap.push(entry);
-      return { stableObjectId, ref: cell.ref, value, sourcePath: sheetPath, untrusted: true as const };
+      return {
+        stableObjectId,
+        ref: cell.ref,
+        value,
+        sourcePath: sheetPath,
+        untrusted: true as const,
+        ...(formulaCell
+          ? {
+              formula: formulaCell.formula,
+              formulaType: formulaCell.formulaType,
+              sharedIndex: formulaCell.sharedIndex,
+              sharedRef: formulaCell.sharedRef,
+              dependencies: formulaCell.dependencies,
+              unsafeFlags: formulaCell.unsafeFlags,
+              relatedObjects: formulaCell.relatedObjects
+            }
+          : {})
+      };
     });
     for (const [validationIndex, validation] of [...xml.matchAll(/<dataValidation\b([^>]*)/g)].entries()) {
       const attrs = validation[1] ?? "";
@@ -78,8 +245,10 @@ export async function inspectSheets(zip: JSZip): Promise<{ sheets: XlsxSheet[]; 
     sheets.push({
       stableObjectId: makeStableObjectId("xlsx", "workbook", "sheet", sheetIndex + 1),
       index: sheetIndex + 1,
+      name: sheetName,
       sourcePath: sheetPath,
       cells,
+      formulaGraph: buildSheetFormulaGraph(sheetIndex + 1, sheetName, formulaCells),
       untrusted: true
     });
   }
@@ -100,7 +269,6 @@ export async function inspectSheets(zip: JSZip): Promise<{ sheets: XlsxSheet[]; 
       untrusted: true
     });
   }
-  const workbookXml = (await readZipText(zip, "xl/workbook.xml")) ?? "";
   for (const definedName of workbookXml.matchAll(/<definedName\b([^>]*)>([\s\S]*?)<\/definedName>/g)) {
     const attrs = definedName[1] ?? "";
     const name = xmlAttr(attrs, "name");
@@ -160,6 +328,51 @@ export async function inspectSheets(zip: JSZip): Promise<{ sheets: XlsxSheet[]; 
     });
   }
   return { sheets, objectMap, sharedStrings };
+}
+
+function buildFormulaCell(input: {
+  stableObjectId: string;
+  sheetIndex: number;
+  sheetName: string;
+  cellRef: string;
+  sourcePath: string;
+  formulaInfo: FormulaInfo;
+  definedNames: string[];
+  externalLinkPaths: string[];
+  workbookObjects: WorkbookObjectInventory;
+}): XlsxFormulaCell {
+  const dependencies = extractFormulaDependencies(input.formulaInfo.formula, input.definedNames, input.workbookObjects.tables);
+  const volatileFunctions = extractVolatileFunctions(input.formulaInfo.formula);
+  const unsafeFlags = formulaUnsafeFlags(input.formulaInfo, volatileFunctions, input.externalLinkPaths);
+  return {
+    stableObjectId: input.stableObjectId,
+    sheetIndex: input.sheetIndex,
+    sheetName: input.sheetName,
+    ref: input.cellRef,
+    formula: input.formulaInfo.formula,
+    formulaType: input.formulaInfo.type,
+    sharedIndex: input.formulaInfo.sharedIndex,
+    sharedRef: input.formulaInfo.sharedRef,
+    dependencies,
+    unsafeFlags,
+    volatileFunctions: volatileFunctions.length ? volatileFunctions : undefined,
+    relatedObjects: relatedObjectsForFormula(input.sheetIndex, dependencies, input.workbookObjects),
+    sourcePath: input.sourcePath,
+    untrusted: true
+  };
+}
+
+function buildSheetFormulaGraph(sheetIndex: number, sheetName: string, formulaCells: XlsxFormulaCell[]): XlsxFormulaGraph {
+  return {
+    schema: "officegen.xlsx.formulaGraph@1.0",
+    sheetIndex,
+    sheetName,
+    formulaCells,
+    dependencies: uniqueDependencies(formulaCells.flatMap((cell) => cell.dependencies)),
+    unsafeFlags: uniqueStrings(formulaCells.flatMap((cell) => cell.unsafeFlags)) as XlsxFormulaUnsafeFlag[],
+    relatedObjects: uniqueRelatedObjects(formulaCells.flatMap((cell) => cell.relatedObjects)),
+    untrusted: true
+  };
 }
 
 export async function readSharedStrings(zip: JSZip): Promise<string[]> {
@@ -238,6 +451,209 @@ export function sheetPath(index: number | undefined): string {
   return `xl/worksheets/sheet${index && index > 0 ? index : 1}.xml`;
 }
 
+function readFormulaInfo(cellBody: string): FormulaInfo | undefined {
+  const match = /<f\b([^>]*?)(?:\/>|>([\s\S]*?)<\/f>)/i.exec(cellBody);
+  if (!match) return undefined;
+  const attrs = match[1] ?? "";
+  const type = xmlAttr(attrs, "t");
+  return {
+    formula: decodeXmlEntities(match[2] ?? "").trim(),
+    type,
+    sharedIndex: xmlAttr(attrs, "si"),
+    sharedRef: xmlAttr(attrs, "ref")
+  };
+}
+
+function extractFormulaDependencies(formula: string, definedNames: string[], tables: WorkbookTableObject[]): XlsxFormulaDependency[] {
+  if (!formula) return [];
+  const dependencies: XlsxFormulaDependency[] = [];
+  const structuredRefs = extractStructuredRefs(formula);
+  for (const ref of structuredRefs) {
+    dependencies.push({
+      kind: "tableStructuredRef",
+      tableName: ref.tableName,
+      sourceText: ref.sourceText,
+      untrusted: true
+    });
+  }
+  const sanitized = stripFormulaStrings(replaceLiteralRanges(formula, structuredRefs.map((ref) => ref.sourceText)));
+  const a1Pattern = /(?:\[([^\]]+)\])?(?:(?:'([^']+)'|([A-Za-z_][\w .]*))!)?(\$?[A-Z]{1,3}\$?\d+(?::\$?[A-Z]{1,3}\$?\d+)?)/g;
+  for (const match of sanitized.matchAll(a1Pattern)) {
+    const workbook = match[1];
+    const sheet = match[2] ?? match[3];
+    const ref = normalizeCellRef(match[4] ?? "");
+    const sourceText = match[0];
+    if (!ref || isLikelyFunctionPrefix(sanitized, match.index ?? 0)) continue;
+    dependencies.push({
+      kind: sheet || workbook ? "threeD" : ref.includes(":") ? "range" : "cell",
+      ref,
+      sheet: sheet ? decodeXmlEntities(sheet) : undefined,
+      workbook: workbook ? decodeXmlEntities(workbook) : undefined,
+      sourceText,
+      untrusted: true
+    });
+  }
+  for (const name of definedNames) {
+    if (!name || tables.some((table) => table.name.toLowerCase() === name.toLowerCase())) continue;
+    const pattern = new RegExp(`(^|[^A-Za-z0-9_.])${escapeRegExp(name)}($|[^A-Za-z0-9_.])`, "i");
+    if (pattern.test(sanitized)) {
+      dependencies.push({
+        kind: "namedRange",
+        name,
+        sourceText: name,
+        untrusted: true
+      });
+    }
+  }
+  return uniqueDependencies(dependencies);
+}
+
+function extractStructuredRefs(formula: string): Array<{ tableName: string; sourceText: string }> {
+  const refs: Array<{ tableName: string; sourceText: string }> = [];
+  const pattern = /\b([A-Za-z_][A-Za-z0-9_.]*)\s*\[/g;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(formula))) {
+    const tableName = match[1] ?? "";
+    const start = match.index + tableName.length;
+    let depth = 0;
+    let end = -1;
+    for (let index = start; index < formula.length; index += 1) {
+      const char = formula[index];
+      if (char === "[") depth += 1;
+      if (char === "]") {
+        depth -= 1;
+        if (depth === 0) {
+          end = index + 1;
+          break;
+        }
+      }
+    }
+    if (end > start) {
+      const sourceText = `${tableName}${formula.slice(start, end)}`;
+      refs.push({ tableName, sourceText });
+      pattern.lastIndex = end;
+    }
+  }
+  return refs;
+}
+
+function extractVolatileFunctions(formula: string): string[] {
+  const volatileFunctions = ["INDIRECT", "OFFSET", "NOW", "TODAY", "RAND", "RANDBETWEEN", "INFO", "CELL"];
+  const found = new Set<string>();
+  for (const name of volatileFunctions) {
+    if (new RegExp(`\\b${name}\\s*\\(`, "i").test(formula)) found.add(name);
+  }
+  return [...found].sort();
+}
+
+function formulaUnsafeFlags(formulaInfo: FormulaInfo, volatileFunctions: string[], externalLinkPaths: string[]): XlsxFormulaUnsafeFlag[] {
+  const flags = new Set<XlsxFormulaUnsafeFlag>();
+  if (/\[[^\]]+\]/.test(formulaInfo.formula) || externalLinkPaths.length > 0 && /!/.test(formulaInfo.formula)) flags.add("external");
+  if (volatileFunctions.length > 0) flags.add("volatile");
+  if (volatileFunctions.includes("INDIRECT")) flags.add("indirect");
+  if (formulaInfo.unsupported || /_xlfn\.|GET\.CELL\s*\(/i.test(formulaInfo.formula)) flags.add("unsupported");
+  return [...flags].sort();
+}
+
+async function readWorkbookObjectInventory(zip: JSZip, paths: string[]): Promise<WorkbookObjectInventory> {
+  const tableSheetIndexes = await readTableSheetIndexes(zip, paths);
+  const tables = await Promise.all(paths.filter((path) => /^xl\/tables\/table\d+\.xml$/i.test(path)).sort(naturalSort).map(async (path, index) => {
+    const xml = (await readZipText(zip, path)) ?? "";
+    const attrs = /<table\b([^>]*)/.exec(xml)?.[1] ?? "";
+    return {
+      kind: "table" as const,
+      name: xmlAttr(attrs, "displayName") ?? xmlAttr(attrs, "name") ?? `Table${index + 1}`,
+      path,
+      ref: xmlAttr(attrs, "ref"),
+      sheetIndex: tableSheetIndexes.get(path),
+      untrusted: true as const
+    };
+  }));
+  const charts = await Promise.all(paths.filter((path) => /^xl\/charts\/chart\d+\.xml$/i.test(path)).sort(naturalSort).map(async (path) => {
+    const xml = (await readZipText(zip, path)) ?? "";
+    const formulas = [...xml.matchAll(/<c:f\b[^>]*>([\s\S]*?)<\/c:f>/g)].map((match) => decodeXmlEntities(match[1] ?? "").trim()).filter(Boolean);
+    return {
+      kind: "chart" as const,
+      path,
+      formulas,
+      ranges: formulas.flatMap((formula) => extractFormulaDependencies(formula, [], tables)),
+      untrusted: true as const
+    };
+  }));
+  const pivotTables = await Promise.all(paths.filter((path) => /^xl\/pivotTables\/pivotTable\d+\.xml$/i.test(path)).sort(naturalSort).map(async (path, index) => {
+    const xml = (await readZipText(zip, path)) ?? "";
+    const attrs = /<pivotTableDefinition\b([^>]*)/.exec(xml)?.[1] ?? "";
+    const sourceAttrs = /<worksheetSource\b([^>]*)/.exec(xml)?.[1] ?? "";
+    return {
+      kind: "pivotTable" as const,
+      name: xmlAttr(attrs, "name") ?? `PivotTable${index + 1}`,
+      path,
+      sourceRef: xmlAttr(sourceAttrs, "ref") ?? xmlAttr(sourceAttrs, "name"),
+      sourceSheet: xmlAttr(sourceAttrs, "sheet"),
+      untrusted: true as const
+    };
+  }));
+  const slicers = await Promise.all(paths.filter((path) => /^xl\/slicers\//i.test(path) || /^xl\/slicerCaches\//i.test(path)).sort(naturalSort).map(async (path, index) => {
+    const xml = (await readZipText(zip, path)) ?? "";
+    const attrs = /<(?:slicer|slicerCacheDefinition)\b([^>]*)/.exec(xml)?.[1] ?? "";
+    return {
+      kind: "slicer" as const,
+      name: xmlAttr(attrs, "name") ?? xmlAttr(attrs, "r:id") ?? `Slicer${index + 1}`,
+      path,
+      tableName: xmlAttr(attrs, "tableId") ?? xmlAttr(attrs, "table"),
+      untrusted: true as const
+    };
+  }));
+  return { tables, charts, pivotTables, slicers };
+}
+
+async function readTableSheetIndexes(zip: JSZip, paths: string[]): Promise<Map<string, number>> {
+  const result = new Map<string, number>();
+  const sheetPaths = paths.filter((path) => /^xl\/worksheets\/sheet\d+\.xml$/i.test(path)).sort(naturalSort);
+  for (const [index, worksheetPath] of sheetPaths.entries()) {
+    const relsPath = worksheetPath.replace(/^xl\/worksheets\//i, "xl/worksheets/_rels/") + ".rels";
+    const relsXml = (await readZipText(zip, relsPath)) ?? "";
+    for (const rel of relsXml.matchAll(/<Relationship\b([^>]*)/g)) {
+      const attrs = rel[1] ?? "";
+      const target = xmlAttr(attrs, "Target");
+      if (!target || !/tables\/table\d+\.xml$/i.test(target)) continue;
+      result.set(resolveRelationshipTarget(worksheetPath, target), index + 1);
+    }
+  }
+  return result;
+}
+
+function relatedObjectsForFormula(sheetIndex: number, dependencies: XlsxFormulaDependency[], workbookObjects: WorkbookObjectInventory): XlsxFormulaRelatedObject[] {
+  const related: XlsxFormulaRelatedObject[] = [];
+  for (const table of workbookObjects.tables) {
+    if (dependencies.some((dependency) => dependency.kind === "tableStructuredRef" && sameName(dependency.tableName, table.name))) {
+      related.push({ kind: "table", name: table.name, path: table.path, ...(table.ref ? { ref: table.ref } : {}), reason: "structured-ref", untrusted: true });
+      continue;
+    }
+    const tableRef = table.ref;
+    if (tableRef && dependencies.some((dependency) => rangesMayOverlap(dependency, tableRef, sheetIndex, table.sheetIndex))) {
+      related.push({ kind: "table", name: table.name, path: table.path, ref: tableRef, reason: "range-overlap", untrusted: true });
+    }
+  }
+  for (const chart of workbookObjects.charts) {
+    if (chart.ranges.some((chartRange) => dependencies.some((dependency) => dependencyRangesMayOverlap(dependency, chartRange)))) {
+      related.push({ kind: "chart", path: chart.path, reason: "range-overlap", untrusted: true });
+    }
+  }
+  for (const pivotTable of workbookObjects.pivotTables) {
+    if (pivotTable.sourceRef && dependencies.some((dependency) => rangesMayOverlap(dependency, pivotTable.sourceRef as string, sheetIndex, undefined, pivotTable.sourceSheet))) {
+      related.push({ kind: "pivotTable", ...(pivotTable.name ? { name: pivotTable.name } : {}), path: pivotTable.path, ref: pivotTable.sourceRef, reason: "source-overlap", untrusted: true });
+    }
+  }
+  for (const slicer of workbookObjects.slicers) {
+    if (!slicer.tableName) continue;
+    if (related.some((item) => item.kind === "table" && (sameName(item.name, slicer.tableName) || item.path.endsWith(`${slicer.tableName}.xml`)))) {
+      related.push({ kind: "slicer", ...(slicer.name ? { name: slicer.name } : {}), path: slicer.path, reason: "table-slicer", untrusted: true });
+    }
+  }
+  return uniqueRelatedObjects(related);
+}
+
 function extractCellTags(xml: string, rowNumber: number): WorksheetCell[] {
   let ordinalInRow = 0;
   return [...xml.matchAll(/<c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g)].map((match) => {
@@ -300,6 +716,114 @@ function columnName(index: number): string {
 
 function escapeXmlText(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function readWorkbookSheetNames(workbookXml: string): string[] {
+  return [...workbookXml.matchAll(/<sheet\b([^>]*)/g)].map((match, index) =>
+    decodeXmlEntities(xmlAttr(match[1] ?? "", "name") ?? `Sheet${index + 1}`)
+  );
+}
+
+function readDefinedNameRefs(workbookXml: string): string[] {
+  return [...workbookXml.matchAll(/<definedName\b([^>]*)>/g)]
+    .map((match) => xmlAttr(match[1] ?? "", "name"))
+    .filter((name): name is string => Boolean(name));
+}
+
+function stripFormulaStrings(formula: string): string {
+  return formula.replace(/"(?:[^"]|"")*"/g, (value) => " ".repeat(value.length));
+}
+
+function replaceLiteralRanges(input: string, ranges: string[]): string {
+  let output = input;
+  for (const range of ranges.sort((a, b) => b.length - a.length)) {
+    output = output.replace(new RegExp(escapeRegExp(range), "g"), " ".repeat(range.length));
+  }
+  return output;
+}
+
+function normalizeCellRef(ref: string): string {
+  return ref.replace(/\$/g, "").toUpperCase();
+}
+
+function isLikelyFunctionPrefix(formula: string, index: number): boolean {
+  const prefix = formula.slice(Math.max(0, index - 20), index);
+  return /[A-Z][A-Z0-9_.]*\s*$/i.test(prefix) && formula[index - 1] !== "!" && formula[index - 1] !== "'";
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values.filter(Boolean))].sort();
+}
+
+function uniqueDependencies(dependencies: XlsxFormulaDependency[]): XlsxFormulaDependency[] {
+  const seen = new Set<string>();
+  return dependencies.filter((dependency) => {
+    const key = [dependency.kind, dependency.workbook, dependency.sheet, dependency.ref, dependency.name, dependency.tableName, dependency.sourceText].join("|").toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function uniqueRelatedObjects(objects: XlsxFormulaRelatedObject[]): XlsxFormulaRelatedObject[] {
+  const seen = new Set<string>();
+  return objects.filter((object) => {
+    const key = [object.kind, object.path, object.name, object.ref, object.reason].join("|").toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function resolveRelationshipTarget(sourcePath: string, target: string): string {
+  if (target.startsWith("/")) return target.replace(/^\/+/, "");
+  const sourceDir = sourcePath.split("/").slice(0, -1).join("/");
+  const parts = `${sourceDir}/${target}`.split("/");
+  const normalized: string[] = [];
+  for (const part of parts) {
+    if (!part || part === ".") continue;
+    if (part === "..") normalized.pop();
+    else normalized.push(part);
+  }
+  return normalized.join("/");
+}
+
+function sameName(left: string | undefined, right: string | undefined): boolean {
+  return Boolean(left && right && left.toLowerCase() === right.toLowerCase());
+}
+
+function dependencyRangesMayOverlap(left: XlsxFormulaDependency, right: XlsxFormulaDependency): boolean {
+  if (left.kind === "tableStructuredRef" || right.kind === "tableStructuredRef") return sameName(left.tableName, right.tableName);
+  if (left.sheet && right.sheet && !sameName(left.sheet, right.sheet)) return false;
+  const leftBounds = parseRangeBounds(left.ref);
+  const rightBounds = parseRangeBounds(right.ref);
+  return Boolean(leftBounds && rightBounds && boundsOverlap(leftBounds, rightBounds));
+}
+
+function rangesMayOverlap(dependency: XlsxFormulaDependency, ref: string, currentSheetIndex: number, targetSheetIndex?: number, targetSheetName?: string): boolean {
+  if (targetSheetIndex && !dependency.sheet && currentSheetIndex !== targetSheetIndex) return false;
+  if (targetSheetName && dependency.sheet && !sameName(dependency.sheet, targetSheetName)) return false;
+  const dependencyBounds = parseRangeBounds(dependency.ref);
+  const targetBounds = parseRangeBounds(ref);
+  return Boolean(dependencyBounds && targetBounds && boundsOverlap(dependencyBounds, targetBounds));
+}
+
+function parseRangeBounds(ref: string | undefined): { minCol: number; maxCol: number; minRow: number; maxRow: number } | undefined {
+  const normalized = normalizeCellRef(String(ref ?? "").split("!").pop() ?? "");
+  const match = /^([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?$/.exec(normalized);
+  if (!match) return undefined;
+  const left = { col: columnIndex(match[1] ?? "A"), row: Number(match[2]) };
+  const right = { col: columnIndex(match[3] ?? match[1] ?? "A"), row: Number(match[4] ?? match[2]) };
+  return {
+    minCol: Math.min(left.col, right.col),
+    maxCol: Math.max(left.col, right.col),
+    minRow: Math.min(left.row, right.row),
+    maxRow: Math.max(left.row, right.row)
+  };
+}
+
+function boundsOverlap(left: NonNullable<ReturnType<typeof parseRangeBounds>>, right: NonNullable<ReturnType<typeof parseRangeBounds>>): boolean {
+  return left.minCol <= right.maxCol && left.maxCol >= right.minCol && left.minRow <= right.maxRow && left.maxRow >= right.minRow;
 }
 
 function booleanText(value: string): string {

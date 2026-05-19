@@ -6,6 +6,12 @@ import { addBlankSlide, addTextBox, duplicateSlide, extractShapes, getSlidePaths
 import { appendRows, insertRows, setCell, sheetPath } from "./ooxml/xlsx.js";
 import { escapeXmlText, pxToEmu, replaceAllXmlText, setFirstTextInBlock } from "./ooxml/xml.js";
 import { nextRelationshipId } from "./ooxml/relationships.js";
+import { PackageGraph } from "./ooxml/packageGraph.js";
+import { applyXmlPatches } from "./ooxml/patchEngine.js";
+import { createSourceFingerprint } from "./ooxml/sourceSpan.js";
+import { buildTokenIndex } from "./ooxml/tokenIndex.js";
+import { createEditTransaction } from "./ooxml/transaction.js";
+import { createOperationRegistry } from "./ooxml/operations/registry.js";
 import { PDFDocument, rgb } from "pdf-lib";
 import JSZip from "jszip";
 import { createHash } from "node:crypto";
@@ -51,9 +57,20 @@ async function resolveEditSelectorsForNormalized(normalized, operations, config)
 }
 async function editOfficeXml(input, operations, options, selectorResult) {
     const zip = await loadZip(input, { zipSafety: { config: options.config } });
+    const officeFormat = input.format;
+    const graph = await PackageGraph.fromZip(zip, { format: officeFormat });
     const atomic = options.atomic ?? true;
     const continueOnError = options.continueOnError ?? false;
     const opResults = [];
+    const store = new ZipPartStore(zip);
+    const officeContext = {
+        zip,
+        graph,
+        store,
+        transaction: createEditTransaction(store, { atomic, continueOnError: true }),
+        registry: createOfficeOperationRegistry(),
+        initialPartPaths: zipPartPathSet(zip)
+    };
     let applied = 0;
     let skipped = 0;
     if (options.idempotencyKey) {
@@ -106,11 +123,14 @@ async function editOfficeXml(input, operations, options, selectorResult) {
         ? []
         : validationFailures(selectorResult, options.minSelectorConfidence).filter((failure) => !dynamicPptxSelectors || !hasPriorPptxCreator(operations, failure.operationIndex));
     if (validationErrors.length && atomic) {
-        return editAbortResult(input.format, operations.length, validationErrors, [
+        const opResults = [...validationErrors];
+        appendSkippedAfterErrorResults(opResults, operations, "Skipped because atomic selector validation failed.");
+        return editAbortResult(input.format, operations.length, opResults, [
             "Atomic edit aborted before writing because selector validation failed.",
             ...zipSafetyCaveats(getLoadedZipSafetyReport(zip))
         ], selectorResult, options.dryRun);
     }
+    await snapshotExistingOfficeParts(officeContext.transaction, graph);
     for (const [index, operation] of operations.entries()) {
         if (opResults.some((result) => result.applied === false && result.reason && result.reason !== "unsupported") && !continueOnError) {
             skipped += 1;
@@ -131,7 +151,11 @@ async function editOfficeXml(input, operations, options, selectorResult) {
             if (dynamicPptxSelectors && selector && hasPriorPptxCreator(operations, index)) {
                 runtimeResolutions?.push(selectorResolutionForObjectMap(index, selector, objectMap));
             }
-            const changed = await applyOfficeOperation(zip, input.format, operation, objectMap, index);
+            const txResult = await officeContext.transaction.run(index, () => applyOfficeOperation(officeContext, input.format, operation, objectMap, index));
+            if (!txResult.applied) {
+                throw txResult.error;
+            }
+            const changed = txResult.value === true;
             if (changed) {
                 applied += 1;
                 opResults.push({ operationIndex: index, op: operationName(operation), applied: true });
@@ -150,19 +174,24 @@ async function editOfficeXml(input, operations, options, selectorResult) {
                 reason: classifyEditError(error),
                 message: error instanceof Error ? error.message : String(error)
             });
-            if (!continueOnError && atomic)
+            if (!continueOnError && atomic) {
+                skipped += appendSkippedAfterErrorResults(opResults, operations, "Skipped because atomic edit aborted after an earlier error.");
                 break;
+            }
         }
     }
     const errors = opResults.filter((result) => !result.applied && result.reason && result.reason !== "unsupported");
     if (errors.length && atomic) {
+        officeContext.rollback ??= await rollbackOfficeTransaction(zip, officeContext.transaction, officeContext.initialPartPaths);
         return editAbortResult(input.format, skipped, opResults, [
             "Atomic edit aborted; no output bytes were written.",
+            rollbackCaveat(officeContext.rollback),
             ...zipSafetyCaveats(getLoadedZipSafetyReport(zip))
         ], selectorResult, options.dryRun);
     }
     if (options.idempotencyKey && applied > 0)
-        zip.file(idempotencyMarkerPath(options.idempotencyKey), new Date().toISOString());
+        await officeContext.transaction.writePart(idempotencyMarkerPath(options.idempotencyKey), new Date().toISOString());
+    const commit = officeContext.transaction.closedForWrites ? undefined : await officeContext.transaction.commit();
     const bytes = options.dryRun ? undefined : await zipToBytes(zip);
     if (!options.dryRun)
         await writeOutput(options.out, bytes);
@@ -182,12 +211,17 @@ async function editOfficeXml(input, operations, options, selectorResult) {
         errors: errors.length ? errors : undefined,
         caveats: [
             "Office XML edits preserve unknown parts but do not recalculate native layout, formulas, or theme-derived rendering.",
+            ...(commit ? [`EDIT_TRANSACTION: journaled ${commit.journaledParts} package part snapshot(s).`] : []),
             ...zipSafetyCaveats(getLoadedZipSafetyReport(zip))
         ]
     };
 }
-async function applyOfficeOperation(zip, format, operation, objectMap, index) {
+async function applyOfficeOperation(context, format, operation, objectMap, index) {
     const op = operationName(operation);
+    const registryResult = await applyRegisteredOfficeOperation(context, format, operation, objectMap);
+    if (registryResult !== undefined)
+        return registryResult;
+    const zip = context.zip;
     if (op === "replaceText")
         return replaceTextInEditableParts(zip, format, operation.from, operation.to);
     if (op === "setText")
@@ -406,6 +440,49 @@ async function applyOfficeOperation(zip, format, operation, objectMap, index) {
     }
     return false;
 }
+function createOfficeOperationRegistry() {
+    const registry = createOperationRegistry();
+    for (const format of ["pptx", "docx", "xlsx"]) {
+        registry.register({
+            format,
+            opName: "replaceText",
+            handler: async (operation, { transaction, shared }) => {
+                if (!shared)
+                    return { applied: false, reason: "unsupported" };
+                const changed = await replaceTextInEditablePartsWithPatches(shared.zip, shared.graph, transaction, format, operation.from, operation.to);
+                return { applied: changed, changed, reason: changed ? undefined : "not-found" };
+            }
+        });
+        registry.register({
+            format,
+            opName: "setText",
+            handler: async (operation, { transaction, shared }) => {
+                if (!shared)
+                    return { applied: false, reason: "unsupported" };
+                const safe = await setSelectedTextWithPatchEngine(shared.objectMap, transaction, operation);
+                if (!safe.handled)
+                    return { applied: false, reason: "legacy-fallback" };
+                return { applied: safe.changed, changed: safe.changed, reason: safe.changed ? undefined : "not-found" };
+            }
+        });
+    }
+    return registry;
+}
+async function applyRegisteredOfficeOperation(context, format, operation, objectMap) {
+    const lookup = context.registry.lookup(format, operation);
+    if (!lookup.supported)
+        return undefined;
+    const result = await lookup.registration.handler(operation, {
+        format,
+        transaction: context.transaction,
+        store: context.store,
+        options: { atomic: context.transaction.atomic, continueOnError: context.transaction.continueOnError },
+        shared: { zip: context.zip, graph: context.graph, objectMap }
+    });
+    if (result.reason === "legacy-fallback")
+        return undefined;
+    return result.changed ?? result.applied;
+}
 async function replaceTextInEditableParts(zip, format, from, to) {
     if (!from)
         return false;
@@ -426,6 +503,130 @@ async function replaceTextInEditableParts(zip, format, from, to) {
         }
     }
     return changed;
+}
+async function replaceTextInEditablePartsWithPatches(zip, graph, transaction, format, from, to) {
+    if (!from)
+        return false;
+    const escapedFrom = escapeXmlText(from);
+    const escapedTo = escapeXmlText(to);
+    let changed = false;
+    for (const path of editableXmlPartPaths(zip, graph, format)) {
+        const xml = await transaction.readPart(path);
+        if (typeof xml !== "string" || !xml.includes(escapedFrom))
+            continue;
+        const index = buildTokenIndex(xml);
+        const patches = index.textRuns
+            .filter((run) => run.text.includes(escapedFrom))
+            .map((run) => ({
+            type: "replace",
+            span: run.valueSpan,
+            value: run.text.split(escapedFrom).join(escapedTo),
+            fingerprint: createSourceFingerprint(xml, run.valueSpan)
+        }));
+        if (!patches.length)
+            continue;
+        const next = applyXmlPatches(xml, patches);
+        if (next !== xml) {
+            await transaction.writePart(path, next);
+            changed = true;
+        }
+    }
+    return changed;
+}
+async function setSelectedTextWithPatchEngine(objectMap, transaction, operation) {
+    const target = singleMatch(objectMap, operation.selector);
+    if (!target?.sourcePath || target.text === undefined)
+        return { handled: false, changed: false };
+    const xml = await transaction.readPart(target.sourcePath);
+    if (typeof xml !== "string")
+        return { handled: false, changed: false };
+    const escapedCurrent = escapeXmlText(target.text);
+    const index = buildTokenIndex(xml);
+    const candidates = index.textRuns.filter((run) => run.text === escapedCurrent);
+    if (candidates.length !== 1)
+        return { handled: false, changed: false };
+    const run = candidates[0];
+    if (!run)
+        return { handled: false, changed: false };
+    const escapedNext = escapeXmlText(operation.text);
+    if (run.text === escapedNext)
+        return { handled: true, changed: false };
+    const next = applyXmlPatches(xml, [{
+            type: "replace",
+            span: run.valueSpan,
+            value: escapedNext,
+            fingerprint: createSourceFingerprint(xml, run.valueSpan)
+        }]);
+    await transaction.writePart(target.sourcePath, next);
+    return { handled: true, changed: next !== xml };
+}
+function editableXmlPartPaths(zip, graph, format) {
+    const graphPaths = graph.listParts().map((part) => part.path);
+    const zipPaths = Object.keys(zip.files).filter((path) => !zip.files[path]?.dir);
+    return [...new Set([...graphPaths, ...zipPaths])]
+        .filter((path) => format === "pptx"
+        ? /^ppt\/slides\/slide\d+\.xml$/i.test(path)
+        : format === "docx"
+            ? /^word\/(document|header\d+|footer\d+)\.xml$/i.test(path)
+            : /^xl\/(worksheets\/sheet\d+|sharedStrings)\.xml$/i.test(path))
+        .sort((left, right) => left.localeCompare(right));
+}
+async function snapshotExistingOfficeParts(transaction, graph) {
+    for (const part of graph.listParts()) {
+        await transaction.snapshotPart(part.path);
+    }
+}
+async function rollbackOfficeTransaction(zip, transaction, initialPartPaths) {
+    const rollback = await transaction.rollback();
+    let removedCreatedParts = 0;
+    for (const path of zipPartPathSet(zip)) {
+        if (!initialPartPaths.has(path)) {
+            zip.remove(path);
+            removedCreatedParts += 1;
+        }
+    }
+    return {
+        restoredParts: rollback.restoredParts,
+        removedCreatedParts,
+        errors: rollback.errors
+    };
+}
+function rollbackCaveat(rollback) {
+    if (!rollback)
+        return "EDIT_TRANSACTION_ROLLBACK: no transaction metadata was available.";
+    const failed = rollback.errors.length ? `, rollback errors: ${rollback.errors.length}` : "";
+    return `EDIT_TRANSACTION_ROLLBACK: restored ${rollback.restoredParts} package part snapshot(s), removed ${rollback.removedCreatedParts} created part(s)${failed}.`;
+}
+function zipPartPathSet(zip) {
+    return new Set(Object.keys(zip.files).filter((path) => !zip.files[path]?.dir).map((path) => path.replace(/\\/g, "/").replace(/^\/+/, "")));
+}
+class ZipPartStore {
+    zip;
+    constructor(zip) {
+        this.zip = zip;
+    }
+    async readPart(path) {
+        const normalized = normalizeZipPartPath(path);
+        const file = this.zip.file(normalized);
+        if (!file)
+            return undefined;
+        return isXmlPart(normalized) || isTextPart(normalized) ? file.async("string") : file.async("uint8array");
+    }
+    writePart(path, value) {
+        this.zip.file(normalizeZipPartPath(path), value);
+    }
+    deletePart(path) {
+        this.zip.remove(normalizeZipPartPath(path));
+    }
+}
+function normalizeZipPartPath(path) {
+    return path.replace(/\\/g, "/").replace(/^\/+/, "");
+}
+function isXmlPart(path) {
+    return /\.xml$/i.test(path) || /\.rels$/i.test(path) || path === "[Content_Types].xml";
+}
+function isTextPart(path) {
+    return /\.(txt|csv|json)$/i.test(path);
 }
 async function setSelectedText(zip, format, operation, objectMap) {
     const target = singleMatch(objectMap, operation.selector);
@@ -1655,6 +1856,24 @@ function editAbortResult(format, skipped, opResults, caveats, selectorResult, dr
         caveats
     };
 }
+function appendSkippedAfterErrorResults(opResults, operations, message) {
+    const existing = new Set(opResults.map((result) => result.operationIndex));
+    let added = 0;
+    for (const [index, operation] of operations.entries()) {
+        if (existing.has(index))
+            continue;
+        opResults.push({
+            operationIndex: index,
+            op: operationName(operation),
+            applied: false,
+            reason: "skipped-after-error",
+            message
+        });
+        added += 1;
+    }
+    opResults.sort((left, right) => left.operationIndex - right.operationIndex);
+    return added;
+}
 function selectorForOperation(operation) {
     if ("selector" in operation)
         return operation.selector;
@@ -1932,17 +2151,48 @@ async function editPdf(input, operations, options, selectorResult) {
             caveats: ["EDIT_STALE_PLAN: expected input or object map hash does not match the current PDF."]
         };
     }
+    const redactionBlocks = pdfRedactionBlocks(operations);
+    if (redactionBlocks.length) {
+        const redactionIndexes = new Set(redactionBlocks.map((result) => result.operationIndex));
+        const opResults = operations.map((operation, index) => redactionIndexes.has(index)
+            ? redactionBlocks.find((result) => result.operationIndex === index)
+            : {
+                operationIndex: index,
+                op: operationName(operation),
+                applied: false,
+                reason: "skipped-after-error",
+                message: "Skipped because PDF redaction operations are blocked atomically."
+            });
+        return {
+            schema: "officegen.edit.result@1.2",
+            format: "pdf",
+            dryRun: options.dryRun,
+            inputSha256: selectorResult?.inputSha256,
+            objectMapHash: selectorResult?.objectMapHash,
+            changed: false,
+            applied: 0,
+            skipped: operations.length,
+            opResults,
+            errors: redactionBlocks,
+            caveats: [
+                "PDF_REDACTION_BLOCKED: true PDF redaction is not implemented; overlay operations must not be treated as redaction.",
+                "No output bytes were written because redaction-like PDF operations were present."
+            ]
+        };
+    }
     const pdf = await PDFDocument.load(input.bytes, { ignoreEncryption: true });
     const fontSet = await embedPdfFonts(pdf, operations.map((op) => "text" in op ? String(op.text) : ""));
     const font = fontSet.font;
     let applied = 0;
     let skipped = 0;
-    for (const op of operations) {
+    const opResults = [];
+    for (const [index, op] of operations.entries()) {
         const name = operationName(op);
         if (name === "pdf.textOverlay") {
             const textOp = op;
             if (!isValidPage(pdf, textOp.page)) {
                 skipped += 1;
+                opResults.push({ operationIndex: index, op: name, applied: false, reason: "not-found", message: `PDF page ${textOp.page} was not found.` });
                 continue;
             }
             const page = pdf.getPage(textOp.page - 1);
@@ -1954,11 +2204,13 @@ async function editPdf(input, operations, options, selectorResult) {
                 color: parseRgb(textOp.color)
             });
             applied += 1;
+            opResults.push({ operationIndex: index, op: name, applied: true });
         }
         else if (name === "pdf.annotation") {
             const annotation = op;
             if (!isValidPage(pdf, annotation.page)) {
                 skipped += 1;
+                opResults.push({ operationIndex: index, op: name, applied: false, reason: "not-found", message: `PDF page ${annotation.page} was not found.` });
                 continue;
             }
             const page = pdf.getPage(annotation.page - 1);
@@ -1974,9 +2226,11 @@ async function editPdf(input, operations, options, selectorResult) {
             });
             page.drawText(annotation.text, { x: annotation.x + 6, y: annotation.y + (annotation.height ?? 48) - 18, size: 10, font, color: rgb(0.2, 0.2, 0.2) });
             applied += 1;
+            opResults.push({ operationIndex: index, op: name, applied: true });
         }
         else {
             skipped += 1;
+            opResults.push({ operationIndex: index, op: name, applied: false, reason: "unsupported", message: `Unsupported PDF edit operation: ${name}` });
         }
     }
     const bytes = options.dryRun ? undefined : await pdf.save({ useObjectStreams: false });
@@ -1993,8 +2247,29 @@ async function editPdf(input, operations, options, selectorResult) {
         skipped,
         out: options.dryRun ? undefined : options.out,
         bytes: options.dryRun || options.out ? undefined : bytes,
+        opResults,
         caveats: ["PDF edit is additive; existing text/content is not removed in the MVP."]
     };
+}
+function pdfRedactionBlocks(operations) {
+    return operations.flatMap((operation, index) => {
+        const op = operationName(operation);
+        if (!isPdfRedactionOperation(operation, op))
+            return [];
+        return [{
+                operationIndex: index,
+                op,
+                applied: false,
+                reason: "unsupported",
+                message: "PDF_REDACTION_UNSUPPORTED: true PDF redaction is not implemented. The operation was blocked so overlay output cannot be mistaken for removed content."
+            }];
+    });
+}
+function isPdfRedactionOperation(operation, name = operationName(operation)) {
+    if (/^pdf\..*redact/i.test(name) || /redaction/i.test(name))
+        return true;
+    const record = operation;
+    return Boolean(record.redact || record.redaction || record.redactions);
 }
 function isValidPage(pdf, page) {
     return Number.isInteger(page) && page >= 1 && page <= pdf.getPageCount();

@@ -197,6 +197,11 @@ function evaluateObjective(context, command, result, initialArtifacts) {
     if (schema === "officegen.verify.result@1.2" && (record.readiness === "blocked" || record.partial === true)) {
         return objectiveFailure(defaultState, record.partial === true ? "TIMEOUT" : "RUN_STEP_FAILED", "Verification did not reach a passing readiness state.", { readiness: record.readiness, partial: record.partial });
     }
+    if (schema === "officegen.diff.result@1.2" && visualDiffBlocked(record)) {
+        return objectiveFailure(defaultState, "VISUAL_DIFF_BLOCKED", "Visual diff was requested but could not run.", {
+            visual: asRecord(record.visual)
+        });
+    }
     if (schema === "officegen.benchmark.run.result@2.5" || schema === "officegen.benchmark.run.result@2.3") {
         const count = Number(record.count ?? 0);
         const okCount = Number(record.okCount ?? 0);
@@ -279,6 +284,9 @@ function readinessFor(record) {
     if (record.partial === true || record.status === "truncated")
         return "partial";
     return "pass";
+}
+function visualDiffBlocked(record) {
+    return asRecord(record.visual).status === "blocked";
 }
 function isMutationCommand(command) {
     const normalized = command.split(/\s+/).slice(0, 2).join(" ");

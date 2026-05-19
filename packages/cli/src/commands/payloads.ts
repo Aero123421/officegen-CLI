@@ -2257,6 +2257,15 @@ async function assertRunStepOutcome(command: string, result: unknown, artifacts:
     }
   }
 
+  if (command === "diff" && asRecord(record.visual).status === "blocked") {
+    throw new CliFailure({
+      code: "VISUAL_DIFF_BLOCKED",
+      command: "run",
+      message: `run diff step ${String(step.id ?? command)} could not complete visual diff.`,
+      details: { step: step.id, visual: asRecord(record.visual) }
+    }, 3);
+  }
+
   const dryRun = step.dryRun === true || record.planOnly === true || record.dryRun === true;
   if ((command === "edit" || command === "repair") && !dryRun) {
     const errors = asArray(record.errors);

@@ -279,6 +279,22 @@ describe("officegen CLI command surface", () => {
     expect(envelope.result.failedCount).toBe(1);
   });
 
+  it("marks blocked native visual diffs as objective failures", async () => {
+    const cwd = await tempWorkspace();
+    await writeFile(path.join(cwd, "before.pptx"), Buffer.from(await minimalPptxWithImage(false)));
+    await writeFile(path.join(cwd, "after.pptx"), Buffer.from(await minimalPptxWithImage(false)));
+
+    const captured = await run(["diff", "before.pptx", "after.pptx", "--visual", "--native", "--json", "--json-budget-bytes", "120000"], cwd);
+    const envelope = parseEnvelope(captured);
+
+    expect(envelope.ok).toBe(false);
+    expect(envelope.objectiveOk).toBe(false);
+    expect(envelope.readiness).toBe("blocked");
+    expect(envelope.error.code).toBe("VISUAL_DIFF_BLOCKED");
+    expect(envelope.result.visual.status).toBe("blocked");
+    expect(process.exitCode).toBe(3);
+  });
+
   it("rejects improve --out and recommends --report-out for plan persistence", async () => {
     const cwd = await tempWorkspace();
     await writeFile(path.join(cwd, "deck.pptx"), Buffer.from(await minimalPptxWithImage(false)));

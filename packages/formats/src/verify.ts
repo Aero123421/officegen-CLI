@@ -42,6 +42,17 @@ export interface VerifyResult {
   noRepairDialogExpected: boolean;
   nativeRenderer?: { attempted: boolean; ok: boolean; message?: string; artifact?: string; repairDialogExpected?: boolean };
   visual?: { fidelity: "approximate" | "native"; pagesChecked: number; blankPages: number };
+  visualDiff?: {
+    status: "compared" | "skipped" | "blocked";
+    expectedDiffOnly: boolean;
+    fidelity?: "approximate" | "native";
+    pagesCompared?: number;
+    changedPixels?: number;
+    boundingBox?: { x: number; y: number; width: number; height: number };
+    threshold?: number;
+    message?: string;
+  };
+  expectedDiffOnly?: boolean;
   blockingIssues: string[];
   warnings: string[];
   warningSummary: Array<{ code: string; count: number; severity: "warning" | "error"; category: WarningCategory; examples: string[] }>;
@@ -113,6 +124,15 @@ export async function verify(input: InputLike, options: VerifyOptions = {}): Pro
       })
     : undefined;
   if (visual?.blankPages) warnings.push(`VISUAL_BLANK_PAGE: ${visual.blankPages} blank preview pages detected.`);
+  const visualDiff: VerifyResult["visualDiff"] | undefined = options.visual
+    ? {
+        status: "skipped",
+        expectedDiffOnly: false,
+        fidelity: visual?.fidelity,
+        pagesCompared: 0,
+        message: "Visual preview verification ran without an expected/baseline document, so pixel diff was skipped."
+      }
+    : undefined;
 
   const nativeRenderer = options.native
     ? await timedPhase("native", phaseTimings, options.timeoutMs, () => verifyNative(normalized, options, artifacts)).catch((error): NonNullable<VerifyResult["nativeRenderer"]> => {
@@ -125,6 +145,9 @@ export async function verify(input: InputLike, options: VerifyOptions = {}): Pro
       })
     : undefined;
   if (nativeRenderer && !nativeRenderer.ok) warnings.push(nativeRenderer.message ?? "Native renderer verification did not complete.");
+  if (options.native && nativeRenderer && !nativeRenderer.ok) {
+    blockingIssues.push(`NATIVE_RENDERER_BLOCKED: ${nativeRenderer.message ?? "Native renderer verification did not complete."}`);
+  }
   if (nativeRenderer?.repairDialogExpected === true) {
     noRepairDialogExpected = false;
     blockingIssues.push("OFFICE_REPAIR_DIALOG_EXPECTED_NATIVE");
@@ -196,6 +219,8 @@ export async function verify(input: InputLike, options: VerifyOptions = {}): Pro
     noRepairDialogExpected,
     nativeRenderer,
     visual,
+    visualDiff,
+    expectedDiffOnly: visualDiff?.expectedDiffOnly ?? false,
     blockingIssues,
     warnings,
     warningSummary,

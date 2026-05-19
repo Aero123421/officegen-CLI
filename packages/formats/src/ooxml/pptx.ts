@@ -42,6 +42,86 @@ interface PptxChart {
   sourcePath: string;
 }
 
+interface PptxGroup {
+  stableObjectId: string;
+  slideIndex: number;
+  groupIndex: number;
+  shapeId?: string;
+  name?: string;
+  childShapeIds: string[];
+  bounds?: ObjectBounds;
+  sourcePath: string;
+}
+
+interface PptxConnector {
+  stableObjectId: string;
+  slideIndex: number;
+  connectorIndex: number;
+  shapeId?: string;
+  name?: string;
+  startConnection?: { shapeId?: string; index?: string };
+  endConnection?: { shapeId?: string; index?: string };
+  bounds?: ObjectBounds;
+  sourcePath: string;
+}
+
+interface PptxSmartArt {
+  stableObjectId: string;
+  slideIndex: number;
+  smartArtIndex: number;
+  shapeId?: string;
+  name?: string;
+  relationshipIds: Record<string, string>;
+  relationships: Record<string, { relationshipId: string; target?: string; type?: string; partRelationships?: Array<{ relationshipId: string; target?: string; type?: string; targetMode?: string }> }>;
+  dataPath?: string;
+  layoutPath?: string;
+  quickStylePath?: string;
+  colorsPath?: string;
+  layoutId?: string;
+  quickStyleId?: string;
+  colorStyleId?: string;
+  text?: string;
+  textPreview?: string;
+  nodes: PptxSmartArtNode[];
+  nodeTree: PptxSmartArtNode[];
+  bounds?: ObjectBounds;
+  sourcePath: string;
+}
+
+interface PptxSmartArtNode {
+  stableObjectId: string;
+  slideIndex: number;
+  nodeIndex: number;
+  nodeId: string;
+  type?: string;
+  text?: string;
+  textPreview?: string;
+  parentNodeId?: string;
+  childNodeIds: string[];
+  children: PptxSmartArtNode[];
+  smartArtStableObjectId: string;
+  smartArtShapeId?: string;
+  smartArtName?: string;
+  dataPath?: string;
+  sourcePath: string;
+}
+
+interface PptxChartSeries {
+  stableObjectId: string;
+  slideIndex: number;
+  seriesIndex: number;
+  chartStableObjectId: string;
+  chartShapeId?: string;
+  chartRelationshipId?: string;
+  chartPath?: string;
+  seriesIdx?: string;
+  order?: string;
+  name?: string;
+  categoryRef?: string;
+  valueRef?: string;
+  sourcePath: string;
+}
+
 export interface PptxSlide {
   stableObjectId: string;
   index: number;
@@ -86,6 +166,10 @@ export async function inspectSlides(zip: JSZip): Promise<{ slides: PptxSlide[]; 
     const pictures = extractPictures(xml, slideNo, slidePath, rels);
     const charts = extractCharts(xml, slideNo, slidePath, rels);
     const tableCells = extractTableCells(xml, slideNo, slidePath);
+    const groups = extractGroups(xml, slideNo, slidePath);
+    const connectors = extractConnectors(xml, slideNo, slidePath);
+    const smartArts = await extractSmartArts(zip, xml, slideNo, slidePath, rels);
+    const chartSeries = await extractChartSeries(zip, charts);
     const textObjects = shapes
       .filter((shape) => shape.text)
       .map((shape) => {
@@ -210,6 +294,192 @@ export async function inspectSlides(zip: JSZip): Promise<{ slides: PptxSlide[]; 
         };
         objectMap.push(entry);
         return entry;
+      }))
+      .concat(groups.map((group) => {
+        const entry: ObjectMapEntry = {
+          stableObjectId: group.stableObjectId,
+          kind: "group",
+          label: group.name,
+          sourcePath: slidePath,
+          xmlPath: slidePath,
+          bounds: group.bounds,
+          bbox: group.bounds ? [group.bounds.x, group.bounds.y, group.bounds.width, group.bounds.height] : undefined,
+          selectorHints: {
+            slide: slideNo,
+            groupIndex: group.groupIndex,
+            shapeId: group.shapeId,
+            name: group.name,
+            childShapeIds: group.childShapeIds
+          },
+          media: {
+            sourcePath: slidePath
+          },
+          trust: { level: "untrusted", reason: "document-content" },
+          untrusted: true
+        };
+        objectMap.push(entry);
+        return entry;
+      }))
+      .concat(connectors.map((connector) => {
+        const entry: ObjectMapEntry = {
+          stableObjectId: connector.stableObjectId,
+          kind: "connector",
+          label: connector.name,
+          sourcePath: slidePath,
+          xmlPath: slidePath,
+          bounds: connector.bounds,
+          bbox: connector.bounds ? [connector.bounds.x, connector.bounds.y, connector.bounds.width, connector.bounds.height] : undefined,
+          selectorHints: {
+            slide: slideNo,
+            connectorIndex: connector.connectorIndex,
+            shapeId: connector.shapeId,
+            name: connector.name,
+            startConnection: connector.startConnection,
+            endConnection: connector.endConnection
+          },
+          media: {
+            sourcePath: slidePath
+          },
+          trust: { level: "untrusted", reason: "document-content" },
+          untrusted: true
+        };
+        objectMap.push(entry);
+        return entry;
+      }))
+      .concat(smartArts.map((smartArt) => {
+        const entry: ObjectMapEntry = {
+          stableObjectId: smartArt.stableObjectId,
+          kind: "smartArt",
+          label: smartArt.name,
+          text: smartArt.text,
+          textPreview: smartArt.textPreview,
+          sourcePath: slidePath,
+          xmlPath: smartArt.dataPath ?? slidePath,
+          bounds: smartArt.bounds,
+          bbox: smartArt.bounds ? [smartArt.bounds.x, smartArt.bounds.y, smartArt.bounds.width, smartArt.bounds.height] : undefined,
+          selectorHints: {
+            slide: slideNo,
+            smartArtIndex: smartArt.smartArtIndex,
+            shapeId: smartArt.shapeId,
+            name: smartArt.name,
+            relationshipIds: smartArt.relationshipIds,
+            dataPath: smartArt.dataPath,
+            layoutPath: smartArt.layoutPath,
+            quickStylePath: smartArt.quickStylePath,
+            colorsPath: smartArt.colorsPath,
+            layoutId: smartArt.layoutId,
+            quickStyleId: smartArt.quickStyleId,
+            colorStyleId: smartArt.colorStyleId
+          },
+          media: {
+            relationships: smartArt.relationships,
+            smartArt: {
+              dataPath: smartArt.dataPath,
+              layoutPath: smartArt.layoutPath,
+              quickStylePath: smartArt.quickStylePath,
+              colorsPath: smartArt.colorsPath,
+              layoutId: smartArt.layoutId,
+              quickStyleId: smartArt.quickStyleId,
+              colorStyleId: smartArt.colorStyleId,
+              nodeTexts: smartArt.nodes.map((node) => node.text).filter(Boolean),
+              nodes: smartArt.nodes.map(smartArtNodeSummary),
+              nodeTree: smartArt.nodeTree.map(smartArtNodeSummary),
+              graphicFrame: {
+                slide: slideNo,
+                sourcePath: slidePath,
+                shapeId: smartArt.shapeId,
+                name: smartArt.name,
+                bounds: smartArt.bounds
+              }
+            }
+          },
+          trust: { level: "untrusted", reason: "document-content" },
+          untrusted: true
+        };
+        objectMap.push(entry);
+        return entry;
+      }))
+      .concat(smartArts.flatMap((smartArt) => smartArt.nodes.filter((node) => node.type !== "doc").map((node) => {
+        const entry: ObjectMapEntry = {
+          stableObjectId: node.stableObjectId,
+          kind: "smartArtNode",
+          label: node.textPreview ?? node.nodeId,
+          text: node.text,
+          textPreview: node.textPreview,
+          sourcePath: slidePath,
+          xmlPath: node.dataPath,
+          bounds: smartArt.bounds,
+          bbox: smartArt.bounds ? [smartArt.bounds.x, smartArt.bounds.y, smartArt.bounds.width, smartArt.bounds.height] : undefined,
+          selectorHints: {
+            slide: slideNo,
+            smartArtStableObjectId: smartArt.stableObjectId,
+            smartArtIndex: smartArt.smartArtIndex,
+            smartArtShapeId: smartArt.shapeId,
+            smartArtName: smartArt.name,
+            nodeIndex: node.nodeIndex,
+            nodeId: node.nodeId,
+            nodeType: node.type,
+            parentNodeId: node.parentNodeId,
+            childNodeIds: node.childNodeIds,
+            dataPath: node.dataPath,
+            layoutId: smartArt.layoutId,
+            quickStyleId: smartArt.quickStyleId,
+            colorStyleId: smartArt.colorStyleId
+          },
+          media: {
+            smartArt: {
+              stableObjectId: smartArt.stableObjectId,
+              relationshipIds: smartArt.relationshipIds,
+              dataPath: smartArt.dataPath,
+              layoutPath: smartArt.layoutPath,
+              quickStylePath: smartArt.quickStylePath,
+              colorsPath: smartArt.colorsPath,
+              layoutId: smartArt.layoutId,
+              quickStyleId: smartArt.quickStyleId,
+              colorStyleId: smartArt.colorStyleId,
+              graphicFrame: {
+                slide: slideNo,
+                sourcePath: slidePath,
+                shapeId: smartArt.shapeId,
+                name: smartArt.name,
+                bounds: smartArt.bounds
+              }
+            }
+          },
+          trust: { level: "untrusted", reason: "document-content" },
+          untrusted: true
+        };
+        objectMap.push(entry);
+        return entry;
+      })))
+      .concat(chartSeries.map((series) => {
+        const entry: ObjectMapEntry = {
+          stableObjectId: series.stableObjectId,
+          kind: "chartSeries",
+          label: series.name,
+          sourcePath: slidePath,
+          xmlPath: series.chartPath,
+          selectorHints: {
+            slide: slideNo,
+            seriesIndex: series.seriesIndex,
+            seriesIdx: series.seriesIdx,
+            order: series.order,
+            chartStableObjectId: series.chartStableObjectId,
+            chartShapeId: series.chartShapeId,
+            relationshipId: series.chartRelationshipId,
+            chartPath: series.chartPath,
+            categoryRef: series.categoryRef,
+            valueRef: series.valueRef
+          },
+          media: {
+            relationshipId: series.chartRelationshipId,
+            chartPath: series.chartPath
+          },
+          trust: { level: "untrusted", reason: "document-content" },
+          untrusted: true
+        };
+        objectMap.push(entry);
+        return entry;
       }));
     slides.push({
       stableObjectId: slideStableObjectId,
@@ -224,6 +494,285 @@ export async function inspectSlides(zip: JSZip): Promise<{ slides: PptxSlide[]; 
     });
   }
   return { slides, objectMap };
+}
+
+async function extractChartSeries(zip: JSZip, charts: PptxChart[]): Promise<PptxChartSeries[]> {
+  const series: PptxChartSeries[] = [];
+  for (const chart of charts) {
+    if (!chart.chartPath) continue;
+    const chartXml = (await readZipText(zip, chart.chartPath)) ?? "";
+    let seriesIndex = 0;
+    for (const match of chartXml.matchAll(/<c:ser\b[\s\S]*?<\/c:ser>/g)) {
+      seriesIndex += 1;
+      const block = match[0];
+      const seriesIdx = xmlAttr(/<c:idx\b([^>]*)\/>/.exec(block)?.[1] ?? "", "val");
+      const order = xmlAttr(/<c:order\b([^>]*)\/>/.exec(block)?.[1] ?? "", "val");
+      const name = extractChartSeriesName(block);
+      const categoryRef = extractChartFormula(block, "cat") ?? extractChartFormula(block, "xVal");
+      const valueRef = extractChartFormula(block, "val") ?? extractChartFormula(block, "yVal");
+      series.push({
+        stableObjectId: stableHashId("pptx", slideScope(chart.sourcePath), "chartSeries", `${chart.chartPath}#${seriesIdx ?? seriesIndex}`),
+        slideIndex: chart.slideIndex,
+        seriesIndex,
+        chartStableObjectId: chart.stableObjectId,
+        chartShapeId: chart.shapeId,
+        chartRelationshipId: chart.relationshipId,
+        chartPath: chart.chartPath,
+        seriesIdx,
+        order,
+        name,
+        categoryRef,
+        valueRef,
+        sourcePath: chart.sourcePath
+      });
+    }
+  }
+  return series;
+}
+
+function extractGroups(xml: string, slideNo: number, sourcePath: string): PptxGroup[] {
+  let groupIndex = 0;
+  return [...xml.matchAll(/<p:grpSp\b[\s\S]*?<\/p:grpSp>/g)].map((match) => {
+    groupIndex += 1;
+    const block = match[0];
+    const cNvPrs = [...block.matchAll(/<p:cNvPr\b([^>]*?)(?:\/>|>)/g)].map((item) => item[1] ?? "");
+    const shapeId = xmlAttr(cNvPrs[0] ?? "", "id");
+    const name = xmlAttr(cNvPrs[0] ?? "", "name");
+    const childShapeIds = cNvPrs.slice(1).map((attrs) => xmlAttr(attrs, "id")).filter((id): id is string => Boolean(id));
+    return {
+      stableObjectId: shapeId
+        ? stableHashId("pptx", slideScope(sourcePath), "group", `${sourcePath}#${shapeId}`)
+        : makeStableObjectId("pptx", slideScope(sourcePath), "group", groupIndex),
+      slideIndex: slideNo,
+      groupIndex,
+      shapeId,
+      name,
+      childShapeIds,
+      bounds: extractBounds(block),
+      sourcePath
+    };
+  });
+}
+
+function extractConnectors(xml: string, slideNo: number, sourcePath: string): PptxConnector[] {
+  let connectorIndex = 0;
+  return [...xml.matchAll(/<p:cxnSp\b[\s\S]*?<\/p:cxnSp>/g)].map((match) => {
+    connectorIndex += 1;
+    const block = match[0];
+    const cNvPr = /<p:cNvPr\b([^>]*?)(?:\/>|>)/.exec(block)?.[1] ?? "";
+    const shapeId = xmlAttr(cNvPr, "id");
+    const name = xmlAttr(cNvPr, "name");
+    return {
+      stableObjectId: shapeId
+        ? stableHashId("pptx", slideScope(sourcePath), "connector", `${sourcePath}#${shapeId}`)
+        : makeStableObjectId("pptx", slideScope(sourcePath), "connector", connectorIndex),
+      slideIndex: slideNo,
+      connectorIndex,
+      shapeId,
+      name,
+      startConnection: extractConnection(block, "stCxn"),
+      endConnection: extractConnection(block, "endCxn"),
+      bounds: extractBounds(block),
+      sourcePath
+    };
+  });
+}
+
+async function extractSmartArts(zip: JSZip, xml: string, slideNo: number, sourcePath: string, rels: ReturnType<typeof parseRelationships>): Promise<PptxSmartArt[]> {
+  let smartArtIndex = 0;
+  const smartArts: PptxSmartArt[] = [];
+  for (const match of xml.matchAll(/<p:graphicFrame\b[\s\S]*?<\/p:graphicFrame>/g)) {
+    const block = match[0];
+    const relIdsAttrs = /<dgm:relIds\b([^>]*?)(?:\/>|>)/.exec(block)?.[1];
+    if (!relIdsAttrs) continue;
+    smartArtIndex += 1;
+    const cNvPr = /<p:cNvPr\b([^>]*?)(?:\/>|>)/.exec(block)?.[1] ?? "";
+    const shapeId = xmlAttr(cNvPr, "id");
+    const name = xmlAttr(cNvPr, "name");
+    const relationshipIds = Object.fromEntries(
+      Object.entries(xmlAttrs(relIdsAttrs))
+        .filter(([key]) => key.startsWith("r:"))
+        .map(([key, value]) => [key.split(":").pop() ?? key, value])
+    );
+    const relationships = Object.fromEntries(
+      Object.entries(relationshipIds).map(([role, relationshipId]) => {
+        const rel = rels.find((item) => item.id === relationshipId);
+        return [role, { relationshipId, target: rel ? relationshipTarget("ppt/slides", rel.target) : undefined, type: rel?.type }];
+      })
+    );
+    const dataPath = relationships.dm?.target;
+    const layoutPath = relationships.lo?.target;
+    const quickStylePath = relationships.qs?.target;
+    const colorsPath = relationships.cs?.target;
+    const stableObjectId = shapeId
+      ? stableHashId("pptx", slideScope(sourcePath), "smartArt", `${sourcePath}#${shapeId}`)
+      : makeStableObjectId("pptx", slideScope(sourcePath), "smartArt", smartArtIndex);
+    const [dataXml, layoutXml, quickStyleXml, colorsXml, diagramRels] = await Promise.all([
+      dataPath ? readZipText(zip, dataPath) : Promise.resolve(undefined),
+      layoutPath ? readZipText(zip, layoutPath) : Promise.resolve(undefined),
+      quickStylePath ? readZipText(zip, quickStylePath) : Promise.resolve(undefined),
+      colorsPath ? readZipText(zip, colorsPath) : Promise.resolve(undefined),
+      readSmartArtPartRelationships(zip, [dataPath, layoutPath, quickStylePath, colorsPath])
+    ]);
+    const nodes = extractSmartArtNodes(dataXml ?? "", {
+      slideNo,
+      sourcePath,
+      dataPath,
+      smartArtStableObjectId: stableObjectId,
+      smartArtShapeId: shapeId,
+      smartArtName: name
+    });
+    const nodeTree = smartArtNodeTree(nodes);
+    const text = nodes.map((node) => node.text).filter(Boolean).join("\n") || undefined;
+    const relationshipsWithPartRels = Object.fromEntries(
+      Object.entries(relationships).map(([role, rel]) => [
+        role,
+        {
+          ...rel,
+          partRelationships: rel.target ? diagramRels[rel.target] : undefined
+        }
+      ])
+    );
+    smartArts.push({
+      stableObjectId,
+      slideIndex: slideNo,
+      smartArtIndex,
+      shapeId,
+      name,
+      relationshipIds,
+      relationships: relationshipsWithPartRels,
+      dataPath,
+      layoutPath,
+      quickStylePath,
+      colorsPath,
+      layoutId: extractDiagramDefinitionId(layoutXml ?? "", "layoutDef"),
+      quickStyleId: extractDiagramDefinitionId(quickStyleXml ?? "", "styleDef"),
+      colorStyleId: extractDiagramDefinitionId(colorsXml ?? "", "colorsDef"),
+      text,
+      textPreview: preview(text),
+      nodes,
+      nodeTree,
+      bounds: extractBounds(block),
+      sourcePath
+    });
+  }
+  return smartArts;
+}
+
+function extractSmartArtNodes(
+  xml: string,
+  context: {
+    slideNo: number;
+    sourcePath: string;
+    dataPath?: string;
+    smartArtStableObjectId: string;
+    smartArtShapeId?: string;
+    smartArtName?: string;
+  }
+): PptxSmartArtNode[] {
+  if (!xml) return [];
+  const points = [...xml.matchAll(/<dgm:pt\b([^>]*?)(?:\/>|>([\s\S]*?)<\/dgm:pt>)/g)];
+  const parentByChild = new Map<string, string>();
+  const childrenByParent = new Map<string, Array<{ childId: string; order: number }>>();
+  for (const match of xml.matchAll(/<dgm:cxn\b([^>]*?)(?:\/>|>[\s\S]*?<\/dgm:cxn>)/g)) {
+    const attrs = xmlAttrs(match[1] ?? "");
+    if (attrs.type !== "parOf" || !attrs.srcId || !attrs.destId) continue;
+    const order = Number(attrs.srcOrd ?? attrs.destOrd ?? childrenByParent.get(attrs.srcId)?.length ?? 0);
+    parentByChild.set(attrs.destId, attrs.srcId);
+    const children = childrenByParent.get(attrs.srcId) ?? [];
+    children.push({ childId: attrs.destId, order: Number.isFinite(order) ? order : children.length });
+    childrenByParent.set(attrs.srcId, children);
+  }
+  const rawNodes = points
+    .map((match, index): PptxSmartArtNode | undefined => {
+      const attrs = xmlAttrs(match[1] ?? "");
+      const nodeId = attrs.modelId;
+      if (!nodeId) return undefined;
+      const body = match[2] ?? "";
+      const text = exactText(body, "a:t").join("") || exactText(body, "dgm:t").join("") || undefined;
+      return {
+        stableObjectId: stableHashId("pptx", slideScope(context.sourcePath), "smartArtNode", `${context.dataPath ?? context.sourcePath}#${context.smartArtShapeId ?? context.smartArtStableObjectId}#${nodeId}`),
+        slideIndex: context.slideNo,
+        nodeIndex: index + 1,
+        nodeId,
+        type: attrs.type,
+        text,
+        textPreview: preview(text),
+        parentNodeId: parentByChild.get(nodeId),
+        childNodeIds: (childrenByParent.get(nodeId) ?? [])
+          .sort((a, b) => a.order - b.order)
+          .map((child) => child.childId),
+        children: [],
+        smartArtStableObjectId: context.smartArtStableObjectId,
+        smartArtShapeId: context.smartArtShapeId,
+        smartArtName: context.smartArtName,
+        dataPath: context.dataPath,
+        sourcePath: context.sourcePath
+      };
+    })
+    .filter((node): node is PptxSmartArtNode => Boolean(node));
+  const nodeMap = new Map(rawNodes.map((node) => [node.nodeId, node]));
+  for (const node of rawNodes) {
+    node.children = node.childNodeIds.map((id) => nodeMap.get(id)).filter((child): child is PptxSmartArtNode => Boolean(child));
+  }
+  return rawNodes.filter((node) => node.type !== "doc" || Boolean(node.text) || node.childNodeIds.length > 0);
+}
+
+function smartArtNodeTree(nodes: PptxSmartArtNode[]): PptxSmartArtNode[] {
+  const nodeIds = new Set(nodes.map((node) => node.nodeId));
+  const roots = nodes.filter((node) => !node.parentNodeId || !nodeIds.has(node.parentNodeId));
+  if (roots.length) return roots;
+  return nodes.filter((node) => node.text);
+}
+
+function smartArtNodeSummary(node: PptxSmartArtNode): Record<string, unknown> {
+  return {
+    stableObjectId: node.stableObjectId,
+    nodeIndex: node.nodeIndex,
+    nodeId: node.nodeId,
+    type: node.type,
+    text: node.text,
+    textPreview: node.textPreview,
+    parentNodeId: node.parentNodeId,
+    childNodeIds: node.childNodeIds,
+    children: node.children.map(smartArtNodeSummary)
+  };
+}
+
+function extractDiagramDefinitionId(xml: string, localName: "layoutDef" | "styleDef" | "colorsDef"): string | undefined {
+  const attrs = new RegExp(`<dgm:${localName}\\b([^>]*)`).exec(xml)?.[1] ?? "";
+  return xmlAttr(attrs, "uniqueId") ?? xmlAttr(attrs, "id") ?? xmlAttr(attrs, "name") ?? xmlAttr(attrs, "defStyle");
+}
+
+async function readSmartArtPartRelationships(
+  zip: JSZip,
+  paths: Array<string | undefined>
+): Promise<Record<string, Array<{ relationshipId: string; target?: string; type?: string; targetMode?: string }>>> {
+  const entries: Record<string, Array<{ relationshipId: string; target?: string; type?: string; targetMode?: string }>> = {};
+  await Promise.all(paths.filter((path): path is string => Boolean(path)).map(async (path) => {
+    const relsXml = await readZipText(zip, zipRelationshipsPath(path));
+    if (!relsXml) return;
+    entries[path] = parseRelationships(relsXml).map((rel) => ({
+      relationshipId: rel.id,
+      target: relationshipTarget(zipDirname(path), rel.target),
+      type: rel.type,
+      targetMode: rel.targetMode
+    }));
+  }));
+  return entries;
+}
+
+function zipDirname(path: string): string {
+  return path.split("/").slice(0, -1).join("/");
+}
+
+function zipBasename(path: string): string {
+  return path.split("/").pop() ?? path;
+}
+
+function zipRelationshipsPath(path: string): string {
+  const dir = zipDirname(path);
+  return `${dir}/_rels/${zipBasename(path)}.rels`;
 }
 
 function extractCharts(xml: string, slideNo: number, sourcePath: string, rels: ReturnType<typeof parseRelationships>): PptxChart[] {
@@ -609,6 +1158,33 @@ function textBoxShapeXml(
     `<p:txBody><a:bodyPr wrap="square"/><a:lstStyle/><a:p><a:r><a:rPr${fontSize}${bold}/><a:t>${escapeXmlText(spec.text)}</a:t></a:r></a:p></p:txBody>`,
     "</p:sp>"
   ].join("");
+}
+
+function extractChartSeriesName(block: string): string | undefined {
+  const tx = /<c:tx\b[\s\S]*?<\/c:tx>/.exec(block)?.[0] ?? "";
+  return exactText(tx, "c:v")[0] ?? extractChartFormula(block, "tx");
+}
+
+function extractChartFormula(block: string, container: string): string | undefined {
+  const pattern = new RegExp(`<c:${container}\\b[\\s\\S]*?<c:f(?:\\s[^>]*)?>([\\s\\S]*?)<\\/c:f>[\\s\\S]*?<\\/c:${container}>`);
+  return pattern.exec(block)?.[1]?.trim();
+}
+
+function extractConnection(block: string, tagName: "stCxn" | "endCxn"): { shapeId?: string; index?: string } | undefined {
+  const attrs = new RegExp(`<a:${tagName}\\b([^>]*)\\/>`).exec(block)?.[1];
+  if (!attrs) return undefined;
+  return {
+    shapeId: xmlAttr(attrs, "id"),
+    index: xmlAttr(attrs, "idx")
+  };
+}
+
+function xmlAttrs(attrs: string): Record<string, string> {
+  const values: Record<string, string> = {};
+  for (const match of attrs.matchAll(/([A-Za-z_][\w:.-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')/g)) {
+    values[match[1] ?? ""] = match[2] ?? match[3] ?? "";
+  }
+  return values;
 }
 
 function simpleHash(value: string): string {

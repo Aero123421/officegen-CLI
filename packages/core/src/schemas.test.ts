@@ -94,6 +94,7 @@ describe("schema registry", () => {
       { op: "xlsx.slicer.setSelection", selector: { stableObjectId: "xlsx:workbook:slicer:0001" }, selected: ["West"], style: "Fancy" },
       { op: "pdf.textOverlay", page: 1, text: "Overlay", x: 10 },
       { op: "pdf.annotation", page: 1, text: "Note", x: 10, y: 10, color: "#f00" },
+      { op: "pdf.redact", page: 1, text: "SECRET" },
       { op: "pdf.redact", page: 1, x: 10, y: 10, width: 20, height: 20 },
       { op: "pdf.textOverlay", page: 1, text: "Overlay", x: 10, y: 10, redact: true },
       { op: "pdf.annotation", page: 1, text: "Note", x: 10, y: 10, removeUnderlyingText: true }
@@ -122,7 +123,7 @@ describe("schema registry", () => {
     const unsupportedOpsByTarget = [
       {
         target: "pdf",
-        op: { op: "pdf.redact", page: 1, x: 10, y: 10, width: 40, height: 12 }
+        op: { op: "pdf.redact", page: 1, text: "SECRET" }
       },
       {
         target: "pdf",
@@ -160,6 +161,9 @@ describe("schema registry", () => {
         }).ok
       ).toBe(false);
     }
+
+    const editOpsSchema = listSchemas().find((entry) => entry.id === "officegen.edit.ops@1.2")?.schema;
+    expect(JSON.stringify(editOpsSchema)).not.toContain("pdf.redact");
   });
 
   it("returns actionable validation failures for unknown schemas and schema id mismatches", () => {
@@ -194,6 +198,7 @@ describe("schema registry", () => {
         "officegen.design.pack@1.2",
         "officegen.template.map@1.2",
         "officegen.view.objectMap@1.2",
+        "officegen.xlsx.formulaGraph@1.0",
         "officegen.diagnostics@1.2"
       ])
     );
