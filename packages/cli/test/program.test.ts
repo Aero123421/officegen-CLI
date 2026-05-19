@@ -783,7 +783,7 @@ describe("officegen CLI command surface", () => {
     expect(help.examples.join("\n")).toContain("officegen run office-agent");
   });
 
-  it("enforces run office-agent output-root and writes report-out", async () => {
+  it("enforces run office-agent output-root", async () => {
     const cwd = await tempWorkspace();
     await writeFile(path.join(cwd, "deck.pptx"), Buffer.from(await minimalPptxWithImage(false)));
     await writeFile(path.join(cwd, "goal.md"), "Replace the title with Launch Plan.\n", "utf8");
@@ -817,18 +817,43 @@ describe("officegen CLI command surface", () => {
       "goal.md",
       "--output-root",
       ".officegen/allowed",
-      "--report-out",
-      ".officegen/allowed/report.json",
       "--agent",
       "--json",
       "--json-budget-bytes",
       "120000"
     ], cwd);
     const envelope = parseEnvelope(captured);
-    const report = JSON.parse(await readFile(path.join(cwd, ".officegen", "allowed", "report.json"), "utf8"));
 
     expect(envelope.ok).toBe(true);
     expect(envelope.result.outDir).toContain(".officegen/allowed/office-agent");
+  });
+
+  it("writes run office-agent report-out", async () => {
+    const cwd = await tempWorkspace();
+    await writeFile(path.join(cwd, "deck.pptx"), Buffer.from(await minimalPptxWithImage(false)));
+    await writeFile(path.join(cwd, "goal.md"), "Replace the title with Launch Plan.\n", "utf8");
+
+    const captured = await run([
+      "run",
+      "office-agent",
+      "--input",
+      "deck.pptx",
+      "--goal",
+      "goal.md",
+      "--out",
+      ".officegen/office-agent",
+      "--report-out",
+      ".officegen/report.json",
+      "--agent",
+      "--json",
+      "--json-budget-bytes",
+      "120000"
+    ], cwd);
+    const envelope = parseEnvelope(captured);
+    const report = JSON.parse(await readFile(path.join(cwd, ".officegen", "report.json"), "utf8"));
+
+    expect(envelope.ok).toBe(true);
+    expect(envelope.result.reportOut).toContain(".officegen/report.json");
     expect(report.schema).toBe("officegen.office-agent.result@3.1");
   });
 
