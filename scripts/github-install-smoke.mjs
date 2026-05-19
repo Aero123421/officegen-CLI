@@ -14,7 +14,6 @@ const specArg = valueArg("--spec");
 const ref = valueArg("--ref");
 const expectedVersionArg = valueArg("--expected-version");
 const rootPackage = JSON.parse(await readFile(path.join(cwd, "package.json"), "utf8"));
-const expectedVersion = expectedVersionArg === "current" ? rootPackage.version : expectedVersionArg;
 const repository = process.env.GITHUB_REPOSITORY ?? "Aero123421/officegen-CLI";
 const defaultSpec = specArg ?? process.env.OFFICEGEN_GITHUB_INSTALL_SPEC ?? (ref
   ? `github:${repository}#${ref}`
@@ -23,6 +22,12 @@ const defaultSpec = specArg ?? process.env.OFFICEGEN_GITHUB_INSTALL_SPEC ?? (ref
   : head
     ? `github:${repository}`
   : pathToFileURL(cwd).href);
+const expectedVersion = resolveExpectedVersion({
+  expectedVersionArg,
+  rootVersion: rootPackage.version,
+  spec: defaultSpec,
+  remote
+});
 try {
   const npmCli = process.env.npm_execpath;
   const installArgs = ["install", defaultSpec, "--prefix", temp, "--no-audit", "--no-fund", "--force", "--prefer-online"];
@@ -47,6 +52,13 @@ try {
       coreMainExists: existsSync(coreMain)
     }, null, 2));
     process.exit(1);
+  }
+  if (expectedVersion) {
+    const installedManifest = JSON.parse(await readFile(path.join(packageRoot, "package.json"), "utf8"));
+    if (installedManifest.version !== expectedVersion) {
+      console.error(`installed package version is ${installedManifest.version}, expected ${expectedVersion}.`);
+      process.exit(1);
+    }
   }
 
   const bin = process.platform === "win32"
@@ -112,6 +124,25 @@ try {
 function valueArg(name) {
   const index = process.argv.indexOf(name);
   return index >= 0 ? process.argv[index + 1] : undefined;
+}
+
+function resolveExpectedVersion({ expectedVersionArg, rootVersion, spec, remote }) {
+  if (expectedVersionArg === "current") return rootVersion;
+  if (expectedVersionArg) return expectedVersionArg;
+  if (spec === pathToFileURL(cwd).href) return rootVersion;
+
+  const tagVersion = versionFromTagSpec(spec);
+  if (tagVersion) return tagVersion;
+  if (remote) {
+    console.error("Remote/tag GitHub install smoke requires an expected version.");
+    console.error("Use --expected-version <x.y.z>, --expected-version current, or a git install spec/ref ending in #v<x.y.z>.");
+    process.exit(2);
+  }
+  return undefined;
+}
+
+function versionFromTagSpec(spec) {
+  return /(?:#|\/tree\/)v(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$/.exec(spec)?.[1];
 }
 
 function runInstalled(bin, args, cwd) {

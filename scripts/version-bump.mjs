@@ -64,7 +64,7 @@ async function assertCurrentVersions(expectedVersion, foundIssues) {
   }
   await assertVersionText(coreDistTypesPath, expectedVersion, foundIssues, "OFFICEGEN_CLI_VERSION");
   await assertVersionText(coreDistDtsPath, expectedVersion, foundIssues, "OFFICEGEN_CLI_VERSION");
-  await assertVersionText(readmePath, expectedVersion, foundIssues, "README release URLs");
+  await assertReadmeReleaseRefs(expectedVersion, foundIssues);
 }
 
 async function updatePackageManifests(version) {
@@ -137,6 +137,47 @@ async function assertVersionText(filePath, expectedVersion, foundIssues, label) 
   } catch (error) {
     if (error?.code !== "ENOENT") throw error;
   }
+}
+
+async function assertReadmeReleaseRefs(expectedVersion, foundIssues) {
+  const patterns = [
+    { label: "GitHub release download tag", regex: /github\.com\/[^\s)"']+\/releases\/download\/v(?<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/g },
+    { label: "GitHub release tag URL", regex: /github\.com\/[^\s)"']+\/releases\/tag\/v(?<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/g },
+    { label: "GitHub install ref", regex: /github:[^\s)"']+#v(?<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/g },
+    { label: "release tarball filename", regex: /officegen-v(?<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)\.tgz/g }
+  ];
+
+  try {
+    const text = await readText(readmePath);
+    const findings = [];
+    const seen = new Set();
+    for (const { label, regex } of patterns) {
+      for (const match of text.matchAll(regex)) {
+        const version = match.groups?.version;
+        if (version && version !== expectedVersion) {
+          const location = textLocation(text, match.index ?? 0);
+          const issue = `${readmePath}:${location.line}:${location.column}: ${label} uses ${version}, expected ${expectedVersion}`;
+          if (!seen.has(issue)) {
+            findings.push(issue);
+            seen.add(issue);
+          }
+        }
+      }
+    }
+    if (findings.length > 0) {
+      foundIssues.push(...findings);
+    } else if (!text.includes(expectedVersion)) {
+      foundIssues.push(`${readmePath}: README release references do not include ${expectedVersion}`);
+    }
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+}
+
+function textLocation(text, index) {
+  const before = text.slice(0, index);
+  const lines = before.split(/\r?\n/);
+  return { line: lines.length, column: lines.at(-1).length + 1 };
 }
 
 async function writeJson(filePath, value) {

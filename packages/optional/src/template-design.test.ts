@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import JSZip from "jszip";
 import { describe, expect, it } from "vitest";
+import { getBuiltinConfig } from "@officegen/core";
 import { inspect } from "@officegen/formats";
 import { createOptionalCapabilities } from "./common.js";
 import { applyDesign, captureDesign, capturePptxDesignSignals, initDesign, type DesignSourceCapture } from "./design.js";
@@ -203,6 +204,85 @@ describe("@officegen/optional PPTX template and design signals", () => {
     expect(result.mutatesOffice).toBe(true);
     expect((result.artifacts as Array<{ exists?: boolean }>)[0]?.exists).toBe(true);
     expect(inspected.objectMap.map((entry) => entry.text).join(" ")).toContain("Q4 FY27");
+  });
+
+  it("rejects template image values that resolve outside the workspace", async () => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), "officegen-template-image-policy-"));
+    const outside = await mkdtemp(path.join(os.tmpdir(), "officegen-template-image-outside-"));
+    const deckPath = path.join(cwd, "source.pptx");
+    const outPath = path.join(cwd, "filled.pptx");
+    const outsideImage = path.join(outside, "logo.png");
+    await writeFile(deckPath, await makePptxFixture());
+    await writeFile(outsideImage, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    const optional = {
+      cwd,
+      capabilities: createOptionalCapabilities(["template"])
+    };
+    await createTemplate({
+      ...optional,
+      sourcePath: deckPath,
+      template: {
+        id: "image-policy",
+        name: "Image Policy",
+        fields: [{ name: "hero_image", type: "image" }],
+        mapping: {
+          hero_image: {
+            selector: { stableObjectId: "pptx:slide-00000000:shape:0003" },
+            kind: "image"
+          }
+        }
+      }
+    });
+
+    for (const imagePath of [path.relative(cwd, outsideImage), outsideImage]) {
+      await expect(fillTemplate({ ...optional, id: "image-policy", values: { hero_image: imagePath }, outputPath: outPath }))
+        .rejects.toMatchObject({
+          payload: expect.objectContaining({ code: "SECURITY_PATH_OUTSIDE_ROOT" })
+        });
+    }
+  });
+
+  it("rejects template image values above the configured input size limit", async () => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), "officegen-template-image-size-"));
+    const deckPath = path.join(cwd, "source.pptx");
+    const outPath = path.join(cwd, "filled.pptx");
+    const imagePath = path.join(cwd, "logo.png");
+    await writeFile(deckPath, await makePptxFixture());
+    await writeFile(imagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    const config = getBuiltinConfig("substrate");
+    config.paths.projectRoot = cwd;
+    config.paths.projectConfigDir = path.join(cwd, ".officegen");
+    config.paths.userConfigDir = path.join(cwd, ".officegen", "user");
+    config.security.trustedRoots = ["."];
+    config.security.untrustedInput.maxInputFileBytes = 3;
+    const optional = {
+      cwd,
+      config,
+      capabilities: createOptionalCapabilities(["template"])
+    };
+    await createTemplate({
+      ...optional,
+      sourcePath: deckPath,
+      template: {
+        id: "image-size",
+        name: "Image Size",
+        fields: [{ name: "hero_image", type: "image" }],
+        mapping: {
+          hero_image: {
+            selector: { stableObjectId: "pptx:slide-00000000:shape:0003" },
+            kind: "image"
+          }
+        }
+      }
+    });
+
+    await expect(fillTemplate({ ...optional, id: "image-size", values: { hero_image: "logo.png" }, outputPath: outPath }))
+      .rejects.toMatchObject({
+        payload: expect.objectContaining({
+          code: "SECURITY_INPUT_TOO_LARGE",
+          details: expect.objectContaining({ maxInputFileBytes: 3 })
+        })
+      });
   });
 
   it("does not report Office mutation when template fill has no resolved operations", async () => {

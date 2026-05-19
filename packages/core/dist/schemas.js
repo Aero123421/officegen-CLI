@@ -52,6 +52,65 @@ const envelopeSchema = {
     },
     additionalProperties: false
 };
+const capabilityContractSchema = {
+    type: "object",
+    required: ["area", "formats", "support", "summary", "limitations"],
+    additionalProperties: false,
+    properties: {
+        area: { type: "string" },
+        formats: { type: "array", minItems: 1, items: { enum: ["pptx", "docx", "xlsx", "pdf", "json", "svg", "html", "image"] } },
+        support: { enum: ["supported", "limited", "unsupported", "optional-gated", "overlay-only"] },
+        summary: { type: "string" },
+        limitations: { type: "array", items: { type: "string" } }
+    }
+};
+const capabilitiesSchema = {
+    $id: "officegen.capabilities@1.2",
+    type: "object",
+    required: [
+        "schema",
+        "ok",
+        "profile",
+        "capabilitiesHash",
+        "visibleCommands",
+        "hiddenFromAgents",
+        "disabled",
+        "agentInstructionsPath",
+        "jsonBudgetBytes",
+        "featureContracts",
+        "formatCapabilities",
+        "knownLimitations",
+        "unsupportedNow",
+        "nextSuggestedCommands"
+    ],
+    additionalProperties: true,
+    properties: {
+        schema: schemaField("officegen.capabilities@1.2"),
+        ok: { const: true },
+        profile: { enum: ["substrate", "authoring", "enterprise"] },
+        capabilitiesHash: { type: "string", pattern: "^sha256:" },
+        visibleCommands: { type: "array", items: { type: "string" } },
+        hiddenFromAgents: { type: "array", items: { type: "string" } },
+        disabled: { type: "array", items: { type: "string" } },
+        agentInstructionsPath: { type: "string" },
+        jsonBudgetBytes: { type: "integer", minimum: 0 },
+        featureContracts: { type: "array", minItems: 1, items: capabilityContractSchema },
+        formatCapabilities: {
+            type: "object",
+            required: ["pptx", "docx", "xlsx", "pdf"],
+            additionalProperties: true,
+            properties: {
+                pptx: { type: "object", additionalProperties: true },
+                docx: { type: "object", additionalProperties: true },
+                xlsx: { type: "object", additionalProperties: true },
+                pdf: { type: "object", additionalProperties: true }
+            }
+        },
+        knownLimitations: { type: "array", items: { type: "string" } },
+        unsupportedNow: { type: "array", items: { type: "string" } },
+        nextSuggestedCommands: { type: "array", items: { type: "string" } }
+    }
+};
 const selectorSchema = {
     type: "object",
     minProperties: 1,
@@ -294,7 +353,14 @@ function editOperationSchemas() {
         op("pptx.setTextCase", ["selector", "textCase"], ["selector", "textCase"]),
         op("pptx.setTableCellText", ["selector", "text"], ["selector", "text"]),
         op("pptx.replaceImageByShape", ["selector"], ["selector", "replacementPath", "replacementBase64", "fit", "crop"], {}, { anyOf: [{ required: ["replacementPath"] }, { required: ["replacementBase64"] }] }),
-        op("pptx.updateChartData", ["selector", "categories", "values"], ["selector", "categories", "values", "seriesName"]),
+        op("pptx.updateChartData", ["selector", "categories", "values"], ["selector", "categories", "values", "seriesName"], {}, {
+            description: "Updates one existing PPTX chart series by replacing categories and values. Multi-series, secondary-axis, and combo-chart editing are unsupported.",
+            "x-officegen-support": {
+                support: "limited",
+                series: "single-series-only",
+                unsupported: ["multi-series", "secondary-axis", "combo-chart", "per-series-chart-type"]
+            }
+        }),
         op("pptx.setBounds", ["selector", "bounds"], ["selector", "bounds"]),
         op("docx.insertParagraphAfter", ["selector", "text"], ["selector", "text"]),
         op("docx.replaceTextSmart", ["from", "to"], ["selector", "from", "to"]),
@@ -321,12 +387,34 @@ function editOperationSchemas() {
         op("xlsx.updateTable", ["startCell", "rows"], ["sheet", "startCell", "rows"]),
         op("xlsx.writeTable", ["startCell", "rows"], ["sheet", "startCell", "rows", "tableName"]),
         op("xlsx.table.resize", ["selector", "ref"], ["selector", "ref"]),
-        op("xlsx.chart.setData", ["selector", "categories", "values"], ["selector", "categories", "values", "seriesName"]),
-        op("xlsx.pivot.refreshDefinition", ["selector"], ["selector"]),
-        op("xlsx.pivot.refreshAll", [], []),
-        op("xlsx.slicer.setSelection", ["selector", "selected"], ["selector", "selected"]),
-        op("pdf.textOverlay", ["page", "text", "x", "y"], ["page", "text", "x", "y", "size", "color"]),
-        op("pdf.annotation", ["page", "text", "x", "y"], ["page", "text", "x", "y", "width", "height"])
+        op("xlsx.chart.setData", ["selector", "categories", "values"], ["selector", "categories", "values", "seriesName"], {}, {
+            description: "Updates one existing XLSX chart series by replacing categories and values. Multi-series, secondary-axis, and combo-chart editing are unsupported.",
+            "x-officegen-support": {
+                support: "limited",
+                series: "single-series-only",
+                unsupported: ["multi-series", "secondary-axis", "combo-chart", "per-series-chart-type"]
+            }
+        }),
+        op("xlsx.pivot.refreshDefinition", ["selector"], ["selector"], {}, {
+            description: "Marks an existing pivot definition for refresh. Pivot layout, field, and value editing are unsupported.",
+            "x-officegen-support": { support: "limited", mode: "refresh-flag-only" }
+        }),
+        op("xlsx.pivot.refreshAll", [], [], {}, {
+            description: "Marks workbook pivot definitions/caches for refresh. Pivot layout, field, and value editing are unsupported.",
+            "x-officegen-support": { support: "limited", mode: "refresh-flag-only" }
+        }),
+        op("xlsx.slicer.setSelection", ["selector", "selected"], ["selector", "selected"], {}, {
+            description: "Updates selected slicer items only. Slicer creation, caption editing, and styling are unsupported.",
+            "x-officegen-support": { support: "limited", mode: "selection-only" }
+        }),
+        op("pdf.textOverlay", ["page", "text", "x", "y"], ["page", "text", "x", "y", "size", "color"], {}, {
+            description: "Draws overlay text on a PDF page. This is not redaction and does not remove or rewrite underlying PDF content.",
+            "x-officegen-support": { support: "overlay-only", redaction: "unsupported", removesUnderlyingContent: false }
+        }),
+        op("pdf.annotation", ["page", "text", "x", "y"], ["page", "text", "x", "y", "width", "height"], {}, {
+            description: "Adds a PDF annotation. This is not redaction and does not remove or rewrite underlying PDF content.",
+            "x-officegen-support": { support: "overlay-only", redaction: "unsupported", removesUnderlyingContent: false }
+        })
     ];
 }
 const editOpsSchema = {
@@ -612,7 +700,7 @@ function looseSchema(id) {
 }
 const entries = [
     entry("officegen.envelope@1.2", envelopeSchema, undefined),
-    entry("officegen.capabilities@1.2", looseSchema("officegen.capabilities@1.2"), "capabilities"),
+    entry("officegen.capabilities@1.2", capabilitiesSchema, "capabilities"),
     entry("officegen.edit.ops@1.2", editOpsSchema, "edit"),
     entry("officegen.ir.document@1.2", documentIrSchema, "render"),
     entry("officegen.manifest@1.2", looseSchema("officegen.manifest@1.2"), "run"),

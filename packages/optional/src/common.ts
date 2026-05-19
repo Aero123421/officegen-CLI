@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
+import type { OfficegenConfig } from "@officegen/core";
 
 export type OptionalFeature =
   | "agent"
@@ -20,6 +21,7 @@ export interface OptionalContext {
   cwd?: string;
   capabilities?: OptionalCapabilities | OptionalFeature[];
   storeDir?: string;
+  config?: OfficegenConfig;
 }
 
 export interface ValidationResult {

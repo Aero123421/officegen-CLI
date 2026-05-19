@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { getCapabilities } from "./capabilities.js";
 import { getBuiltinConfig } from "./config.js";
 import { listSchemas, validateSchema } from "./schemas.js";
 
@@ -49,6 +50,32 @@ describe("schema registry", () => {
       target: "pdf",
       ops: [{ op: "setText", selector: { stableObjectId: "pdf:document:page:0001" }, text: "Nope" }]
     }).ok).toBe(false);
+    expect(validateSchema("officegen.edit.ops@1.2", {
+      schema: "officegen.edit.ops@1.2",
+      target: "pptx",
+      ops: [
+        {
+          op: "pptx.updateChartData",
+          selector: { stableObjectId: "pptx:s001:chart:0001" },
+          categories: ["A", "B"],
+          values: [1, 2],
+          seriesName: "Revenue"
+        }
+      ]
+    }).ok).toBe(true);
+    expect(validateSchema("officegen.edit.ops@1.2", {
+      schema: "officegen.edit.ops@1.2",
+      target: "xlsx",
+      ops: [
+        {
+          op: "xlsx.chart.setData",
+          selector: { stableObjectId: "xlsx:workbook:chart:0001" },
+          categories: ["A", "B"],
+          values: [1, 2],
+          seriesName: "Revenue"
+        }
+      ]
+    }).ok).toBe(true);
   });
 
   it("rejects structural edit ops with missing or unrelated arguments", () => {
@@ -61,8 +88,15 @@ describe("schema registry", () => {
       { op: "docx.insertParagraphAfter", text: "Inserted" },
       { op: "xlsx.insertRows", rowIndex: 2 },
       { op: "xlsx.updateTable", startCell: "A1" },
+      { op: "pptx.updateChartData", selector: { stableObjectId: "pptx:s001:chart:0001" }, categories: ["A"], values: [1], series: [{ name: "A", values: [1] }] },
+      { op: "xlsx.chart.setData", selector: { stableObjectId: "xlsx:workbook:chart:0001" }, categories: ["A"], values: [1], secondaryAxis: true },
+      { op: "xlsx.pivot.refreshDefinition", selector: { stableObjectId: "xlsx:workbook:pivot:0001" }, fields: ["Region"] },
+      { op: "xlsx.slicer.setSelection", selector: { stableObjectId: "xlsx:workbook:slicer:0001" }, selected: ["West"], style: "Fancy" },
       { op: "pdf.textOverlay", page: 1, text: "Overlay", x: 10 },
-      { op: "pdf.annotation", page: 1, text: "Note", x: 10, y: 10, color: "#f00" }
+      { op: "pdf.annotation", page: 1, text: "Note", x: 10, y: 10, color: "#f00" },
+      { op: "pdf.redact", page: 1, x: 10, y: 10, width: 20, height: 20 },
+      { op: "pdf.textOverlay", page: 1, text: "Overlay", x: 10, y: 10, redact: true },
+      { op: "pdf.annotation", page: 1, text: "Note", x: 10, y: 10, removeUnderlyingText: true }
     ];
 
     for (const editOp of invalidOps) {
@@ -82,6 +116,50 @@ describe("schema registry", () => {
         ops: [{ op: "pptx.duplicateSlide", selector: { stableObjectId: "pptx:slide-a1b2c3d4:shape:0001" }, after: 1 }]
       }).ok
     ).toBe(true);
+  });
+
+  it("keeps unsupported redaction and broad chart contracts out of edit ops", () => {
+    const unsupportedOpsByTarget = [
+      {
+        target: "pdf",
+        op: { op: "pdf.redact", page: 1, x: 10, y: 10, width: 40, height: 12 }
+      },
+      {
+        target: "pdf",
+        op: { op: "pdf.textOverlay", page: 1, text: "Covered", x: 10, y: 10, removeUnderlyingText: true }
+      },
+      {
+        target: "pptx",
+        op: {
+          op: "pptx.updateChartData",
+          selector: { stableObjectId: "pptx:s001:chart:0001" },
+          categories: ["A"],
+          values: [1],
+          multiSeries: [{ name: "Revenue", values: [1] }]
+        }
+      },
+      {
+        target: "xlsx",
+        op: {
+          op: "xlsx.chart.setData",
+          selector: { stableObjectId: "xlsx:workbook:chart:0001" },
+          categories: ["A"],
+          values: [1],
+          comboChart: true,
+          chartTypeBySeries: { Revenue: "line" }
+        }
+      }
+    ];
+
+    for (const { target, op } of unsupportedOpsByTarget) {
+      expect(
+        validateSchema("officegen.edit.ops@1.2", {
+          schema: "officegen.edit.ops@1.2",
+          target,
+          ops: [op]
+        }).ok
+      ).toBe(false);
+    }
   });
 
   it("returns actionable validation failures for unknown schemas and schema id mismatches", () => {
@@ -121,6 +199,23 @@ describe("schema registry", () => {
     );
     expect(agentIds).toContain("officegen.design.pack@1.2");
     expect(agentIds).toContain("officegen.template.map@1.2");
+  });
+
+  it("validates capability contracts that disclose unsupported and limited editing surfaces", () => {
+    const capabilities = getCapabilities(getBuiltinConfig("substrate"), { agent: true });
+    const pdfCapabilities = capabilities.formatCapabilities.pdf as Record<string, unknown>;
+    const pptxCapabilities = capabilities.formatCapabilities.pptx as Record<string, unknown>;
+
+    expect(validateSchema("officegen.capabilities@1.2", capabilities).ok).toBe(true);
+    expect(pdfCapabilities.redaction).toBe("unsupported; overlays do not physically remove underlying content");
+    expect(pptxCapabilities.smartArt).toBe("unsupported");
+    expect(capabilities.featureContracts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ area: "PDF editing and redaction", support: "overlay-only" }),
+        expect.objectContaining({ area: "PPTX/XLSX charts", support: "limited" })
+      ])
+    );
+    expect(capabilities.unsupportedNow.join("\n")).toContain("Multi-series");
   });
 
   it("validates document IR and view object maps", () => {

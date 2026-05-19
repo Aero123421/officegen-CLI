@@ -51,6 +51,7 @@ export function capabilitiesPayload(context) {
             knownLimitations: knownLimitationsForFeature(entry.feature)
         })),
         unsupportedNow: [
+            ...coreCapabilities.unsupportedNow,
             "native Office-to-PDF and repair-dialog detection require installed Office COM or LibreOffice renderer backends",
             "scanned PDF understanding is handled through page preview artifacts for AI vision review"
         ],
@@ -435,6 +436,40 @@ function formatCapabilitiesForFeature(feature) {
             xlsx: { supported: false, noopReason: "layout apply is PPTX-focused" }
         };
     }
+    if (feature === "edit") {
+        return {
+            pptx: {
+                text: true,
+                tableCellText: true,
+                imageReplacement: true,
+                chartData: "single-series-only",
+                smartArt: "unsupported",
+                comboCharts: "unsupported",
+                secondaryAxis: "unsupported"
+            },
+            docx: {
+                text: "scoped paragraph/run replacement",
+                tableCellText: true,
+                comments: true,
+                redlines: "tracked insert/delete/replace only",
+                fullFidelityEditing: "limited"
+            },
+            xlsx: {
+                cells: true,
+                formulas: "guarded writes only",
+                tables: true,
+                chartData: "single-series-only",
+                pivot: "refresh-flags-only",
+                slicer: "selection-only"
+            },
+            pdf: {
+                textOverlay: "overlay-only",
+                annotation: "overlay-only",
+                redaction: "unsupported",
+                contentRewrite: "unsupported"
+            }
+        };
+    }
     if (feature === "verify")
         return { native: "optional-gated", visual: "approximate unless trusted native renderer is enabled" };
     if (feature === "critique")
@@ -450,6 +485,13 @@ function knownLimitationsForFeature(feature) {
         return ["Office mutation requires a source Office file, resolvable mapping, and Office --out path.", "Unsupported bindings fail atomically instead of returning a plan as success."];
     if (feature === "design")
         return ["theme-only is limited by design; inspired/faithful apply best-effort style tokens and disclose limitations."];
+    if (feature === "edit")
+        return [
+            "PPTX/XLSX chart data ops are single-series only; multi-series, secondary-axis, and combo chart editing are unsupported.",
+            "SmartArt creation and full SmartArt editing are unsupported.",
+            "PDF edit ops are overlays/annotations only; physical redaction and content rewriting are unsupported.",
+            "DOCX/XLSX/PDF edits are scoped operations, not full application-level editing engines."
+        ];
     if (feature === "inspect")
         return ["PDF text extraction is best-effort; scanned or compressed PDFs should be reviewed through page preview artifacts."];
     if (feature === "export" || feature === "verify")
@@ -527,6 +569,7 @@ export async function viewPayload(context) {
         format,
         maxPages: numberOption(context, "--max-pages"),
         dpi: numberOption(context, "--dpi"),
+        mode: optionValue(context.argv, "--mode") ?? "fast",
         timeoutMs: numberOption(context, "--timeout-ms")
     }));
     const out = optionValue(context.argv, "--out");
@@ -811,6 +854,15 @@ function editOpsValidationPayload(raw, operations, input) {
 function targetFromInput(input) {
     const extension = path.extname(input).toLowerCase().replace(".", "");
     return ["pptx", "docx", "xlsx", "pdf"].includes(extension) ? extension : "pptx";
+}
+function runRenderTarget(step, ir) {
+    const record = asRecord(ir);
+    const candidates = [step.target, record.target, record.kind, asArray(record.targets)[0]];
+    for (const candidate of candidates) {
+        if (candidate === "pptx" || candidate === "docx" || candidate === "xlsx" || candidate === "pdf")
+            return candidate;
+    }
+    return "pptx";
 }
 function stripUndefined(value) {
     if (Array.isArray(value))
@@ -1964,7 +2016,10 @@ function isViewTruncated(inspected, renderedPages) {
 async function executeRunStep(context, folder, step, stepOutputs, index, outputRoot, denyOutsideOutputRoot = false, timeoutMs) {
     const command = String(step.command ?? step.type ?? "");
     const input = await resolveRunInput(context, step.input, stepOutputs);
-    const out = await resolveRunOutput(context, folder, step, index, outputRoot, denyOutsideOutputRoot);
+    const defaultOutputExtension = command === "edit" && typeof input === "string" ? targetFromInput(input) : undefined;
+    const out = command === "render" && typeof step.out !== "string"
+        ? undefined
+        : await resolveRunOutput(context, folder, step, index, outputRoot, denyOutsideOutputRoot, defaultOutputExtension);
     if (command === "inspect")
         return inspect(requireRunInput(command, input), withFormatConfig(context, { depth: step.depth ?? "summary" }));
     if (command === "diagnose")
@@ -1983,6 +2038,7 @@ async function executeRunStep(context, folder, step, stepOutputs, index, outputR
             format: stepFormat,
             maxPages: typeof step.maxPages === "number" ? step.maxPages : undefined,
             dpi: typeof step.dpi === "number" ? step.dpi : undefined,
+            mode: step.mode ?? "fast",
             timeoutMs
         }));
         const viewDir = out ?? path.join(folder.viewsDir, `${String(index + 1).padStart(2, "0")}-view`);
@@ -2001,7 +2057,12 @@ async function executeRunStep(context, folder, step, stepOutputs, index, outputR
             }, 3);
         }
         const sanitizedIr = await sanitizeRenderAssetPaths(context, ir);
-        return render(sanitizedIr, withFormatConfig(context, { out: out ?? path.join(folder.outputDir, `${String(index + 1).padStart(2, "0")}-render.${String(step.target ?? "pptx")}`), target: step.target }));
+        const target = runRenderTarget(step, sanitizedIr);
+        const effectiveOut = out
+            ?? await resolveRunOutput(context, folder, step, index, outputRoot, denyOutsideOutputRoot, target)
+            ?? path.join(folder.outputDir, `${String(index + 1).padStart(2, "0")}-render.${target}`);
+        const targetOption = typeof step.out === "string" && typeof step.target !== "string" ? undefined : target;
+        return render(sanitizedIr, withFormatConfig(context, { out: effectiveOut, target: targetOption }));
     }
     if (command === "edit") {
         const editInput = requireRunInput(command, input);
@@ -2139,10 +2200,11 @@ async function resolveRunInput(context, value, stepOutputs) {
         return stepOutputs.get(value.slice(1));
     return validateInputPath(context, value);
 }
-async function resolveRunOutput(context, folder, step, index, outputRoot, denyOutsideOutputRoot = false) {
+async function resolveRunOutput(context, folder, step, index, outputRoot, denyOutsideOutputRoot = false, defaultExtension) {
     const command = String(step.command ?? step.type ?? "artifact");
     if (typeof step.out !== "string" && outputRoot && ["render", "edit", "export"].includes(command)) {
-        return path.join(outputRoot, `${String(index + 1).padStart(2, "0")}-${safeFileToken(String(step.id ?? command))}.${command === "export" ? String(step.to ?? "pdf") : String(step.target ?? "pptx")}`);
+        const extension = defaultExtension ?? (command === "export" ? String(step.to ?? "pdf") : String(step.target ?? "pptx"));
+        return path.join(outputRoot, `${String(index + 1).padStart(2, "0")}-${safeFileToken(String(step.id ?? command))}.${extension.replace(/^\./, "")}`);
     }
     if (typeof step.out !== "string")
         return undefined;

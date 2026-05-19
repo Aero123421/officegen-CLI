@@ -62,6 +62,10 @@ export async function inspectZipSafety(input, config, options = {}) {
         if (isXmlLike(entryName)) {
             if (sizes.uncompressedSize > limits.maxSingleXmlPartBytes) {
                 warnings.push(warning("ZIP_XML_PART_TOO_LARGE", `XML part exceeds safe size: ${entryName}`, entryName, "error"));
+                if (/\.rels$/i.test(entryName)) {
+                    relationshipCount += 1;
+                }
+                continue;
             }
             if (/\.rels$/i.test(entryName)) {
                 relationshipCount += 1;

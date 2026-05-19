@@ -1,5 +1,6 @@
 import path from "node:path";
 import { readFile, stat } from "node:fs/promises";
+import { getBuiltinConfig, OfficegenError, validatePath } from "../../core/dist/index.js";
 import { edit, inspect } from "../../formats/dist/index.js";
 import { featureRoot, hashFile, listJsonFiles, nowIso, readJsonFile, requireFeature, sha256Json, slugify, validation, writeJsonFile } from "./common.js";
 import { capturePptxDesignSignals } from "./design.js";
@@ -184,7 +185,7 @@ export async function fillTemplate(options) {
     const outputPath = options.outputPath;
     const outputFormat = outputPath ? path.extname(outputPath).replace(/^\./, "").toLowerCase() : "";
     const canMutateOffice = Boolean(sourcePath && outputPath && ["pptx", "docx", "xlsx"].includes(outputFormat));
-    const ops = canMutateOffice ? await templateFillOperations(template, options.values, options.cwd) : [];
+    const ops = canMutateOffice ? await templateFillOperations(template, options.values, options) : [];
     const feasibility = await templateFillFeasibility(template, { sourcePath, outputPath, outputFormat, canMutateOffice, ops, cwd: options.cwd });
     if (options.validateOnly) {
         const resolver = canMutateOffice && sourcePath && ops.length
@@ -312,7 +313,7 @@ export async function fillTemplate(options) {
     await writeJsonFile(options.outputPath ?? path.join(featureRoot(options, "template"), "runs", `${slugify(template.id)}.fill.json`), filled);
     return filled;
 }
-async function templateFillOperations(template, values, cwd) {
+async function templateFillOperations(template, values, context) {
     const mapping = normalizeTemplateMapping(template.mapping) ?? {};
     const ops = [];
     for (const field of template.fields ?? []) {
@@ -333,13 +334,13 @@ async function templateFillOperations(template, values, cwd) {
             continue;
         }
         if (binding.kind === "image") {
-            const imagePath = typeof value === "string" ? path.resolve(cwd ?? process.cwd(), value) : undefined;
-            if (imagePath) {
+            if (typeof value === "string") {
+                const image = await validateTemplateImageInput(value, context);
                 ops.push({
                     op: "pptx.replaceImageByShape",
                     selector: binding.selector,
-                    replacementBase64: (await readFile(imagePath)).toString("base64"),
-                    replacementPath: imagePath,
+                    replacementBase64: image.bytes.toString("base64"),
+                    replacementPath: image.path,
                     fit: binding.fit
                 });
             }
@@ -362,6 +363,40 @@ async function templateFillOperations(template, values, cwd) {
         });
     }
     return ops;
+}
+async function validateTemplateImageInput(inputPath, context) {
+    const config = templatePathSecurityConfig(context);
+    const validated = await validatePath(config, {
+        kind: "input",
+        path: inputPath
+    });
+    const stats = await stat(validated.absolutePath);
+    const maxInputFileBytes = config.security.untrustedInput.maxInputFileBytes;
+    if (stats.size > maxInputFileBytes) {
+        throw new OfficegenError("SECURITY_INPUT_TOO_LARGE", `Input file exceeds maxInputFileBytes (${stats.size} > ${maxInputFileBytes}).`, {
+            input: inputPath,
+            size: stats.size,
+            maxInputFileBytes
+        });
+    }
+    return {
+        path: validated.absolutePath,
+        bytes: await readFile(validated.absolutePath)
+    };
+}
+function templatePathSecurityConfig(context) {
+    if (context.config)
+        return context.config;
+    const cwd = path.resolve(context.cwd ?? process.cwd());
+    const config = getBuiltinConfig("substrate");
+    config.paths.projectRoot = cwd;
+    config.paths.projectConfigDir = path.join(cwd, ".officegen");
+    config.paths.userConfigDir = path.join(cwd, ".officegen", "user");
+    config.security.trustedRoots = ["."];
+    config.security.allowAbsoluteInputPaths = true;
+    config.security.outOfProjectPolicy = "deny";
+    config.security.followSymlinks = false;
+    return config;
 }
 function normalizeTemplateBinding(value, fieldType) {
     if (typeof value === "string")

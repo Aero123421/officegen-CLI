@@ -1,3 +1,4 @@
+import type { OfficegenConfig } from "@officegen/core";
 export type OptionalFeature = "agent" | "template" | "design" | "layout" | "plugin" | "renderer" | "mcp";
 export interface OptionalCapabilities {
     features: OptionalFeature[];
@@ -7,6 +8,7 @@ export interface OptionalContext {
     cwd?: string;
     capabilities?: OptionalCapabilities | OptionalFeature[];
     storeDir?: string;
+    config?: OfficegenConfig;
 }
 export interface ValidationResult {
     ok: boolean;

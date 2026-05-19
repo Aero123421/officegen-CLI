@@ -1,14 +1,14 @@
 # Officegen CLI
 
-Officegen CLI is an agent-friendly Office/PDF runtime for creating, inspecting, editing, verifying, and packaging business documents.
+Officegen CLI is an agent-friendly Office/PDF runtime for creating, inspecting, scoped editing, verifying, and packaging business documents.
 
-It gives humans, CI, and AI agents a structured interface for PPTX, DOCX, XLSX, PDF, SVG, and workflow artifacts. Instead of asking a model to write raw Office XML, agents can inspect a file, resolve stable object IDs, dry-run edits, apply scoped mutations, verify the result, and keep a manifest trail.
+It gives humans, CI, and AI agents a structured interface for PPTX, DOCX, XLSX, PDF, SVG, and workflow artifacts. Instead of asking a model to write raw Office XML, agents can inspect a file, resolve stable object IDs, dry-run supported edits, apply scoped mutations, verify the result, and keep a manifest trail.
 
 ## What It Does
 
 - Generate PPTX, DOCX, XLSX, PDF, chart SVG, and diagram SVG artifacts from structured IR.
 - Inspect Office/PDF files with agent-safe JSON summaries, object maps, and untrusted-content markers.
-- Edit text, tables, charts, images, DOCX comments/redlines/styles, XLSX tables/charts/pivots/slicers, and PDF overlays through JSON operations.
+- Edit supported text, table, image, comment/redline/style, single-series chart data, pivot-refresh, slicer-selection, and non-redaction PDF overlay/annotation operations through JSON EditOps.
 - Capture template/design/layout signals and apply best-effort Office mutations with explicit limitations.
 - Verify openability, repair risk, layout warnings, semantic diffs, native renderer output, and repeated warning summaries.
 - Run multi-step workflows with traceable artifacts under `.officegen/runs`.
@@ -21,13 +21,13 @@ Requires Node.js 24 or later.
 Recommended install is the checked release tarball:
 
 ```bash
-npm install -g https://github.com/Aero123421/officegen-CLI/releases/download/v2.6.1/officegen-v2.6.1.tgz
+npm install -g https://github.com/Aero123421/officegen-CLI/releases/download/v3.0.0/officegen-v3.0.0.tgz
 ```
 
 GitHub direct install is also smoke-tested, but use the tarball when an agent or CI needs the most deterministic path:
 
 ```bash
-npm install -g github:Aero123421/officegen-CLI#v2.6.1
+npm install -g github:Aero123421/officegen-CLI#v3.0.0
 ```
 
 The `officegen` package name is not published from this project to the public npm registry, because that name is owned separately on npm.
@@ -189,29 +189,32 @@ officegen asset replace deck.pptx --asset ppt/media/image1.png logo.png --out de
 
 ## Current Capability Level
 
-Officegen v2.6.1 is a practical v2 authoring substrate. It is strongest when an agent needs structured, auditable Office automation rather than free-form binary generation.
+Officegen v3.0.0 is a practical v2 authoring substrate. It is strongest when an agent needs structured, auditable Office automation rather than free-form binary generation.
 
 PPTX:
 
-- Native text, lists, tables, images, callouts, Office chart caches, chart workbook updates, image replacement, fit/crop metadata, bounds edits, and stable object maps.
+- Native text, lists, tables, images, callouts, image replacement, fit/crop metadata, bounds edits, stable object maps, and single-series Office chart cache/workbook data updates.
 - `design capture` records design-pack and capture artifacts; `design apply --strategy theme-only|inspired|faithful` applies real PPTX changes where possible and reports limitations.
 - Master/layout/placeholder handling is conservative and best-effort rather than a full PowerPoint designer.
+- SmartArt editing and multi-series, secondary-axis, or combo chart editing are not implemented.
 
 DOCX:
 
-- Paragraphs, headers/footers, comments, styles, tracked insert/delete/replace, content controls, fields, tables, and structure maps.
+- Paragraphs, headers/footers, comments, styles, tracked insert/delete/replace, selected table-cell text edits, and structure maps.
 - Useful for agent-safe document review and template-style editing.
-- Not a full DTP or legal-contract authoring engine.
+- Content controls and fields are inspected as structure signals; Officegen is not a full DTP or legal-contract authoring engine.
 
 XLSX:
 
-- Compact workbook inspection, sheet/range scoping, formulas, tables, charts, named ranges, validation/protection signals, pivot refresh flags, and slicer selection updates.
+- Compact workbook inspection, sheet/range scoping, formulas, tables, single-series chart data updates, named ranges, validation/protection signals, pivot refresh flags, and slicer selection updates.
 - Table/chart operations are OOXML based; recalculation and refresh validation can use native Excel when enabled.
+- Pivot field/layout/value editing, slicer authoring/styling, multi-series charts, secondary axes, and combo chart editing are not implemented.
 
 PDF:
 
 - CJK-capable direct PDF generation with bundled fallback fonts.
 - PDF inspect includes best-effort text previews for plain text operators and quality warnings for zero extractable text.
+- PDF mutation is overlay/annotation only. Physical redaction, underlying-content removal, and general PDF content rewriting are unsupported.
 - Scanned/image-heavy PDFs should be reviewed through page preview artifacts and external vision tooling.
 
 Native renderers:
@@ -230,7 +233,7 @@ Use `--json` for machine-readable output. Responses use the `officegen.envelope@
   "ok": true,
   "command": "capabilities",
   "runId": "...",
-  "cliVersion": "2.6.1",
+  "cliVersion": "3.0.0",
   "capabilitiesHash": "sha256:...",
   "pathsRedacted": true,
   "result": {},
@@ -348,7 +351,7 @@ Post-tag checks:
 ```bash
 npm run github-install:tag-smoke
 npm run github-install:remote-smoke
-OFFICEGEN_RELEASE_TARBALL_SPEC=https://github.com/Aero123421/officegen-CLI/releases/download/v2.6.1/officegen-v2.6.1.tgz npm run release-tarball:smoke
+OFFICEGEN_RELEASE_TARBALL_SPEC=https://github.com/Aero123421/officegen-CLI/releases/download/v3.0.0/officegen-v3.0.0.tgz npm run release-tarball:smoke
 ```
 
 Optional public corpus benchmark:
@@ -356,8 +359,8 @@ Optional public corpus benchmark:
 ```bash
 npm run benchmark:fetch
 npm run benchmark:review
-officegen benchmark run --manifest benchmarks/office-corpus/manifest.json --report-out .officegen/benchmark-results/v2.6.1.json --agent --json
-officegen benchmark compare old.json .officegen/benchmark-results/v2.6.1.json --json
+officegen benchmark run --manifest benchmarks/office-corpus/manifest.json --report-out .officegen/benchmark-results/v3.0.0.json --agent --json
+officegen benchmark compare old.json .officegen/benchmark-results/v3.0.0.json --json
 ```
 
 The benchmark downloads public corpus files into `.officegen/benchmark-corpus/`; Office/PDF binaries are not committed to the repository.
@@ -367,7 +370,7 @@ Version bump:
 ```bash
 npm run version:bump -- patch
 npm run version:bump -- minor
-npm run version:bump -- 2.6.1
+npm run version:bump -- 3.0.0
 npm run version:check
 ```
 

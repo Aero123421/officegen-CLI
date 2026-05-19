@@ -1,5 +1,5 @@
 export declare const OFFICEGEN_SCHEMA_VERSION = "1.2";
-export declare const OFFICEGEN_CLI_VERSION = "2.6.1";
+export declare const OFFICEGEN_CLI_VERSION = "3.0.0";
 export declare const SCHEMA_REGISTRY_VERSION = "1.2.0";
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | {
@@ -130,6 +130,13 @@ export interface CapabilityFeature {
     commands: string[];
     requires: FeatureName[];
 }
+export interface CapabilityContract {
+    area: string;
+    formats: string[];
+    support: "supported" | "limited" | "unsupported" | "optional-gated" | "overlay-only";
+    summary: string;
+    limitations: string[];
+}
 export interface CapabilitiesDocument {
     schema: "officegen.capabilities@1.2";
     ok: true;
@@ -140,6 +147,10 @@ export interface CapabilitiesDocument {
     disabled: string[];
     agentInstructionsPath: string;
     jsonBudgetBytes: number;
+    featureContracts: CapabilityContract[];
+    formatCapabilities: JsonObject;
+    knownLimitations: string[];
+    unsupportedNow: string[];
     nextSuggestedCommands: string[];
 }
 export interface PathValidationOptions {

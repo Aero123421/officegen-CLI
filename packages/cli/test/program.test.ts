@@ -65,6 +65,14 @@ async function minimalPptxWithImage(includeImage: boolean): Promise<Uint8Array> 
   return zip.generateAsync({ type: "uint8array" });
 }
 
+async function minimalDocx(text: string): Promise<Uint8Array> {
+  const zip = new JSZip();
+  zip.file("[Content_Types].xml", "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/word/document.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml\"/></Types>");
+  zip.file("_rels/.rels", "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"word/document.xml\"/></Relationships>");
+  zip.file("word/document.xml", `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>${text}</w:t></w:r></w:p></w:body></w:document>`);
+  return zip.generateAsync({ type: "uint8array" });
+}
+
 afterEach(() => {
   process.exitCode = undefined;
 });
@@ -668,6 +676,21 @@ describe("officegen CLI command surface", () => {
     expect([...page.subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
   });
 
+  it("uses fast mode by default for raster view of Office inputs", async () => {
+    const cwd = await tempWorkspace();
+    await writeFile(path.join(cwd, "deck.pptx"), await minimalPptxWithImage(false));
+
+    const captured = await run(["view", "deck.pptx", "--format", "png", "--out", ".officegen/view", "--json"], cwd);
+    const envelope = parseEnvelope(captured);
+    const page = await readFile(path.join(cwd, ".officegen", "view", "page-001.png"));
+    const manifest = JSON.parse(await readFile(path.join(cwd, ".officegen", "view", "manifest.json"), "utf8"));
+
+    expect(envelope.ok).toBe(true);
+    expect(envelope.result.fidelity).toBe("internal");
+    expect(manifest.pages[0].format).toBe("png");
+    expect([...page.subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
+  });
+
   it("resolves selectors through the select command", async () => {
     const cwd = await tempWorkspace();
     await writeFile(path.join(cwd, "deck.pptx"), await minimalPptxWithImage(false));
@@ -811,6 +834,49 @@ describe("officegen CLI command surface", () => {
     expect(envelope.result.readiness).toBe("blocked");
     expect(envelope.result.steps[1].ok).toBe(false);
     expect(envelope.result.steps[1].error.code).toBe("RUN_STEP_FAILED");
+  });
+
+  it("uses IR targets for run render default output-root extensions", async () => {
+    const cwd = await tempWorkspace();
+    await writeFile(path.join(cwd, "deck.ir.json"), `${JSON.stringify({
+      schema: "officegen.ir.document@1.2",
+      title: "PDF Report",
+      targets: ["pdf"],
+      sections: [{ title: "PDF Report", blocks: [{ type: "paragraph", text: "Body" }] }]
+    })}\n`, "utf8");
+    await writeFile(path.join(cwd, "plan.json"), `${JSON.stringify({
+      steps: [{ id: "render-pdf", command: "render", input: "deck.ir.json" }]
+    })}\n`, "utf8");
+
+    const captured = await run(["run", "plan.json", "--output-root", ".officegen/outputs", "--json"], cwd);
+    const envelope = parseEnvelope(captured);
+    const output = await readFile(path.join(cwd, ".officegen", "outputs", "01-render-pdf.pdf"));
+
+    expect(envelope.ok).toBe(true);
+    expect(envelope.result.steps[0].out).toContain("01-render-pdf.pdf");
+    expect(output.subarray(0, 4).toString("utf8")).toBe("%PDF");
+  });
+
+  it("uses the edit input extension for run output-root default outputs", async () => {
+    const cwd = await tempWorkspace();
+    await writeFile(path.join(cwd, "source.docx"), await minimalDocx("Hello"));
+    await writeFile(path.join(cwd, "ops.json"), `${JSON.stringify({
+      schema: "officegen.edit.ops@1.2",
+      target: "docx",
+      ops: [{ op: "replaceText", from: "Hello", to: "Hi" }]
+    })}\n`, "utf8");
+    await writeFile(path.join(cwd, "plan.json"), `${JSON.stringify({
+      steps: [{ id: "edit-docx", command: "edit", input: "source.docx", ops: "ops.json" }]
+    })}\n`, "utf8");
+
+    const captured = await run(["run", "plan.json", "--output-root", ".officegen/outputs", "--json"], cwd);
+    const envelope = parseEnvelope(captured);
+    const output = await readFile(path.join(cwd, ".officegen", "outputs", "01-edit-docx.docx"));
+
+    expect(envelope.ok).toBe(true);
+    expect(envelope.result.steps[0].out).toContain("01-edit-docx.docx");
+    expect(output).toBeInstanceOf(Buffer);
+    await expect(readFile(path.join(cwd, ".officegen", "outputs", "01-edit-docx.pptx"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("rejects run outputs that try to escape the run folder", async () => {

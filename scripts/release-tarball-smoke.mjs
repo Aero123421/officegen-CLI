@@ -11,21 +11,12 @@ const rootPackage = JSON.parse(await readFile(path.join(cwd, "package.json"), "u
 let spec = process.env.OFFICEGEN_RELEASE_TARBALL_SPEC
   ?? process.argv.find((arg) => arg.endsWith(".tgz") || arg.startsWith("http"))
   ?? path.join(cwd, `officegen-v${rootPackage.version}.tgz`);
-let generatedTarball;
 
 try {
   if (!spec.startsWith("http") && !existsSync(spec)) {
-    const npmCli = process.env.npm_execpath;
-    const pack = npmCli
-      ? spawnSync(process.execPath, [npmCli, "pack", "--silent"], { encoding: "utf8", shell: false })
-      : spawnSync("npm", ["pack", "--silent"], { encoding: "utf8", shell: process.platform === "win32" });
-    if (pack.status !== 0) {
-      console.error(pack.stdout);
-      console.error(pack.stderr);
-      process.exit(pack.status ?? 1);
-    }
-    generatedTarball = pack.stdout.trim().split(/\r?\n/).at(-1);
-    spec = path.resolve(generatedTarball);
+    console.error(`Release tarball does not exist: ${path.resolve(spec)}`);
+    console.error("Run npm run pack:smoke for a local npm pack smoke, or pass an existing release tarball path/URL.");
+    process.exit(1);
   }
   if (!spec.startsWith("http")) {
     spec = path.resolve(spec);
@@ -80,7 +71,6 @@ try {
   console.log(`officegen release tarball smoke passed for ${spec}`);
 } finally {
   await rm(temp, { recursive: true, force: true });
-  if (generatedTarball) await rm(path.resolve(generatedTarball), { force: true });
 }
 
 function runInstalled(bin, args, cwd) {

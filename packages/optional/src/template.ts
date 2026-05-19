@@ -1,5 +1,6 @@
 import path from "node:path";
 import { readFile, stat } from "node:fs/promises";
+import { getBuiltinConfig, OfficegenError, validatePath, type OfficegenConfig } from "@officegen/core";
 import { edit, inspect, type EditOperation } from "@officegen/formats";
 
 import {
@@ -323,7 +324,7 @@ export async function fillTemplate(options: TemplateFillOptions): Promise<Record
   const outputPath = options.outputPath;
   const outputFormat = outputPath ? path.extname(outputPath).replace(/^\./, "").toLowerCase() : "";
   const canMutateOffice = Boolean(sourcePath && outputPath && ["pptx", "docx", "xlsx"].includes(outputFormat));
-  const ops = canMutateOffice ? await templateFillOperations(template, options.values, options.cwd) : [];
+  const ops = canMutateOffice ? await templateFillOperations(template, options.values, options) : [];
   const feasibility = await templateFillFeasibility(template, { sourcePath, outputPath, outputFormat, canMutateOffice, ops, cwd: options.cwd });
   if (options.validateOnly) {
     const resolver = canMutateOffice && sourcePath && ops.length
@@ -460,7 +461,7 @@ export async function fillTemplate(options: TemplateFillOptions): Promise<Record
   return filled;
 }
 
-async function templateFillOperations(template: TemplateDefinition, values: Record<string, unknown>, cwd?: string): Promise<EditOperation[]> {
+async function templateFillOperations(template: TemplateDefinition, values: Record<string, unknown>, context: Pick<TemplateFillOptions, "cwd" | "config">): Promise<EditOperation[]> {
   const mapping = normalizeTemplateMapping(template.mapping) ?? {};
   const ops: EditOperation[] = [];
   for (const field of template.fields ?? []) {
@@ -479,13 +480,13 @@ async function templateFillOperations(template: TemplateDefinition, values: Reco
       continue;
     }
     if (binding.kind === "image") {
-      const imagePath = typeof value === "string" ? path.resolve(cwd ?? process.cwd(), value) : undefined;
-      if (imagePath) {
+      if (typeof value === "string") {
+        const image = await validateTemplateImageInput(value, context);
         ops.push({
           op: "pptx.replaceImageByShape",
           selector: binding.selector,
-          replacementBase64: (await readFile(imagePath)).toString("base64"),
-          replacementPath: imagePath,
+          replacementBase64: image.bytes.toString("base64"),
+          replacementPath: image.path,
           fit: binding.fit
         });
       }
@@ -508,6 +509,44 @@ async function templateFillOperations(template: TemplateDefinition, values: Reco
     });
   }
   return ops;
+}
+
+async function validateTemplateImageInput(
+  inputPath: string,
+  context: Pick<TemplateFillOptions, "cwd" | "config">
+): Promise<{ path: string; bytes: Buffer }> {
+  const config = templatePathSecurityConfig(context);
+  const validated = await validatePath(config, {
+    kind: "input",
+    path: inputPath
+  });
+  const stats = await stat(validated.absolutePath);
+  const maxInputFileBytes = config.security.untrustedInput.maxInputFileBytes;
+  if (stats.size > maxInputFileBytes) {
+    throw new OfficegenError("SECURITY_INPUT_TOO_LARGE", `Input file exceeds maxInputFileBytes (${stats.size} > ${maxInputFileBytes}).`, {
+      input: inputPath,
+      size: stats.size,
+      maxInputFileBytes
+    });
+  }
+  return {
+    path: validated.absolutePath,
+    bytes: await readFile(validated.absolutePath)
+  };
+}
+
+function templatePathSecurityConfig(context: Pick<TemplateFillOptions, "cwd" | "config">): OfficegenConfig {
+  if (context.config) return context.config;
+  const cwd = path.resolve(context.cwd ?? process.cwd());
+  const config = getBuiltinConfig("substrate");
+  config.paths.projectRoot = cwd;
+  config.paths.projectConfigDir = path.join(cwd, ".officegen");
+  config.paths.userConfigDir = path.join(cwd, ".officegen", "user");
+  config.security.trustedRoots = ["."];
+  config.security.allowAbsoluteInputPaths = true;
+  config.security.outOfProjectPolicy = "deny";
+  config.security.followSymlinks = false;
+  return config;
 }
 
 function normalizeTemplateBinding(value: unknown, fieldType?: TemplateFieldType): { selector: Record<string, unknown>; kind?: string; fit?: "contain" | "cover" | "stretch"; startCell?: string; tableName?: string } | undefined {
