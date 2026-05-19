@@ -5,6 +5,7 @@ import { createCanvas, Path2D as CanvasPath2D } from "@napi-rs/canvas";
 import * as pdfjs from "pdfjs-dist/legacy/build/pdf.mjs";
 import { inspect } from "./inspect.js";
 import { exportDocument } from "./export.js";
+import { buildObjectGraph } from "./graphs/objectGraph.js";
 import { AGENT_UNTRUSTED_INSTRUCTION, escapeHtml, escapeXml, makeStableObjectId, normalizeInput } from "./shared.js";
 export async function view(input, options = {}) {
     const inspected = isInspectResult(input) ? input : await inspect(input, { format: undefined, depth: "shallow", config: options.config });
@@ -12,22 +13,33 @@ export async function view(input, options = {}) {
         return rasterView(input, inspected, options);
     }
     const pages = toPages(inspected, options);
-    return {
+    const fullObjectMap = pages.flatMap((page) => page.objectMap);
+    const crop = buildObjectCrop(pages, fullObjectMap, inspected, options, "officegen-approximate-svg-html", "approximate");
+    return withProgressiveDisclosure({
         schema: "officegen.view.result@1.2",
         fidelity: "approximate",
+        renderer: {
+            id: "officegen-approximate-svg-html",
+            mode: "approximate",
+            fidelity: "approximate"
+        },
         caveats: [
             "Approximate SVG/HTML view only; fonts, wrapping, theme effects, animations, and native layout may differ.",
             ...inspected.trusted.caveats
         ],
-        pages,
-        objectMap: pages.flatMap((page) => page.objectMap),
+        pages: pages.map((page) => ({ ...page, renderer: page.renderer ?? "officegen-approximate-svg-html" })),
+        crops: crop.artifacts,
+        crop: crop.metadata,
+        summary: buildViewSummary(inspected, pages, fullObjectMap, crop.artifacts),
+        nextActions: viewNextActions(inspected, options, false),
+        objectMap: fullObjectMap,
         trusted: {
             sourceSchema: inspected.schema,
             sourceFormat: inspected.trusted.format,
             generatedAt: new Date().toISOString()
         },
         agentInstruction: AGENT_UNTRUSTED_INSTRUCTION
-    };
+    }, fullObjectMap, inspected, options);
 }
 export const viewDocument = view;
 function isInspectResult(value) {
@@ -89,16 +101,27 @@ async function rasterView(input, inspected, options) {
         objectMap: inspected.objectMap,
         sourceFormat: inspected.trusted.format
     });
-    return {
+    const pages = rasterPages.map((page) => ({ ...page, renderer }));
+    const crop = buildObjectCrop(pages, inspected.objectMap, inspected, options, "officegen-internal-object-crop", fidelity);
+    return withProgressiveDisclosure({
         schema: "officegen.view.result@1.2",
         fidelity,
+        renderer: {
+            id: renderer,
+            mode: options.mode ?? "native",
+            fidelity
+        },
         caveats: [
             normalized.format === "pdf"
                 ? "PDF pages were rasterized with PDF.js canvas rendering."
                 : "Office pages were converted through the configured native renderer and rasterized with PDF.js canvas rendering.",
             ...caveats
         ],
-        pages: rasterPages.map((page) => ({ ...page, renderer })),
+        pages,
+        crops: crop.artifacts,
+        crop: crop.metadata,
+        summary: buildViewSummary(inspected, pages, inspected.objectMap, crop.artifacts),
+        nextActions: viewNextActions(inspected, options, false),
         objectMap: inspected.objectMap,
         trusted: {
             sourceSchema: inspected.schema,
@@ -106,7 +129,7 @@ async function rasterView(input, inspected, options) {
             generatedAt: new Date().toISOString()
         },
         agentInstruction: AGENT_UNTRUSTED_INSTRUCTION
-    };
+    }, inspected.objectMap, inspected, options);
 }
 function isRasterFormat(format) {
     return format === "png" || format === "jpeg" || format === "jpg";
@@ -204,6 +227,165 @@ function pageObjectMap(objectMap, sourceFormat, page) {
     if (sourceFormat === "docx")
         return page === 1 ? objectMap : [];
     return [];
+}
+function buildObjectCrop(pages, objectMap, inspected, options, renderer, fidelity) {
+    if (!options.crop) {
+        return { artifacts: [], metadata: { requested: false, status: "not_requested", source: "none", padding: 8 } };
+    }
+    const objectId = options.objectId;
+    const padding = 8;
+    if (!objectId) {
+        return { artifacts: [], metadata: { requested: true, status: "object_not_found", source: "none", padding } };
+    }
+    const graph = buildObjectGraph(objectMap, {
+        format: inspected.trusted.format,
+        inputPath: inspected.trusted.inputPath,
+        inputSha256: inspected.trusted.sha256
+    });
+    const graphNode = graph.nodes.find((node) => node.stableId === objectId);
+    const pageWithObject = pages.find((page) => page.objectMap.some((entry) => entry.stableObjectId === objectId));
+    const pageObject = pageWithObject?.objectMap.find((entry) => entry.stableObjectId === objectId);
+    const target = pageObject ?? objectMap.find((entry) => entry.stableObjectId === objectId);
+    if (!target) {
+        return {
+            artifacts: [],
+            metadata: { requested: true, objectId, status: "object_not_found", source: "none", padding }
+        };
+    }
+    const bbox = bboxFromEntry(target) ?? graphNode?.bbox;
+    if (!bbox) {
+        return {
+            artifacts: [],
+            metadata: {
+                requested: true,
+                objectId,
+                status: "bbox_unavailable",
+                source: graphNode?.bbox ? "objectGraph" : "none",
+                padding,
+                objectKind: target.kind,
+                graphNodeId: graphNode?.nodeId
+            }
+        };
+    }
+    const page = pageWithObject?.page ?? pageNumberForObject(target, inspected.trusted.format);
+    const cropBox = paddedBBox(bbox, padding);
+    const format = pageWithObject?.format === "html" ? "html" : "svg";
+    const metadata = {
+        requested: true,
+        objectId,
+        status: "created",
+        source: target.bbox || target.bounds ? "objectMap" : "objectGraph",
+        bbox,
+        page,
+        padding,
+        objectKind: target.kind,
+        graphNodeId: graphNode?.nodeId
+    };
+    return {
+        artifacts: [{
+                objectId,
+                page,
+                format,
+                content: format === "html" ? renderCropHtml(target, cropBox) : renderCropSvg(target, cropBox),
+                width: Math.ceil(cropBox[2]),
+                height: Math.ceil(cropBox[3]),
+                renderer,
+                fidelity,
+                metadata
+            }],
+        metadata
+    };
+}
+function bboxFromEntry(entry) {
+    if (entry.bbox && entry.bbox.every((value) => Number.isFinite(value)))
+        return entry.bbox;
+    if (entry.bounds)
+        return [entry.bounds.x, entry.bounds.y, entry.bounds.width, entry.bounds.height];
+    return undefined;
+}
+function paddedBBox(bbox, padding) {
+    const x = Math.max(0, bbox[0] - padding);
+    const y = Math.max(0, bbox[1] - padding);
+    return [x, y, Math.max(1, bbox[2] + padding * 2), Math.max(1, bbox[3] + padding * 2)];
+}
+function pageNumberForObject(entry, sourceFormat) {
+    if (sourceFormat === "pptx")
+        return Number(entry.selectorHints?.slide ?? 1);
+    if (sourceFormat === "xlsx")
+        return Number(entry.selectorHints?.sheet ?? 1);
+    if (sourceFormat === "pdf")
+        return Number(entry.selectorHints?.page ?? 1);
+    return 1;
+}
+function renderCropSvg(object, cropBox) {
+    const [x, y, width, height] = cropBox;
+    const bbox = bboxFromEntry(object) ?? [x, y, width, height];
+    const text = object.text ?? object.label ?? object.textPreview ?? "";
+    return `<svg xmlns="http://www.w3.org/2000/svg" width="${Math.ceil(width)}" height="${Math.ceil(height)}" viewBox="${x} ${y} ${width} ${height}" data-crop-object-id="${escapeXml(object.stableObjectId)}"><rect x="${x}" y="${y}" width="${width}" height="${height}" fill="#fff"/><rect x="${bbox[0]}" y="${bbox[1]}" width="${bbox[2]}" height="${bbox[3]}" fill="${object.kind === "chart" ? "#f6f8fa" : "#fff"}" stroke="#0969da" stroke-width="2"/><text x="${bbox[0] + 6}" y="${bbox[1] + Math.min(bbox[3] - 6, 22)}" font-family="Arial, sans-serif" font-size="14" fill="#111">${escapeXml(text)}</text></svg>`;
+}
+function renderCropHtml(object, cropBox) {
+    const [, , width, height] = cropBox;
+    const text = object.text ?? object.label ?? object.textPreview ?? "";
+    return `<section data-crop-object-id="${escapeHtml(object.stableObjectId)}" style="position:relative;width:${Math.ceil(width)}px;height:${Math.ceil(height)}px;background:#fff;color:#111;font-family:Arial,sans-serif;border:1px solid #0969da;box-sizing:border-box;padding:8px;overflow:hidden"><div data-kind="${escapeHtml(object.kind)}">${escapeHtml(text)}</div></section>`;
+}
+function buildViewSummary(inspected, pages, objectMap, crops) {
+    return {
+        sourceFormat: inspected.trusted.format,
+        sourceSummary: inspected.trusted.summary,
+        pageCount: pages.length,
+        objectMapEntries: objectMap.length,
+        cropArtifacts: crops.length,
+        fidelity: pages[0]?.renderer ? undefined : "approximate"
+    };
+}
+function withProgressiveDisclosure(result, fullObjectMap, inspected, options) {
+    const offset = Math.max(0, options.objectMapOffset ?? 0);
+    const limit = normalizeObjectMapLimit(options.objectMapLimit);
+    const returnedObjectMap = fullObjectMap.slice(offset, offset + limit);
+    const hasMore = offset + returnedObjectMap.length < fullObjectMap.length;
+    const cursor = hasMore || offset > 0 || fullObjectMap.length > limit
+        ? {
+            objectMapOffset: offset,
+            objectMapLimit: limit,
+            objectMapReturned: returnedObjectMap.length,
+            objectMapTotal: fullObjectMap.length,
+            hasMore,
+            ...(hasMore ? { nextObjectMapOffset: offset + returnedObjectMap.length } : {})
+        }
+        : undefined;
+    const returnedIds = new Set(returnedObjectMap.map((entry) => entry.stableObjectId));
+    return {
+        ...result,
+        pages: cursor
+            ? result.pages.map((page) => ({ ...page, objectMap: page.objectMap.filter((entry) => returnedIds.has(entry.stableObjectId)) }))
+            : result.pages,
+        objectMap: returnedObjectMap,
+        summary: {
+            ...result.summary,
+            objectMapEntries: fullObjectMap.length,
+            objectMapReturned: returnedObjectMap.length,
+            truncated: Boolean(cursor?.hasMore)
+        },
+        ...(cursor ? { cursor } : {}),
+        nextActions: viewNextActions(inspected, options, Boolean(cursor?.hasMore))
+    };
+}
+function normalizeObjectMapLimit(limit) {
+    if (limit !== undefined && Number.isFinite(limit) && limit > 0)
+        return Math.floor(limit);
+    return 200;
+}
+function viewNextActions(inspected, options, hasMore) {
+    const input = inspected.trusted.inputPath ?? "<input>";
+    const actions = [];
+    if (hasMore) {
+        actions.push(`officegen inspect ${input} --depth summary --object-map-limit ${normalizeObjectMapLimit(options.objectMapLimit)} --agent --json`);
+    }
+    if (!options.crop) {
+        actions.push(`officegen view ${input} --object <stableObjectId> --crop --out .officegen/runs/object-crop --json`);
+    }
+    actions.push(`officegen edit ${input} --ops ops.json --dry-run --resolve-selectors --agent --json`);
+    return actions;
 }
 function buildSlidePage(slide, page, format, objectMap) {
     const slideObjects = objectMap.filter((entry) => Number(entry.selectorHints?.slide) === page);

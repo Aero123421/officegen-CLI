@@ -12,6 +12,8 @@ import { createSourceFingerprint } from "./ooxml/sourceSpan.js";
 import { buildTokenIndex } from "./ooxml/tokenIndex.js";
 import { createEditTransaction } from "./ooxml/transaction.js";
 import { createOperationRegistry } from "./ooxml/operations/registry.js";
+import { buildObjectGraph } from "./graphs/objectGraph.js";
+import { SELECTOR_GRAPH_LOW_CONFIDENCE_THRESHOLD, objectGraphHash as hashObjectGraph, selectionLockForNode, selectorResolutionNextActions, sourceFingerprintForNode } from "./graphs/selectorGraph.js";
 import { PDFDocument, rgb } from "pdf-lib";
 import JSZip from "jszip";
 import { createHash } from "node:crypto";
@@ -39,17 +41,20 @@ export async function resolveEditSelectors(input, operations, options = {}) {
 }
 async function resolveEditSelectorsForNormalized(normalized, operations, config) {
     const inspected = await inspect({ data: normalized.bytes, format: normalized.format }, { config });
+    const objectGraph = buildObjectGraph(inspected.objectMap);
+    const currentObjectGraphHash = hashObjectGraph(objectGraph);
     const resolutions = operations.flatMap((operation, index) => {
         const selector = selectorForOperation(operation);
         if (!selector)
             return [];
-        return [selectorResolutionForObjectMap(index, selector, inspected.objectMap)];
+        return [selectorResolutionForObjectMap(index, selector, inspected.objectMap, objectGraph, currentObjectGraphHash)];
     });
     return {
         schema: "officegen.edit.selectors@1.2",
         format: inspected.trusted.format,
         inputSha256: sha256Bytes(normalized.bytes),
         objectMapHash: objectMapHash(inspected.objectMap),
+        objectGraphHash: currentObjectGraphHash,
         resolutions,
         objectMap: inspected.objectMap,
         caveats: ["Selector resolution is based on the current inspect objectMap stableObjectId values."]
@@ -62,6 +67,8 @@ async function editOfficeXml(input, operations, options, selectorResult) {
     const atomic = options.atomic ?? true;
     const continueOnError = options.continueOnError ?? false;
     const opResults = [];
+    const inputSha256 = selectorResult?.inputSha256 ?? sha256Bytes(input.bytes);
+    const sourceFingerprint = inputSourceFingerprint(input.bytes);
     const store = new ZipPartStore(zip);
     const officeContext = {
         zip,
@@ -76,39 +83,49 @@ async function editOfficeXml(input, operations, options, selectorResult) {
     if (options.idempotencyKey) {
         const markerPath = idempotencyMarkerPath(options.idempotencyKey);
         if (zip.file(markerPath)) {
+            const idempotencyResults = operations.map((operation, index) => ({
+                operationIndex: index,
+                op: operationName(operation),
+                applied: false,
+                reason: "idempotency-replay",
+                message: `idempotencyKey already applied: ${options.idempotencyKey}`
+            }));
             return {
                 schema: "officegen.edit.result@1.2",
                 format: input.format,
                 dryRun: options.dryRun,
-                inputSha256: selectorResult?.inputSha256,
+                inputSha256,
                 objectMapHash: selectorResult?.objectMapHash,
+                objectGraphHash: selectorResult?.objectGraphHash,
+                sourceFingerprint,
                 changed: false,
                 applied: 0,
                 skipped: operations.length,
-                opResults: operations.map((operation, index) => ({
-                    operationIndex: index,
-                    op: operationName(operation),
-                    applied: false,
-                    reason: "idempotency-replay",
-                    message: `idempotencyKey already applied: ${options.idempotencyKey}`
-                })),
+                opResults: idempotencyResults,
+                patchPlan: options.dryRun ? await buildPatchPlan(input.format, input.bytes, operations, idempotencyResults, selectorResult) : undefined,
                 caveats: ["IDEMPOTENCY_REPLAY: idempotencyKey marker already exists.", ...zipSafetyCaveats(getLoadedZipSafetyReport(zip))]
             };
         }
     }
     const staleErrors = stalePlanFailures(selectorResult, options, operations);
     if (staleErrors.length) {
+        const patchPlan = options.dryRun
+            ? await buildPatchPlan(input.format, input.bytes, operations, staleErrors, selectorResult)
+            : undefined;
         return {
             schema: "officegen.edit.result@1.2",
             format: input.format,
             dryRun: options.dryRun,
-            inputSha256: selectorResult?.inputSha256,
+            inputSha256,
             objectMapHash: selectorResult?.objectMapHash,
+            objectGraphHash: selectorResult?.objectGraphHash,
+            sourceFingerprint,
             changed: false,
             applied: 0,
             skipped: operations.length,
             opResults: staleErrors,
             errors: staleErrors,
+            patchPlan,
             caveats: [
                 "EDIT_STALE_PLAN: expected input or object map hash does not match the current file.",
                 ...zipSafetyCaveats(getLoadedZipSafetyReport(zip))
@@ -125,14 +142,14 @@ async function editOfficeXml(input, operations, options, selectorResult) {
     if (validationErrors.length && atomic) {
         const opResults = [...validationErrors];
         appendSkippedAfterErrorResults(opResults, operations, "Skipped because atomic selector validation failed.");
-        return editAbortResult(input.format, operations.length, opResults, [
+        return editAbortResult(input.format, operations.length, opResults, operations, [
             "Atomic edit aborted before writing because selector validation failed.",
             ...zipSafetyCaveats(getLoadedZipSafetyReport(zip))
-        ], selectorResult, options.dryRun);
+        ], selectorResult, options.dryRun, input.bytes);
     }
     await snapshotExistingOfficeParts(officeContext.transaction, graph);
     for (const [index, operation] of operations.entries()) {
-        if (opResults.some((result) => result.applied === false && result.reason && result.reason !== "unsupported") && !continueOnError) {
+        if (opResults.some(isRequiredEditFailure) && !continueOnError) {
             skipped += 1;
             opResults.push({ operationIndex: index, op: operationName(operation), applied: false, reason: "skipped-after-error" });
             continue;
@@ -149,7 +166,8 @@ async function editOfficeXml(input, operations, options, selectorResult) {
                 : selectorResult?.objectMap ?? [];
             const selector = selectorForOperation(operation);
             if (dynamicPptxSelectors && selector && hasPriorPptxCreator(operations, index)) {
-                runtimeResolutions?.push(selectorResolutionForObjectMap(index, selector, objectMap));
+                const currentGraph = buildObjectGraph(objectMap);
+                runtimeResolutions?.push(selectorResolutionForObjectMap(index, selector, objectMap, currentGraph, hashObjectGraph(currentGraph)));
             }
             const txResult = await officeContext.transaction.run(index, () => applyOfficeOperation(officeContext, input.format, operation, objectMap, index));
             if (!txResult.applied) {
@@ -180,17 +198,22 @@ async function editOfficeXml(input, operations, options, selectorResult) {
             }
         }
     }
-    const errors = opResults.filter((result) => !result.applied && result.reason && result.reason !== "unsupported");
-    if (errors.length && atomic) {
+    const errors = opResults.filter(isRequiredEditFailure);
+    if (errors.length && (atomic || !options.allowPartial || applied <= 0)) {
         officeContext.rollback ??= await rollbackOfficeTransaction(zip, officeContext.transaction, officeContext.initialPartPaths);
-        return editAbortResult(input.format, skipped, opResults, [
-            "Atomic edit aborted; no output bytes were written.",
+        return editAbortResult(input.format, skipped, opResults, operations, [
+            atomic
+                ? "Atomic edit aborted; no output bytes were written."
+                : "Edit aborted before writing because not all required operations succeeded. Pass allowPartial to permit best-effort output.",
             rollbackCaveat(officeContext.rollback),
             ...zipSafetyCaveats(getLoadedZipSafetyReport(zip))
-        ], selectorResult, options.dryRun);
+        ], selectorResult, options.dryRun, input.bytes);
     }
     if (options.idempotencyKey && applied > 0)
         await officeContext.transaction.writePart(idempotencyMarkerPath(options.idempotencyKey), new Date().toISOString());
+    const patchPlan = options.dryRun
+        ? await buildPatchPlan(input.format, input.bytes, operations, opResults, selectorResult, officeContext.transaction, officeContext.store, officeContext.initialPartPaths, zipPartPathSet(zip))
+        : undefined;
     const commit = officeContext.transaction.closedForWrites ? undefined : await officeContext.transaction.commit();
     const bytes = options.dryRun ? undefined : await zipToBytes(zip);
     if (!options.dryRun)
@@ -199,8 +222,10 @@ async function editOfficeXml(input, operations, options, selectorResult) {
         schema: "officegen.edit.result@1.2",
         format: input.format,
         dryRun: options.dryRun,
-        inputSha256: selectorResult?.inputSha256,
+        inputSha256,
         objectMapHash: selectorResult?.objectMapHash,
+        objectGraphHash: selectorResult?.objectGraphHash,
+        sourceFingerprint,
         changed: applied > 0,
         applied,
         skipped,
@@ -209,6 +234,9 @@ async function editOfficeXml(input, operations, options, selectorResult) {
         opResults,
         resolvedSelectors: runtimeResolutions,
         errors: errors.length ? errors : undefined,
+        partial: errors.length ? true : undefined,
+        allowPartial: options.allowPartial || undefined,
+        patchPlan,
         caveats: [
             "Office XML edits preserve unknown parts but do not recalculate native layout, formulas, or theme-derived rendering.",
             ...(commit ? [`EDIT_TRANSACTION: journaled ${commit.journaledParts} package part snapshot(s).`] : []),
@@ -1850,7 +1878,17 @@ function stalePlanFailures(selectorResult, options, operations) {
             op: "stalePlan",
             applied: false,
             reason: "stale-plan",
-            message: `EDIT_STALE_PLAN: expectedInputSha256 ${options.expectedInputSha256} does not match current ${selectorResult.inputSha256}.`
+            message: `EDIT_STALE_PLAN: blocked before write because expectedInputSha256 ${options.expectedInputSha256} does not match current ${selectorResult.inputSha256}.`,
+            evidence: {
+                code: "EDIT_STALE_PLAN",
+                field: "expectedInputSha256",
+                expected: options.expectedInputSha256,
+                current: selectorResult.inputSha256,
+                expectedHash: options.expectedInputSha256,
+                currentHash: selectorResult.inputSha256,
+                operationCount: operations.length,
+                wouldWrite: false
+            }
         });
     }
     if (options.expectedObjectMapHash && options.expectedObjectMapHash !== selectorResult.objectMapHash) {
@@ -1859,8 +1897,81 @@ function stalePlanFailures(selectorResult, options, operations) {
             op: "stalePlan",
             applied: false,
             reason: "stale-plan",
-            message: `EDIT_STALE_PLAN: expectedObjectMapHash ${options.expectedObjectMapHash} does not match current ${selectorResult.objectMapHash}.`
+            message: `EDIT_STALE_PLAN: blocked before write because objectMapHash stale mismatch: expected ${options.expectedObjectMapHash} does not match current ${selectorResult.objectMapHash}.`,
+            evidence: {
+                code: "EDIT_STALE_PLAN",
+                field: "expectedObjectMapHash",
+                expected: options.expectedObjectMapHash,
+                current: selectorResult.objectMapHash,
+                expectedHash: options.expectedObjectMapHash,
+                currentHash: selectorResult.objectMapHash,
+                operationCount: operations.length,
+                wouldWrite: false
+            }
         });
+    }
+    if (options.expectedObjectGraphHash && options.expectedObjectGraphHash !== selectorResult.objectGraphHash) {
+        failures.push({
+            operationIndex: -1,
+            op: "stalePlan",
+            applied: false,
+            reason: "stale-plan",
+            message: `EDIT_STALE_PLAN: blocked before write because objectGraphHash stale mismatch: expected ${options.expectedObjectGraphHash} does not match current ${selectorResult.objectGraphHash}.`,
+            evidence: {
+                code: "EDIT_STALE_PLAN",
+                field: "expectedObjectGraphHash",
+                expected: options.expectedObjectGraphHash,
+                current: selectorResult.objectGraphHash,
+                expectedHash: options.expectedObjectGraphHash,
+                currentHash: selectorResult.objectGraphHash,
+                operationCount: operations.length,
+                wouldWrite: false
+            }
+        });
+    }
+    if (options.selectionLock) {
+        const lock = options.selectionLock;
+        if (lock.objectGraphHash !== selectorResult.objectGraphHash) {
+            failures.push({
+                operationIndex: -1,
+                op: "selectionLock",
+                applied: false,
+                reason: "stale-plan",
+                message: `EDIT_STALE_SELECTION_LOCK: blocked before write because selectionLock.objectGraphHash ${lock.objectGraphHash} does not match current ${selectorResult.objectGraphHash}.`,
+                evidence: {
+                    code: "EDIT_STALE_SELECTION_LOCK",
+                    field: "selectionLock.objectGraphHash",
+                    expected: lock.objectGraphHash,
+                    current: selectorResult.objectGraphHash,
+                    expectedHash: lock.objectGraphHash,
+                    currentHash: selectorResult.objectGraphHash,
+                    operationCount: operations.length,
+                    wouldWrite: false
+                }
+            });
+        }
+        else if (lock.nodeId || lock.sourceFingerprint) {
+            const currentLock = selectorResult.resolutions.find((resolution) => (!lock.nodeId || resolution.selectionLock?.nodeId === lock.nodeId) &&
+                (!lock.sourceFingerprint || resolution.selectionLock?.sourceFingerprint === lock.sourceFingerprint))?.selectionLock;
+            if (!currentLock) {
+                failures.push({
+                    operationIndex: -1,
+                    op: "selectionLock",
+                    applied: false,
+                    reason: "stale-plan",
+                    message: "EDIT_STALE_SELECTION_LOCK: blocked before write because selectionLock nodeId/sourceFingerprint no longer matches any resolved selector.",
+                    evidence: {
+                        code: "EDIT_STALE_SELECTION_LOCK",
+                        field: "selectionLock",
+                        expected: JSON.stringify(lock),
+                        current: JSON.stringify(selectorResult.resolutions.map((resolution) => resolution.selectionLock).filter(Boolean)),
+                        expectedHash: lock.sourceFingerprint,
+                        operationCount: operations.length,
+                        wouldWrite: false
+                    }
+                });
+            }
+        }
     }
     return failures.length ? failures.map((failure) => ({ ...failure, message: `${failure.message} ${operations.length} operations were not applied.` })) : [];
 }
@@ -1881,6 +1992,112 @@ function objectMapHash(objectMap) {
         bbox: entry.bbox,
         selectorHints: entry.selectorHints
     })))).digest("hex")}`;
+}
+async function buildPatchPlan(format, inputBytes, operations, opResults, selectorResult, transaction, store, initialPartPaths = new Set(), currentPartPaths = new Set()) {
+    const touchedParts = transaction && store
+        ? await patchPlanTouchedParts(transaction, store, initialPartPaths, currentPartPaths)
+        : [];
+    const sourceFingerprints = touchedParts
+        .map((part) => part.sourceFingerprint)
+        .filter((fingerprint) => Boolean(fingerprint));
+    return {
+        schema: "officegen.patchPlan@2",
+        format,
+        wouldWrite: false,
+        inputSha256: selectorResult?.inputSha256 ?? sha256Bytes(inputBytes),
+        objectMapHash: selectorResult?.objectMapHash,
+        objectGraphHash: selectorResult?.objectGraphHash,
+        sourceFingerprint: inputSourceFingerprint(inputBytes),
+        operations: operations.map((operation, index) => {
+            const result = opResults.find((item) => item.operationIndex === index);
+            return {
+                operationIndex: index,
+                op: operationName(operation),
+                wouldApply: result?.applied === true,
+                reason: result?.reason,
+                message: result?.message,
+                selector: selectorForOperation(operation)
+            };
+        }),
+        touchedParts,
+        expectedChangedParts: touchedParts.map((part) => part.path),
+        sourceFingerprints,
+        blocked: opResults.filter((result) => result.applied === false && result.reason !== "idempotency-replay")
+    };
+}
+async function patchPlanTouchedParts(transaction, store, initialPartPaths, currentPartPaths) {
+    const byPath = new Map();
+    for (const entry of transaction.snapshot()) {
+        const current = await store.readPart(entry.path);
+        if (entry.existed && current === undefined) {
+            byPath.set(entry.path, {
+                path: entry.path,
+                change: "deleted",
+                beforeSha256: sha256Part(entry.value),
+                sourceFingerprint: partSourceFingerprint(entry.path, entry.value)
+            });
+            continue;
+        }
+        if (!entry.existed && current !== undefined) {
+            byPath.set(entry.path, {
+                path: entry.path,
+                change: "created",
+                afterSha256: sha256Part(current)
+            });
+            continue;
+        }
+        if (entry.existed && current !== undefined) {
+            const beforeSha256 = sha256Part(entry.value);
+            const afterSha256 = sha256Part(current);
+            if (beforeSha256 !== afterSha256) {
+                byPath.set(entry.path, {
+                    path: entry.path,
+                    change: "modified",
+                    beforeSha256,
+                    afterSha256,
+                    sourceFingerprint: partSourceFingerprint(entry.path, entry.value)
+                });
+            }
+        }
+    }
+    for (const path of currentPartPaths) {
+        if (initialPartPaths.has(path) || byPath.has(path))
+            continue;
+        const current = await store.readPart(path);
+        if (current === undefined)
+            continue;
+        byPath.set(path, {
+            path,
+            change: "created",
+            afterSha256: sha256Part(current)
+        });
+    }
+    return [...byPath.values()].sort((left, right) => left.path.localeCompare(right.path));
+}
+function inputSourceFingerprint(bytes) {
+    return {
+        algorithm: "sha256",
+        hash: sha256Digest(bytes),
+        byteLength: bytes.byteLength
+    };
+}
+function partSourceFingerprint(path, value) {
+    const bytes = partBytes(value);
+    return {
+        algorithm: "sha256",
+        hash: sha256Digest(bytes),
+        byteLength: bytes.byteLength,
+        path
+    };
+}
+function sha256Part(value) {
+    return `sha256:${sha256Digest(partBytes(value))}`;
+}
+function sha256Digest(bytes) {
+    return createHash("sha256").update(bytes).digest("hex");
+}
+function partBytes(value) {
+    return typeof value === "string" ? Buffer.from(value, "utf8") : value;
 }
 function stableStringify(value) {
     if (value === null || typeof value !== "object")
@@ -1911,23 +2128,62 @@ function selectorTargetsExplicitSlide(selector) {
         return true;
     return typeof selector.largestTextOnSlide === "number";
 }
-function editAbortResult(format, skipped, opResults, caveats, selectorResult, dryRun) {
-    const errors = opResults.filter((result) => result.reason && result.reason !== "unsupported");
+function editAbortResult(format, skipped, opResults, operations, caveats, selectorResult, dryRun, inputBytes) {
+    const errors = opResults.filter(isRequiredEditFailure);
     const rolledBack = opResults.some((result) => result.applied);
+    const inputSha256 = inputBytes ? (selectorResult?.inputSha256 ?? sha256Bytes(inputBytes)) : selectorResult?.inputSha256;
+    const sourceFingerprint = inputBytes ? inputSourceFingerprint(inputBytes) : undefined;
     return {
         schema: "officegen.edit.result@1.2",
         format,
         dryRun,
-        inputSha256: selectorResult?.inputSha256,
+        inputSha256,
         objectMapHash: selectorResult?.objectMapHash,
+        objectGraphHash: selectorResult?.objectGraphHash,
+        sourceFingerprint,
         rolledBack: rolledBack || undefined,
         changed: false,
         applied: 0,
         skipped,
         opResults,
         errors: errors.length ? errors : undefined,
+        patchPlan: dryRun && inputBytes ? {
+            schema: "officegen.patchPlan@2",
+            format,
+            wouldWrite: false,
+            inputSha256: inputSha256 ?? sha256Bytes(inputBytes),
+            objectMapHash: selectorResult?.objectMapHash,
+            objectGraphHash: selectorResult?.objectGraphHash,
+            sourceFingerprint: inputSourceFingerprint(inputBytes),
+            operations: operations.map((operation, index) => {
+                const result = opResults.find((item) => item.operationIndex === index);
+                return {
+                    operationIndex: index,
+                    op: operationName(operation),
+                    wouldApply: result?.applied === true,
+                    reason: result?.reason,
+                    message: result?.message,
+                    selector: selectorForOperation(operation)
+                };
+            }),
+            touchedParts: [],
+            expectedChangedParts: [],
+            sourceFingerprints: [],
+            blocked: opResults.filter((result) => result.applied === false)
+        } : undefined,
         caveats
     };
+}
+function isRequiredEditFailure(result) {
+    if (result.applied !== false)
+        return false;
+    return result.reason === "not-found"
+        || result.reason === "ambiguous"
+        || result.reason === "low-confidence"
+        || result.reason === "unsupported"
+        || result.reason === "validation-failed"
+        || result.reason === "skipped-after-error"
+        || result.reason === "stale-plan";
 }
 function appendSkippedAfterErrorResults(opResults, operations, message) {
     const existing = new Set(opResults.map((result) => result.operationIndex));
@@ -1952,17 +2208,75 @@ function selectorForOperation(operation) {
         return operation.selector;
     return undefined;
 }
-function selectorResolutionForObjectMap(operationIndex, selector, objectMap) {
+function selectorResolutionForObjectMap(operationIndex, selector, objectMap, graph, currentObjectGraphHash) {
     const matches = resolveMatches(objectMap, selector);
+    const graphNodesByStableId = new Map(graph.nodes.map((node) => [node.stableId, node]));
+    const confidence = matches.length === 1 ? selectorConfidence(matches[0], selector, matches) : undefined;
+    const status = selectorStatus(matches.length, confidence);
+    const reason = status === "not_found"
+        ? "not-found"
+        : status === "ambiguous"
+            ? "ambiguous"
+            : status === "low_confidence"
+                ? "low-confidence"
+                : undefined;
+    const matchedNode = matches.length === 1 ? graphNodesByStableId.get(matches[0]?.stableObjectId ?? "") : undefined;
+    const selectorResolution = selectorResolutionV2ForObjectMap(selector, matches, graphNodesByStableId, graph, currentObjectGraphHash, status, confidence);
     return {
         operationIndex,
         selector,
         stableObjectId: selector.stableObjectId,
-        matched: matches.length > 0,
+        matched: status === "matched",
         matchCount: matches.length,
-        confidence: matches.length === 1 ? selectorConfidence(matches[0], selector, matches) : undefined,
-        matches: matches.map((match) => selectorMatch(match, selector, matches)),
-        reason: matches.length === 0 ? "not-found" : matches.length > 1 ? "ambiguous" : undefined
+        status,
+        confidence,
+        matches: matches.map((match) => selectorMatch(match, selector, matches, graphNodesByStableId)),
+        evidence: selectorResolution.evidence,
+        ambiguityReason: status === "ambiguous" ? "multiple-matches" : undefined,
+        nextActions: selectorResolution.nextActions,
+        selectionLock: selectionLockForNode(graph, matchedNode),
+        selectorResolution,
+        reason
+    };
+}
+function selectorStatus(matchCount, confidence) {
+    if (matchCount === 0)
+        return "not_found";
+    if (matchCount > 1)
+        return "ambiguous";
+    if (confidence !== undefined && confidence < SELECTOR_GRAPH_LOW_CONFIDENCE_THRESHOLD)
+        return "low_confidence";
+    return "matched";
+}
+function selectorResolutionV2ForObjectMap(selector, matches, graphNodesByStableId, graph, currentObjectGraphHash, status, confidence) {
+    const matchedNode = matches.length === 1 ? graphNodesByStableId.get(matches[0]?.stableObjectId ?? "") : undefined;
+    const evidence = matches.flatMap((match) => graphNodesByStableId.get(match.stableObjectId)?.evidence ?? []);
+    return {
+        schema: "officegen.selectorResolution@2",
+        status,
+        confidence,
+        candidates: matches.map((match) => {
+            const node = graphNodesByStableId.get(match.stableObjectId);
+            return {
+                nodeId: node?.nodeId,
+                stableObjectId: match.stableObjectId,
+                type: match.kind,
+                label: match.label,
+                text: match.text,
+                confidence: selectorConfidence(match, selector, matches),
+                source: node?.source
+            };
+        }),
+        evidence,
+        ambiguityReason: status === "ambiguous" ? "multiple-matches" : undefined,
+        nextActions: selectorResolutionNextActions(status),
+        selectionLock: matchedNode
+            ? {
+                objectGraphHash: currentObjectGraphHash,
+                nodeId: matchedNode.nodeId,
+                sourceFingerprint: sourceFingerprintForNode(matchedNode)
+            }
+            : selectionLockForNode(graph, undefined)
     };
 }
 function resolveMatches(objectMap, selector) {
@@ -2046,8 +2360,10 @@ function singleMatch(objectMap, selector) {
         throw new Error(`SELECTOR_AMBIGUOUS: selector matched ${matches.length} objects.`);
     return matches[0];
 }
-function selectorMatch(entry, selector, matches) {
+function selectorMatch(entry, selector, matches, graphNodesByStableId) {
+    const node = graphNodesByStableId.get(entry.stableObjectId);
     return {
+        nodeId: node?.nodeId,
         stableObjectId: entry.stableObjectId,
         kind: entry.kind,
         confidence: selectorConfidence(entry, selector, matches),
@@ -2208,19 +2524,52 @@ function rowFromRef(ref) {
     return Number(/\d+/.exec(ref)?.[0] ?? 1);
 }
 async function editPdf(input, operations, options, selectorResult) {
+    const inputSha256 = selectorResult?.inputSha256 ?? sha256Bytes(input.bytes);
+    const sourceFingerprint = inputSourceFingerprint(input.bytes);
+    if (hasPdfEncryptEntry(input.bytes)) {
+        const opResults = operations.map((operation, index) => ({
+            operationIndex: index,
+            op: operationName(operation),
+            applied: false,
+            reason: "validation-failed",
+            message: "PDF_ENCRYPTED_BLOCKED: encrypted PDFs may be inspected for risk reporting, but mutation is blocked by default."
+        }));
+        return {
+            schema: "officegen.edit.result@1.2",
+            format: "pdf",
+            dryRun: options.dryRun,
+            inputSha256,
+            objectMapHash: selectorResult?.objectMapHash,
+            objectGraphHash: selectorResult?.objectGraphHash,
+            sourceFingerprint,
+            changed: false,
+            applied: 0,
+            skipped: operations.length,
+            opResults,
+            errors: opResults,
+            patchPlan: options.dryRun ? await buildPatchPlan("pdf", input.bytes, operations, opResults, selectorResult) : undefined,
+            caveats: [
+                "PDF_ENCRYPTED_BLOCKED: edit does not use ignoreEncryption; inspect the PDF and provide an unencrypted copy before mutation.",
+                "No output bytes were written."
+            ]
+        };
+    }
     const staleErrors = stalePlanFailures(selectorResult, options, operations);
     if (staleErrors.length) {
         return {
             schema: "officegen.edit.result@1.2",
             format: "pdf",
             dryRun: options.dryRun,
-            inputSha256: selectorResult?.inputSha256,
+            inputSha256,
             objectMapHash: selectorResult?.objectMapHash,
+            objectGraphHash: selectorResult?.objectGraphHash,
+            sourceFingerprint,
             changed: false,
             applied: 0,
             skipped: operations.length,
             opResults: staleErrors,
             errors: staleErrors,
+            patchPlan: options.dryRun ? await buildPatchPlan("pdf", input.bytes, operations, staleErrors, selectorResult) : undefined,
             caveats: ["EDIT_STALE_PLAN: expected input or object map hash does not match the current PDF."]
         };
     }
@@ -2240,20 +2589,23 @@ async function editPdf(input, operations, options, selectorResult) {
             schema: "officegen.edit.result@1.2",
             format: "pdf",
             dryRun: options.dryRun,
-            inputSha256: selectorResult?.inputSha256,
+            inputSha256,
             objectMapHash: selectorResult?.objectMapHash,
+            objectGraphHash: selectorResult?.objectGraphHash,
+            sourceFingerprint,
             changed: false,
             applied: 0,
             skipped: operations.length,
             opResults,
             errors: redactionBlocks,
+            patchPlan: options.dryRun ? await buildPatchPlan("pdf", input.bytes, operations, opResults, selectorResult) : undefined,
             caveats: [
                 "PDF_REDACTION_BLOCKED: true PDF redaction is not implemented; overlay operations must not be treated as redaction.",
                 "No output bytes were written because redaction-like PDF operations were present."
             ]
         };
     }
-    const pdf = await PDFDocument.load(input.bytes, { ignoreEncryption: true });
+    const pdf = await PDFDocument.load(input.bytes);
     const fontSet = await embedPdfFonts(pdf, operations.map((op) => "text" in op ? String(op.text) : ""));
     const font = fontSet.font;
     let applied = 0;
@@ -2306,6 +2658,13 @@ async function editPdf(input, operations, options, selectorResult) {
             opResults.push({ operationIndex: index, op: name, applied: false, reason: "unsupported", message: `Unsupported PDF edit operation: ${name}` });
         }
     }
+    const errors = opResults.filter(isRequiredEditFailure);
+    if (errors.length && (!options.allowPartial || applied <= 0)) {
+        return editAbortResult("pdf", operations.length, opResults, operations, [
+            "PDF edit aborted before writing because not all required operations succeeded. Pass allowPartial to permit best-effort output.",
+            "No output bytes were written because the edit result was incomplete."
+        ], selectorResult, options.dryRun, input.bytes);
+    }
     const bytes = options.dryRun ? undefined : await pdf.save({ useObjectStreams: false });
     if (!options.dryRun)
         await writeOutput(options.out, bytes);
@@ -2313,14 +2672,20 @@ async function editPdf(input, operations, options, selectorResult) {
         schema: "officegen.edit.result@1.2",
         format: "pdf",
         dryRun: options.dryRun,
-        inputSha256: selectorResult?.inputSha256,
+        inputSha256,
         objectMapHash: selectorResult?.objectMapHash,
+        objectGraphHash: selectorResult?.objectGraphHash,
+        sourceFingerprint,
         changed: applied > 0,
         applied,
         skipped,
         out: options.dryRun ? undefined : options.out,
         bytes: options.dryRun || options.out ? undefined : bytes,
         opResults,
+        errors: errors.length ? errors : undefined,
+        partial: errors.length ? true : undefined,
+        allowPartial: options.allowPartial || undefined,
+        patchPlan: options.dryRun ? await buildPatchPlan("pdf", input.bytes, operations, opResults, selectorResult) : undefined,
         caveats: ["PDF edit is additive; existing text/content is not removed in the MVP."]
     };
 }
@@ -2343,6 +2708,9 @@ function isPdfRedactionOperation(operation, name = operationName(operation)) {
         return true;
     const record = operation;
     return Boolean(record.redact || record.redaction || record.redactions);
+}
+function hasPdfEncryptEntry(bytes) {
+    return /\/Encrypt\b/.test(Buffer.from(bytes).toString("latin1"));
 }
 function isValidPage(pdf, page) {
     return Number.isInteger(page) && page >= 1 && page <= pdf.getPageCount();

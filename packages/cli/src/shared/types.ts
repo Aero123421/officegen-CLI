@@ -2,6 +2,7 @@ import type { FeatureName, JsonValue, OfficegenConfig } from "@officegen/core";
 
 export const CLI_SPEC_VERSION = "1.2";
 export const ENVELOPE_SCHEMA = "officegen.envelope@1.2";
+export const RUNTIME_ENVELOPE_SCHEMA = "officegen.envelope@2";
 
 export type Stability = "stable" | "experimental";
 export type FeatureKey = FeatureName;
@@ -51,6 +52,7 @@ export interface CliErrorPayload {
 
 export interface Envelope {
   schema: typeof ENVELOPE_SCHEMA;
+  runtimeEnvelope: typeof RUNTIME_ENVELOPE_SCHEMA;
   ok: boolean;
   command: string;
   runId: string;
@@ -59,18 +61,20 @@ export interface Envelope {
   pathsRedacted: boolean;
   result?: unknown;
   error?: CliErrorPayload;
-  executionOk?: boolean;
-  objectiveOk?: boolean;
-  mutationStatus?: "changed" | "noop" | "plan_only" | "failed" | "not_applicable";
-  artifactStatus?: "complete" | "missing" | "not_expected";
-  readiness?: "pass" | "pass_with_environment_gap" | "warning" | "partial" | "blocked";
-  partial?: boolean;
+  executionOk: boolean;
+  objectiveOk: boolean;
+  mutationStatus: "changed" | "noop" | "plan_only" | "failed" | "not_applicable";
+  artifactStatus: "complete" | "missing" | "not_expected";
+  readiness: "pass" | "pass_with_environment_gap" | "warning" | "partial" | "blocked";
+  partial: boolean;
+  failureClass: "none" | "unsupported" | "partial" | "blocked" | "runtime" | "input" | "schema" | "security" | "usage";
   truncated?: boolean;
   warnings: unknown[];
   diagnostics: unknown[];
   artifacts: unknown[];
   availableCommands: string[];
   nextSuggestedCommands: string[];
+  nextActions: string[];
 }
 
 export class CliFailure extends Error {

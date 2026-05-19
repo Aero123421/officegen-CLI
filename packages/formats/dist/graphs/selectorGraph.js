@@ -1,4 +1,5 @@
 import { normalizeText } from "./objectGraph.js";
+import { createHash } from "node:crypto";
 export const SELECTOR_GRAPH_LOW_CONFIDENCE_THRESHOLD = 0.65;
 export const SELECTOR_GRAPH_AMBIGUITY_DISTANCE_DELTA = 24;
 export const SELECTOR_GRAPH_AMBIGUITY_DISTANCE_RATIO = 1.15;
@@ -30,6 +31,92 @@ export function resolveGraphSelector(graph, selector) {
 }
 export function resolveGraphSelectors(graph, selectors) {
     return selectors.map((selector) => resolveGraphSelector(graph, selector));
+}
+export function selectorResolutionV2FromGraphResolution(graph, resolution) {
+    const candidates = resolution.matches.map((match) => ({
+        nodeId: match.nodeId,
+        stableObjectId: match.stableId,
+        type: match.type,
+        label: match.label,
+        text: match.text,
+        confidence: match.confidence,
+        source: match.source
+    }));
+    const matchedNode = resolution.matches.length === 1
+        ? graph.nodes.find((node) => node.nodeId === resolution.matches[0]?.nodeId)
+        : undefined;
+    return {
+        schema: "officegen.selectorResolution@2",
+        status: selectorResolutionV2Status(resolution.status),
+        confidence: resolution.confidence,
+        candidates,
+        evidence: resolution.evidence.length ? resolution.evidence : resolution.matches.flatMap((match) => match.evidence),
+        ambiguityReason: resolution.ambiguity.reason,
+        nextActions: selectorResolutionNextActions(selectorResolutionV2Status(resolution.status)),
+        selectionLock: selectionLockForNode(graph, matchedNode)
+    };
+}
+export function selectorResolutionV2Status(status) {
+    if (status === "not-found")
+        return "not_found";
+    if (status === "low-confidence")
+        return "low_confidence";
+    return status;
+}
+export function objectGraphHash(graph) {
+    return `sha256:${createHash("sha256").update(stableStringify({
+        graphVersion: graph.graphVersion,
+        source: graph.source,
+        nodes: graph.nodes.map((node) => ({
+            nodeId: node.nodeId,
+            stableId: node.stableId,
+            type: node.type,
+            label: node.label,
+            bbox: node.bbox,
+            text: node.text,
+            source: node.source,
+            provenance: node.provenance
+        })),
+        edges: graph.edges.map((edge) => ({
+            edgeId: edge.edgeId,
+            from: edge.from,
+            to: edge.to,
+            relation: edge.relation,
+            confidence: edge.confidence
+        }))
+    })).digest("hex")}`;
+}
+export function selectionLockForNode(graph, node) {
+    return {
+        objectGraphHash: objectGraphHash(graph),
+        ...(node ? {
+            nodeId: node.nodeId,
+            sourceFingerprint: sourceFingerprintForNode(node)
+        } : {})
+    };
+}
+export function sourceFingerprintForNode(node) {
+    return `sha256:${createHash("sha256").update(stableStringify({
+        stableId: node.stableId,
+        type: node.type,
+        bbox: node.bbox,
+        text: node.text,
+        source: node.source,
+        selectorHints: node.provenance.selectorHints
+    })).digest("hex")}`;
+}
+export function selectorResolutionNextActions(status) {
+    if (status === "matched")
+        return ["Use selectionLock with edit options to block stale mutations."];
+    if (status === "not_found")
+        return ["Run inspect/view again and regenerate the selector from the current objectMap."];
+    if (status === "ambiguous")
+        return ["Refine the selector with stableObjectId, nodeId, textHash, positionHash, or narrower scope."];
+    if (status === "low_confidence")
+        return ["Use a stronger selector or rerun edit with an explicit minSelectorConfidence threshold."];
+    if (status === "stale")
+        return ["Refresh inspect/select output and retry with the new selectionLock."];
+    return ["Use a supported selector field for this format and operation."];
 }
 function applySelector(graph, initialCandidates, selector) {
     let candidates = initialCandidates;
@@ -300,6 +387,14 @@ function bboxMatches(actual, selector) {
 }
 function criterion(kind, confidence, message, sourceField) {
     return { kind, confidence, message, sourceField };
+}
+function stableStringify(value) {
+    if (value === null || typeof value !== "object")
+        return JSON.stringify(value);
+    if (Array.isArray(value))
+        return `[${value.map(stableStringify).join(",")}]`;
+    const record = value;
+    return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`).join(",")}}`;
 }
 function sameSlideOrUnscoped(left, right) {
     return left.source.slide === undefined || right.source.slide === undefined || left.source.slide === right.source.slide;

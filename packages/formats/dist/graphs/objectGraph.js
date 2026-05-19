@@ -1,20 +1,53 @@
-export const OBJECT_GRAPH_VERSION = "officegen.objectGraph@0.1";
+export const OBJECT_GRAPH_VERSION = "officegen.objectGraph@2";
 export function buildObjectGraph(objectMap, options = {}) {
     const graphVersion = options.graphVersion ?? OBJECT_GRAPH_VERSION;
-    const nodes = objectMap.map((entry, index) => objectMapEntryToNode(entry, index, graphVersion));
-    const edges = buildGeometryEdges(nodes, graphVersion);
+    const allNodes = objectMap.map((entry, index) => objectMapEntryToNode(entry, index, graphVersion, options));
+    const allEdges = buildGeometryEdges(allNodes, graphVersion);
+    const nodeOffset = clampOffset(options.nodeOffset);
+    const edgeOffset = clampOffset(options.edgeOffset);
+    const nodeLimit = normalizeLimit(options.nodeLimit, allNodes.length);
+    const edgeLimit = normalizeLimit(options.edgeLimit, allEdges.length);
+    const nodes = allNodes.slice(nodeOffset, nodeOffset + nodeLimit);
+    const edges = allEdges.slice(edgeOffset, edgeOffset + edgeLimit);
+    const riskFlags = options.riskFlags ?? [];
     return {
+        schema: graphVersion,
+        version: 2,
         graphVersion,
         source: {
-            objectMapCount: objectMap.length
+            format: options.format,
+            inputPath: options.inputPath,
+            inputSha256: options.inputSha256,
+            objectMapCount: objectMap.length,
+            builder: "inspect.objectMap"
         },
+        provenance: {
+            generatedFrom: "officegen.inspect.result@1.2",
+            sourceField: "objectMap"
+        },
+        confidence: confidenceFromEvidence([...nodes.flatMap((node) => node.evidence), ...edges.flatMap((edge) => edge.evidence)]),
+        riskFlags,
+        pagination: {
+            nodeOffset,
+            nodeLimit,
+            nodeCount: nodes.length,
+            totalNodes: allNodes.length,
+            edgeOffset,
+            edgeLimit,
+            edgeCount: edges.length,
+            totalEdges: allEdges.length,
+            truncated: nodeOffset + nodes.length < allNodes.length || edgeOffset + edges.length < allEdges.length,
+            ...(nodeOffset + nodes.length < allNodes.length ? { nextNodeOffset: nodeOffset + nodes.length } : {}),
+            ...(edgeOffset + edges.length < allEdges.length ? { nextEdgeOffset: edgeOffset + edges.length } : {})
+        },
+        index: buildIndex(nodes, edges),
         nodes,
         edges
     };
 }
-function objectMapEntryToNode(entry, index, graphVersion) {
+function objectMapEntryToNode(entry, index, graphVersion, options) {
     const bbox = normalizeBBox(entry);
-    const source = sourceFromEntry(entry);
+    const source = sourceFromEntry(entry, options);
     const style = styleFromEntry(entry);
     const evidence = [{
             kind: "object-map",
@@ -41,7 +74,10 @@ function objectMapEntryToNode(entry, index, graphVersion) {
         }
     }
     return {
+        schema: graphVersion,
+        version: 2,
         graphVersion,
+        index,
         nodeId: `node:${String(index + 1).padStart(4, "0")}`,
         stableId: entry.stableObjectId,
         type: entry.kind,
@@ -51,6 +87,8 @@ function objectMapEntryToNode(entry, index, graphVersion) {
         style,
         source,
         provenance: {
+            schema: graphVersion,
+            source: "inspect.objectMap",
             objectMapIndex: index,
             stableObjectId: entry.stableObjectId,
             selectorHints: entry.selectorHints,
@@ -58,6 +96,8 @@ function objectMapEntryToNode(entry, index, graphVersion) {
             media: entry.media,
             trust: entry.trust
         },
+        confidence: confidenceFromEvidence(evidence),
+        riskFlags: riskFlagsFromEntry(entry),
         evidence
     };
 }
@@ -83,9 +123,12 @@ function textFromEntry(entry) {
         normalized
     };
 }
-function sourceFromEntry(entry) {
+function sourceFromEntry(entry, options) {
     const hints = entry.selectorHints ?? {};
     return {
+        format: options.format,
+        inputPath: options.inputPath,
+        inputSha256: options.inputSha256,
         sourcePath: entry.sourcePath ?? stringHint(hints.sourcePath),
         xmlPath: entry.xmlPath ?? stringHint(hints.xmlPath),
         slide: numberHint(hints.slide),
@@ -130,12 +173,16 @@ function buildGeometryEdges(nodes, graphVersion) {
 }
 function makeGeometryEdge(graphVersion, index, from, to, relation, confidence, message) {
     return {
+        schema: graphVersion,
+        version: 2,
         graphVersion,
+        index,
         edgeId: `edge:${String(index + 1).padStart(4, "0")}`,
         from,
         to,
         relation,
         confidence,
+        riskFlags: [],
         evidence: [{
                 kind: "geometry",
                 confidence,
@@ -190,6 +237,55 @@ function horizontalOverlapRatio(left, right) {
 }
 export function normalizeText(value) {
     return value.replace(/\s+/g, " ").trim().toLowerCase();
+}
+function riskFlagsFromEntry(entry) {
+    const flags = [];
+    if (entry.trust?.level === "untrusted" || entry.untrusted) {
+        flags.push({
+            code: "UNTRUSTED_DOCUMENT_CONTENT",
+            severity: "info",
+            message: "Node text and metadata came from user-controlled document content.",
+            source: "objectMap.trust"
+        });
+    }
+    if (entry.kind.toLowerCase().includes("annotation")) {
+        flags.push({
+            code: "ANNOTATION_CONTENT",
+            severity: "info",
+            message: "Node represents annotation content that may be hidden or review-only.",
+            source: "objectMap.kind"
+        });
+    }
+    return flags;
+}
+function confidenceFromEvidence(evidence) {
+    if (!evidence.length)
+        return 0;
+    return Number((evidence.reduce((sum, item) => sum + item.confidence, 0) / evidence.length).toFixed(2));
+}
+function clampOffset(value) {
+    return Number.isFinite(value) && value && value > 0 ? Math.floor(value) : 0;
+}
+function normalizeLimit(value, fallback) {
+    if (!Number.isFinite(value) || value === undefined)
+        return fallback;
+    return Math.max(0, Math.floor(value));
+}
+function buildIndex(nodes, edges) {
+    const nodesByStableId = {};
+    const nodesByType = {};
+    const edgesByRelation = {
+        contains: [],
+        rightOf: [],
+        below: []
+    };
+    for (const node of nodes) {
+        nodesByStableId[node.stableId] = node.nodeId;
+        nodesByType[node.type] = [...(nodesByType[node.type] ?? []), node.nodeId];
+    }
+    for (const edge of edges)
+        edgesByRelation[edge.relation].push(edge.edgeId);
+    return { nodesByStableId, nodesByType, edgesByRelation };
 }
 function numberHint(value) {
     const number = Number(value);

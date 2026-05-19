@@ -2,6 +2,7 @@ import { AGENT_UNTRUSTED_INSTRUCTION, getLoadedZipSafetyReport, loadZip, makeSta
 import { inspectParagraphs } from "./ooxml/docx.js";
 import { inspectSlides } from "./ooxml/pptx.js";
 import { inspectSheets } from "./ooxml/xlsx.js";
+import { buildObjectGraph } from "./graphs/objectGraph.js";
 import { inspectPdfObjectGraph } from "./pdf/objectGraph.js";
 import { PDFDocument } from "pdf-lib";
 export async function inspect(input, options = {}) {
@@ -42,7 +43,7 @@ async function inspectPptx(input, options) {
         }))
         : slides;
     const macros = paths.filter((path) => /vbaProject\.bin$/i.test(path));
-    return {
+    return withObjectGraph({
         schema: "officegen.inspect.result@1.2",
         trusted: trustedMeta("officegen.inspect.result@1.2", input, {
             slides: slides.length,
@@ -83,7 +84,7 @@ async function inspectPptx(input, options) {
         },
         objectMap: summaryDepth ? compactObjectMap(objectMap, 25) : objectMap,
         agentInstruction: AGENT_UNTRUSTED_INSTRUCTION
-    };
+    }, objectMap, input, options, riskFlagsFromMacros(macros, "PPTX_MACROS_PRESENT"));
 }
 function docxStructureObjectMap(structureMap) {
     if (!structureMap)
@@ -139,7 +140,8 @@ async function inspectDocx(input, options) {
     const macros = paths.filter((path) => /vbaProject\.bin$/i.test(path));
     const summaryDepth = options.depth === "summary";
     const structureMap = options.structure ? await inspectDocxStructure(zip, paths) : undefined;
-    return {
+    const fullObjectMap = [...objectMap, ...docxStructureObjectMap(structureMap)];
+    return withObjectGraph({
         schema: "officegen.inspect.result@1.2",
         trusted: trustedMeta("officegen.inspect.result@1.2", input, {
             paragraphs: paragraphs.length,
@@ -171,9 +173,9 @@ async function inspectDocx(input, options) {
             })),
             ...(options.depth === "full" || options.include?.includes("rawPaths") ? { rawPaths: paths } : {})
         },
-        objectMap: summaryDepth ? compactObjectMap([...objectMap, ...docxStructureObjectMap(structureMap)], 35) : [...objectMap, ...docxStructureObjectMap(structureMap)],
+        objectMap: summaryDepth ? compactObjectMap(fullObjectMap, 35) : fullObjectMap,
         agentInstruction: AGENT_UNTRUSTED_INSTRUCTION
-    };
+    }, fullObjectMap, input, options, riskFlagsFromMacros(macros, "DOCX_MACROS_PRESENT"));
 }
 async function inspectXlsx(input, options) {
     const zip = await loadZip(input, { zipSafety: { config: options.config } });
@@ -230,7 +232,7 @@ async function inspectXlsx(input, options) {
             }))
         }))
         : namedSheets;
-    return {
+    return withObjectGraph({
         schema: "officegen.inspect.result@1.2",
         trusted: trustedMeta("officegen.inspect.result@1.2", input, {
             sheets: sheets.length,
@@ -264,7 +266,7 @@ async function inspectXlsx(input, options) {
         },
         objectMap: summaryDepth ? compactObjectMap(scopedObjectMap, 50) : scopedObjectMap,
         agentInstruction: AGENT_UNTRUSTED_INSTRUCTION
-    };
+    }, scopedObjectMap, input, options, riskFlagsFromMacros(macros, "XLSX_MACROS_PRESENT"));
 }
 async function inspectPdf(input, options) {
     const pdf = await PDFDocument.load(input.bytes, { ignoreEncryption: true });
@@ -297,7 +299,7 @@ async function inspectPdf(input, options) {
         modificationDate: pdf.getModificationDate()?.toISOString(),
         ...graph.metadata
     };
-    return {
+    return withObjectGraph({
         schema: "officegen.inspect.result@1.2",
         trusted: trustedMeta("officegen.inspect.result@1.2", input, {
             pages: pages.length,
@@ -305,11 +307,13 @@ async function inspectPdf(input, options) {
             annotations: graph.annotations.length,
             images: graph.scan.imageObjects,
             embeddedFiles: graph.scan.embeddedFiles,
+            encrypted: graph.scan.encrypted,
             unsupportedFilters: graph.scan.unsupportedFilters.length,
             riskFlags: graph.riskFlags.length
         }, [
             "PDF text extraction is best-effort; scanned/image PDFs should be reviewed through page preview artifacts.",
             "PDF redact operations are intentionally blocked; overlay text or rectangles do not remove underlying content.",
+            ...(graph.scan.encrypted ? ["PDF_ENCRYPTED: inspect is allowed for risk reporting, but PDF mutation/export operations are blocked by default."] : []),
             ...graph.caveats
         ]),
         untrusted: {
@@ -336,7 +340,34 @@ async function inspectPdf(input, options) {
         },
         objectMap: summaryDepth ? compactObjectMap(objectMap, 60) : objectMap,
         agentInstruction: AGENT_UNTRUSTED_INSTRUCTION
+    }, objectMap, input, options, graph.riskFlags);
+}
+function withObjectGraph(result, fullObjectMap, input, options, riskFlags = []) {
+    if (!options.includeObjectGraph && options.emit !== "object-graph")
+        return result;
+    return {
+        ...result,
+        objectGraph: buildObjectGraph(fullObjectMap, {
+            format: input.format,
+            inputPath: input.path,
+            inputSha256: result.trusted.sha256,
+            nodeOffset: options.objectGraph?.nodeOffset,
+            nodeLimit: options.objectGraph?.nodeLimit,
+            edgeOffset: options.objectGraph?.edgeOffset,
+            edgeLimit: options.objectGraph?.edgeLimit,
+            riskFlags
+        })
     };
+}
+function riskFlagsFromMacros(paths, code) {
+    return paths.length
+        ? [{
+                code,
+                severity: "warning",
+                message: "Macro project content was detected; inspect treats macros as package content only.",
+                source: paths[0]
+            }]
+        : [];
 }
 function groupPdfTextByPage(textBlocks) {
     const pages = new Map();

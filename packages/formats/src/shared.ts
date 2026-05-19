@@ -1,7 +1,7 @@
-import { readFile, writeFile, mkdir } from "node:fs/promises";
-import { dirname, extname, basename } from "node:path";
-import { createHash } from "node:crypto";
-import { getBuiltinConfig, inspectZipSafety, OfficegenError, type OfficegenConfig, type ZipSafetyReport } from "@officegen/core";
+import { readFile, writeFile, mkdir, rename, unlink } from "node:fs/promises";
+import { dirname, extname, basename, join } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+import { getBuiltinConfig, inspectZipSafety, OfficegenError, scanZipSafetyMetadata, type OfficegenConfig, type ZipSafetyReport } from "@officegen/core";
 import JSZip from "jszip";
 import type { PDFFont } from "pdf-lib";
 
@@ -159,8 +159,16 @@ export async function normalizeInput(input: InputLike, defaultFormat: OfficeForm
 
 export async function writeOutput(outPath: string | undefined, bytes: Uint8Array | Buffer | string): Promise<void> {
   if (!outPath) return;
-  await mkdir(dirname(outPath), { recursive: true });
-  await writeFile(outPath, bytes);
+  const outDir = dirname(outPath);
+  await mkdir(outDir, { recursive: true });
+  const tempPath = join(outDir, `.${basename(outPath)}.${process.pid}.${randomUUID()}.tmp`);
+  try {
+    await writeFile(tempPath, bytes);
+    await rename(tempPath, outPath);
+  } catch (error) {
+    await unlink(tempPath).catch(() => undefined);
+    throw error;
+  }
 }
 
 export function sha256(bytes: Uint8Array | string): string {
@@ -212,8 +220,29 @@ export async function inspectInputZipSafety(
 }
 
 export async function loadZip(input: NormalizedInput, options: LoadZipOptions = {}): Promise<JSZip> {
-  const report = await inspectInputZipSafety(input, options.zipSafety ?? true);
-  const zip = await JSZip.loadAsync(input.bytes, { checkCRC32: false });
+  const normalizedOptions = normalizeZipSafetyOptions(options.zipSafety ?? true);
+  let report: ZipSafetyReport | undefined;
+  let zip: JSZip;
+
+  if (normalizedOptions.enabled) {
+    const config = normalizedOptions.config ?? getBuiltinConfig("substrate");
+    const scanReport = scanZipSafetyMetadata(input.bytes, config, {
+      depth: normalizedOptions.depth,
+      compressionRatioLimit: normalizedOptions.compressionRatioLimit
+    });
+    throwIfZipSafetyFailed(scanReport, normalizedOptions.throwOnError);
+
+    zip = await JSZip.loadAsync(input.bytes, { checkCRC32: false });
+    report = await inspectZipSafety(input.bytes, config, {
+      depth: normalizedOptions.depth,
+      compressionRatioLimit: normalizedOptions.compressionRatioLimit,
+      preloadedZip: zip
+    });
+    throwIfZipSafetyFailed(report, normalizedOptions.throwOnError);
+  } else {
+    zip = await JSZip.loadAsync(input.bytes, { checkCRC32: false });
+  }
+
   assertLoadedZipEntries(zip);
   if (report) zipSafetyReports.set(zip, report);
   return zip;
@@ -333,6 +362,13 @@ function normalizeZipSafetyOptions(options: boolean | ZipSafetyLoadOptions): Req
     enabled: options.enabled ?? true,
     throwOnError: options.throwOnError ?? true
   };
+}
+
+function throwIfZipSafetyFailed(report: ZipSafetyReport, throwOnError: boolean): void {
+  if (throwOnError && !report.ok) {
+    const firstError = report.warnings.find((item) => item.severity === "error" || item.severity === "critical");
+    throw new Error(`Zip safety check failed${firstError ? `: ${firstError.code} ${firstError.message}` : "."}`);
+  }
 }
 
 function assertLoadedZipEntries(zip: JSZip): void {

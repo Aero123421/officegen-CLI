@@ -106,7 +106,7 @@ function redactValue(value, config, location, run) {
     if (typeof value === "string") {
         let text = value;
         const redactions = [];
-        if (config.security.redactAbsolutePathsInJson && !isMarkupPayload(text, location)) {
+        if (config.security.redactAbsolutePathsInJson && !isMarkupPayload(text, location) && !isJsonPointerLocation(location)) {
             const pathResult = redactPathsInText(text, config, location, run);
             text = pathResult.value;
             redactions.push(...pathResult.redactions);
@@ -155,5 +155,8 @@ function isMarkupPayload(text, location) {
     if (/\.xml$/i.test(location) && /^<\?xml\b/i.test(trimmed))
         return true;
     return false;
+}
+function isJsonPointerLocation(location) {
+    return /\.(?:instancePath|schemaPath)$/.test(location);
 }
 //# sourceMappingURL=redaction.js.map

@@ -10,7 +10,8 @@ const options = {
   gate: "visibility",
   json: false,
   suite: path.join(root, "goal", "acceptance-suite.perfect-spec-v2.json"),
-  matrix: path.join(root, "docs", "reviews", "v3.0.0-remediation-matrix.md"),
+  matrix: path.join(root, "docs", "reviews", "v3.1.0-remediation-matrix.md"),
+  v31EvidenceMatrix: path.join(root, "goal", "v3.1.0-evidence-matrix.json"),
   evidenceManifest: path.join(root, ".officegen", "acceptance", "perfect-spec", "manifest.json"),
   fixtureEvidence: path.join(root, ".officegen", "acceptance", "perfect-spec", "fixtures.json"),
   cliParity: path.join(root, ".officegen", "acceptance", "perfect-spec", "cli-parity.json"),
@@ -23,6 +24,7 @@ for (const arg of args) {
   else if (arg.startsWith("--gate=")) options.gate = arg.slice("--gate=".length);
   else if (arg.startsWith("--suite=")) options.suite = path.resolve(root, arg.slice("--suite=".length));
   else if (arg.startsWith("--matrix=")) options.matrix = path.resolve(root, arg.slice("--matrix=".length));
+  else if (arg.startsWith("--v31-evidence-matrix=")) options.v31EvidenceMatrix = path.resolve(root, arg.slice("--v31-evidence-matrix=".length));
   else if (arg.startsWith("--evidence-manifest=")) options.evidenceManifest = path.resolve(root, arg.slice("--evidence-manifest=".length));
   else if (arg.startsWith("--fixture-evidence=")) options.fixtureEvidence = path.resolve(root, arg.slice("--fixture-evidence=".length));
   else if (arg.startsWith("--cli-parity=")) options.cliParity = path.resolve(root, arg.slice("--cli-parity=".length));
@@ -67,6 +69,7 @@ checkCapabilityTruthfulness();
 checkFixtureEvidenceGate();
 checkCliParityGate();
 checkNativeRendererGate();
+checkV31RuntimeEvidenceGate();
 checkPublishGate();
 
 if (options.json) {
@@ -403,6 +406,8 @@ function checkCliParityGate() {
   for (const term of [
     "featureContracts",
     "formatCapabilities",
+    "runtimeProfiles",
+    "specProfile",
     "knownLimitations",
     "unsupportedNow",
     "SmartArt creation and full SmartArt editing are unsupported",
@@ -549,6 +554,85 @@ function checkDigestRecord(prefix, record, { requireNonEmpty }) {
   if (actualHash !== record.sha256) failures.push(`${record.path} sha256 mismatch`);
 }
 
+function checkV31RuntimeEvidenceGate() {
+  if (suite.release !== "3.1.0") return;
+  const matrixPath = relative(options.v31EvidenceMatrix);
+  const artifact = readJson(options.v31EvidenceMatrix);
+  if (!artifact || Object.keys(artifact).length === 0) return;
+
+  if (artifact.schema !== "officegen.v3.1.0.evidence-matrix@1.0") {
+    failures.push(`${matrixPath} has invalid v3.1.0 evidence matrix schema`);
+  }
+  if (artifact.release !== "3.1.0") failures.push(`${matrixPath} release must be 3.1.0`);
+
+  const phase0 = asRecord(artifact.phase0);
+  if (phase0.priority !== "P0") failures.push(`${matrixPath} phase0.priority must be P0`);
+  if (phase0.status !== "complete") failures.push(`${matrixPath} phase0.status must be complete`);
+  if (phase0.acceptanceId !== "L7-A013") failures.push(`${matrixPath} phase0.acceptanceId must be L7-A013`);
+
+  checkV31CapabilityProfiles(matrixPath, artifact);
+
+  const runtimeProjection = asRecord(artifact.runtimeProjection);
+  if (runtimeProjection.version !== "runtime-v2") failures.push(`${matrixPath} runtimeProjection.version must be runtime-v2`);
+  if (runtimeProjection.status !== "visible") failures.push(`${matrixPath} runtimeProjection.status must be visible`);
+  if (runtimeProjection.currentProfileId !== "current-limited-v3.1") failures.push(`${matrixPath} runtimeProjection.currentProfileId must be current-limited-v3.1`);
+  if (runtimeProjection.support !== "supported-current") failures.push(`${matrixPath} runtimeProjection.support must be supported-current`);
+  if (runtimeProjection.acceptanceId !== "L7-A014") failures.push(`${matrixPath} runtimeProjection.acceptanceId must be L7-A014`);
+
+  const requiredPhases = Array.isArray(runtimeProjection.requiredPhases) ? runtimeProjection.requiredPhases : [];
+  for (const phase of ["inspect", "select", "plan", "dry-run", "edit", "verify", "diff", "repair", "report"]) {
+    if (!requiredPhases.includes(phase)) failures.push(`${matrixPath} runtimeProjection.requiredPhases missing ${phase}`);
+  }
+  const requiredTerms = Array.isArray(runtimeProjection.requiredManifestTerms) ? runtimeProjection.requiredManifestTerms : [];
+  for (const term of ["skeleton-evidence", "does not execute complete autonomous repair"]) {
+    if (!requiredTerms.includes(term)) failures.push(`${matrixPath} runtimeProjection.requiredManifestTerms missing ${term}`);
+  }
+
+  const phase0Test = (suite.tests ?? []).find((test) => test.id === "L7-A013");
+  const runtimeTest = (suite.tests ?? []).find((test) => test.id === "L7-A014");
+  if (!phase0Test || phase0Test.status !== "ready" || phase0Test.blocking !== true) {
+    failures.push("L7-A013 must be ready and blocking for v3.1.0 Phase 0 P0 completion");
+  }
+  if (!runtimeTest || runtimeTest.status !== "ready" || runtimeTest.blocking !== true) {
+    failures.push("L7-A014 must be ready and blocking for v3.1.0 runtime-v2 office-agent projection");
+  }
+}
+
+function checkV31CapabilityProfiles(matrixPath, artifact) {
+  const capabilityProfiles = asRecord(artifact.capabilityProfiles);
+  if (capabilityProfiles.currentProfileId !== "current-limited-v3.1") {
+    failures.push(`${matrixPath} capabilityProfiles.currentProfileId must be current-limited-v3.1`);
+  }
+  if (capabilityProfiles.targetProfileId !== "perfect-runtime-target") {
+    failures.push(`${matrixPath} capabilityProfiles.targetProfileId must be perfect-runtime-target`);
+  }
+  if (!String(capabilityProfiles.truthfulnessPolicy ?? "").includes("current-limited-v3.1")) {
+    failures.push(`${matrixPath} capabilityProfiles.truthfulnessPolicy must mention current-limited-v3.1`);
+  }
+
+  const profileEvidence = Array.isArray(capabilityProfiles.profileEvidence) ? capabilityProfiles.profileEvidence : [];
+  const evidenceById = new Map(profileEvidence.map((entry) => [entry.id, entry]));
+  const runtimeV2 = asRecord(evidenceById.get("runtime-v2-projections"));
+  if (runtimeV2.currentStatus !== "supported") failures.push(`${matrixPath} runtime-v2-projections currentStatus must be supported`);
+  if (runtimeV2.targetStatus !== "supported") failures.push(`${matrixPath} runtime-v2-projections targetStatus must be supported`);
+
+  const remainingTargetGaps = Array.isArray(artifact.remainingTargetGaps) ? artifact.remainingTargetGaps : [];
+  if (remainingTargetGaps.length < 3) failures.push(`${matrixPath} remainingTargetGaps must list current-vs-target gaps`);
+  const gapsById = new Map(remainingTargetGaps.map((entry) => [entry.id, entry]));
+  for (const id of ["smartart-editing", "pdf-true-redaction"]) {
+    const gap = asRecord(gapsById.get(id));
+    if (!gap || Object.keys(gap).length === 0) {
+      failures.push(`${matrixPath} remainingTargetGaps missing ${id}`);
+      continue;
+    }
+    if (gap.currentProfile !== "current-limited-v3.1") failures.push(`${matrixPath} ${id} currentProfile must be current-limited-v3.1`);
+    if (gap.targetProfile !== "perfect-runtime-target") failures.push(`${matrixPath} ${id} targetProfile must be perfect-runtime-target`);
+    if (gap.currentStatus !== "unsupported") failures.push(`${matrixPath} ${id} currentStatus must be unsupported`);
+    if (gap.targetStatus !== "target-only") failures.push(`${matrixPath} ${id} targetStatus must be target-only`);
+    if (gap.requiredForPerfectRuntime !== true) failures.push(`${matrixPath} ${id} requiredForPerfectRuntime must be true`);
+  }
+}
+
 function checkPublishGate() {
   if (options.gate !== "publish") return;
   for (const test of suite.tests ?? []) {
@@ -566,6 +650,36 @@ function checkPublishGate() {
 
   checkPostTagSmokeGate();
   checkEvidenceManifest();
+  checkV31PublishEvidence();
+}
+
+function checkV31PublishEvidence() {
+  if (suite.release !== "3.1.0") return;
+  const manifest = readJson(options.evidenceManifest);
+  const artifacts = Array.isArray(manifest.artifacts) ? manifest.artifacts : [];
+  const evidenceArtifact = artifacts.find((artifact) => artifact.role === "v3.1.0-evidence-matrix");
+  if (!evidenceArtifact) {
+    failures.push(`${relative(options.evidenceManifest)} is missing v3.1.0-evidence-matrix artifact`);
+    return;
+  }
+  const artifactPath = path.resolve(root, evidenceArtifact.path);
+  const generated = readJson(artifactPath);
+  if (generated.schema !== "officegen.perfect-spec.v3.1.0-evidence-matrix@1.0") {
+    failures.push(`${evidenceArtifact.path} has invalid generated v3.1.0 evidence matrix schema`);
+  }
+  if (generated.release !== "3.1.0") failures.push(`${evidenceArtifact.path} release must be 3.1.0`);
+  if (asRecord(generated.phase0).status !== "complete") failures.push(`${evidenceArtifact.path} phase0.status must be complete`);
+  if (asRecord(generated.runtimeProjection).version !== "runtime-v2") failures.push(`${evidenceArtifact.path} runtimeProjection.version must be runtime-v2`);
+  if (asRecord(generated.capabilityProfiles).currentProfileId !== "current-limited-v3.1") {
+    failures.push(`${evidenceArtifact.path} capabilityProfiles.currentProfileId must be current-limited-v3.1`);
+  }
+  const remainingTargetGaps = Array.isArray(generated.remainingTargetGaps) ? generated.remainingTargetGaps : [];
+  if (!remainingTargetGaps.some((gap) => gap.id === "pdf-true-redaction" && gap.currentStatus === "unsupported" && gap.targetStatus === "target-only")) {
+    failures.push(`${evidenceArtifact.path} remainingTargetGaps must preserve pdf-true-redaction as current unsupported / target-only`);
+  }
+  if (asRecord(generated.publishGateConnection).requiresPostTagSmoke !== true) {
+    failures.push(`${evidenceArtifact.path} publishGateConnection.requiresPostTagSmoke must be true`);
+  }
 }
 
 function checkPostTagSmokeGate() {
@@ -651,6 +765,7 @@ function checkEvidenceManifest() {
   const postTagTest = (suite.tests ?? []).find((test) => test.id === "L7-A009");
   if (nativeTest?.status === "ready") requiredArtifactRoles.push("native-renderer");
   if (postTagTest?.status === "pending" || postTagTest?.status === "ready") requiredArtifactRoles.push("post-tag-smoke");
+  if (suite.release === "3.1.0") requiredArtifactRoles.push("v3.1.0-evidence-matrix");
   for (const role of requiredArtifactRoles) {
     if (!artifacts.some((artifact) => artifact.role === role)) {
       failures.push(`${manifestPath} is missing ${role} artifact`);
@@ -782,6 +897,6 @@ function relative(file) {
 
 function usage(message) {
   console.error(`perfect-spec:check: ${message}`);
-  console.error("usage: node scripts/check-perfect-spec.mjs [--gate=visibility|publish] [--json] [--suite=path] [--matrix=path] [--evidence-manifest=path] [--fixture-evidence=path] [--cli-parity=path] [--native-renderer=path] [--post-tag-smoke=path]");
+  console.error("usage: node scripts/check-perfect-spec.mjs [--gate=visibility|publish] [--json] [--suite=path] [--matrix=path] [--v31-evidence-matrix=path] [--evidence-manifest=path] [--fixture-evidence=path] [--cli-parity=path] [--native-renderer=path] [--post-tag-smoke=path]");
   process.exit(2);
 }

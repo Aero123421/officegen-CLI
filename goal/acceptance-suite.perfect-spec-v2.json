@@ -1,10 +1,10 @@
 {
   "schema": "officegen.perfect-spec.acceptance-suite@2.0",
-  "suiteId": "officegen-v3.0.0-perfect-spec-v2-l7",
-  "release": "3.0.0",
+  "suiteId": "officegen-v3.1.0-perfect-spec-v2-l7",
+  "release": "3.1.0",
   "level": "L7",
   "sourceSuite": "acceptance-suite.v2.6.0.json",
-  "remediationMatrix": "docs/reviews/v3.0.0-remediation-matrix.md",
+  "remediationMatrix": "docs/reviews/v3.1.0-remediation-matrix.md",
   "defaultGate": "visibility",
   "publishGate": "publish",
   "minimumPriorityCounts": {
@@ -22,8 +22,14 @@
     {
       "id": "CT-CAPABILITY-FIELDS",
       "source": "packages/core/src/capabilities.ts",
-      "remediationIds": ["V30-A001", "V30-A002", "V30-F001"],
-      "requiredTerms": ["featureContracts", "formatCapabilities", "knownLimitations", "unsupportedNow"]
+      "remediationIds": ["V30-A001", "V30-A002", "V30-F001", "V31-R003"],
+      "requiredTerms": ["featureContracts", "formatCapabilities", "runtimeProfiles", "specProfile", "knownLimitations", "unsupportedNow"]
+    },
+    {
+      "id": "CT-RUNTIME-PROFILES",
+      "source": "packages/core/src/capabilities.ts",
+      "remediationIds": ["V31-R001", "V31-R003"],
+      "requiredTerms": ["current-limited-v3.1", "perfect-runtime-target", "runtime-v2-projections", "pdf-true-redaction", "target-only"]
     },
     {
       "id": "CT-SMARTART",
@@ -267,7 +273,7 @@
       "statusReason": "GitHub tag and remote install smoke can only run after a tag or remote target exists.",
       "nextAction": "Run github-install tag/remote smoke after publishing and attach logs to release evidence.",
       "blocking": false,
-      "remediationIds": ["V30-H002"],
+      "remediationIds": ["V30-H002", "V31-S001", "V31-G004"],
       "capabilityTruthfulnessIds": [],
       "steps": [
         {
@@ -351,6 +357,65 @@
         "Publish mode has a deterministic path to fail unresolved blocking acceptance items."
       ],
       "evidence": ["scripts/check-perfect-spec.mjs"]
+    },
+    {
+      "id": "L7-A013",
+      "title": "v3.1.0 Phase 0 P0 completion is visible",
+      "priority": "P0",
+      "kind": "contract",
+      "status": "ready",
+      "blocking": true,
+      "remediationIds": ["V31-P000", "V31-A001", "V31-A002", "V31-A003", "V31-A004", "V31-A005", "V31-C001", "V31-C002", "V31-C003", "V31-C004", "V31-E001", "V31-E002", "V31-F001", "V31-F002", "V31-F003", "V31-G001", "V31-G002", "V31-G003", "V31-G005"],
+      "capabilityTruthfulnessIds": [],
+      "steps": [
+        {
+          "run": "npm run perfect-spec:check",
+          "expect": "Static gate confirms the v3.1.0 evidence matrix declares Phase 0 P0 complete."
+        },
+        {
+          "run": "npm run perfect-spec:evidence",
+          "expect": "Generated evidence manifest includes the v3.1.0 evidence matrix artifact."
+        }
+      ],
+      "passCriteria": [
+        "Phase 0 P0 is machine-readable as complete, not only described in prose.",
+        "The generated evidence matrix is connected to the L7 suite and publish gate."
+      ],
+      "evidence": [
+        "goal/v3.1.0-evidence-matrix.json",
+        ".officegen/acceptance/perfect-spec/v3.1.0-evidence-matrix.json"
+      ]
+    },
+    {
+      "id": "L7-A014",
+      "title": "Runtime v2 office-agent projection skeleton",
+      "priority": "P0",
+      "kind": "cli",
+      "status": "ready",
+      "blocking": true,
+      "remediationIds": ["V31-R001", "V31-R002", "V31-R003", "V31-B001", "V31-B002", "V31-B003", "V31-B004", "V31-B005", "V31-D001", "V31-D002", "V31-D003", "V31-D004"],
+      "capabilityTruthfulnessIds": ["CT-RUNTIME-PROFILES"],
+      "steps": [
+        {
+          "run": "officegen run office-agent --input <fixture> --goal <goal.md> --out .officegen/office-agent --manifest .officegen/office-agent/manifest.json --summary .officegen/office-agent/summary.md --agent --json",
+          "expect": "CLI writes a 13-phase runtime-v2 skeleton manifest and summary."
+        },
+        {
+          "run": "officegen help run office-agent --agent --json",
+          "expect": "Help describes the skeleton honestly and does not claim complete autonomous repair."
+        }
+      ],
+      "passCriteria": [
+        "The manifest contains exactly 13 phases.",
+        "inspect/select/plan/dry-run/edit/verify/diff/repair/report appear in the phase manifest.",
+        "The result exposes runtimeProjection=runtime-v2 and skeleton-evidence caveats.",
+        "Capabilities/help make the limitation visible."
+      ],
+      "evidence": [
+        "packages/cli/src/commands/payloads.ts",
+        "packages/cli/src/shared/metadata.ts",
+        "packages/cli/test/program.test.ts"
+      ]
     }
   ],
   "coverageExclusions": []

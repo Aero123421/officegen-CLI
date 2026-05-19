@@ -145,7 +145,7 @@ function baseConfig(profile, features) {
             }
         },
         agent: {
-            defaultJsonBudgetBytes: 65536,
+            defaultJsonBudgetBytes: 81920,
             inspectDefaultDepth: "summary",
             largeOutputMode: "path-only",
             requireCapabilitiesCheck: true

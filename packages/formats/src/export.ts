@@ -61,7 +61,8 @@ export async function exportDocument(input: InputLike | DocumentIR, options: Exp
 
   const normalized = await normalizeInput(input as InputLike, "unknown");
   if (normalized.format === "pdf" && options.to === "pdf") {
-    const pdf = await PDFDocument.load(normalized.bytes, { ignoreEncryption: true });
+    assertPdfMutationAllowed(normalized.bytes, "PDF export/normalization");
+    const pdf = await PDFDocument.load(normalized.bytes);
     const bytes = await pdf.save({ useObjectStreams: false });
     await writeOutput(options.out, bytes);
     return result(normalized.format, options, bytes, ["PDF was normalized through pdf-lib."]);
@@ -120,7 +121,8 @@ export async function mergePdfs(inputs: InputLike[], options: PdfOperationOption
   const output = await PDFDocument.create();
   for (const input of inputs) {
     const normalized = await normalizeInput(input, "pdf");
-    const source = await PDFDocument.load(normalized.bytes, { ignoreEncryption: true });
+    assertPdfMutationAllowed(normalized.bytes, "PDF merge");
+    const source = await PDFDocument.load(normalized.bytes);
     const pages = await output.copyPages(source, source.getPageIndices());
     for (const page of pages) output.addPage(page);
   }
@@ -132,7 +134,8 @@ export async function mergePdfs(inputs: InputLike[], options: PdfOperationOption
 export async function splitPdf(input: InputLike, ranges: Array<number[]>, options: PdfOperationOptions = {}): Promise<Array<ExportResult>> {
   assertOutputExtensionMatches("pdf", options.out);
   const normalized = await normalizeInput(input, "pdf");
-  const source = await PDFDocument.load(normalized.bytes, { ignoreEncryption: true });
+  assertPdfMutationAllowed(normalized.bytes, "PDF split");
+  const source = await PDFDocument.load(normalized.bytes);
   const results: ExportResult[] = [];
   for (const [rangeIndex, range] of ranges.entries()) {
     const output = await PDFDocument.create();
@@ -150,7 +153,8 @@ export async function splitPdf(input: InputLike, ranges: Array<number[]>, option
 export async function reorderPdf(input: InputLike, order: number[], options: PdfOperationOptions = {}): Promise<ExportResult> {
   assertOutputExtensionMatches("pdf", options.out);
   const normalized = await normalizeInput(input, "pdf");
-  const source = await PDFDocument.load(normalized.bytes, { ignoreEncryption: true });
+  assertPdfMutationAllowed(normalized.bytes, "PDF reorder");
+  const source = await PDFDocument.load(normalized.bytes);
   const output = await PDFDocument.create();
   const indices = order.map((page) => page - 1).filter((page) => page >= 0 && page < source.getPageCount());
   const pages = await output.copyPages(source, indices);
@@ -216,7 +220,7 @@ async function exportOfficeToPdfNative(
       input.path
     ], timeoutMs);
     const generated = await findConvertedPdf(outDir, input.path);
-    const pdf = await PDFDocument.load(await readFile(generated), { ignoreEncryption: true });
+    const pdf = await PDFDocument.load(await readFile(generated));
     const bytes = await pdf.save({ useObjectStreams: false });
     await writeOutput(options.out, bytes);
     return {
@@ -270,7 +274,7 @@ async function exportOfficeToPdfWithCom(
       throw new OfficegenError("EXPORT_UNSUPPORTED", `Office COM native export failed. ${result.stderr || result.stdout}`);
     }
     const bytes = await readFile(outPath);
-    const pdf = await PDFDocument.load(bytes, { ignoreEncryption: true });
+    const pdf = await PDFDocument.load(bytes);
     const saved = await pdf.save({ useObjectStreams: false });
     await writeOutput(options.out, saved);
     const report = await readJsonLoose(reportPath);
@@ -561,6 +565,20 @@ function assertNativeExportAllowed(config: OfficegenConfig | undefined): void {
     },
     { feature: "renderer" }
   );
+}
+
+function assertPdfMutationAllowed(bytes: Uint8Array, operation: string): void {
+  if (!hasPdfEncryptEntry(bytes)) return;
+  throw new OfficegenError(
+    "EXPORT_UNSUPPORTED",
+    `PDF_ENCRYPTED_BLOCKED: ${operation} is blocked for encrypted PDFs. Inspect can report PDF_ENCRYPTED risk flags, but mutation/export does not use ignoreEncryption by default.`,
+    { operation },
+    { feature: "security" }
+  );
+}
+
+function hasPdfEncryptEntry(bytes: Uint8Array): boolean {
+  return /\/Encrypt\b/.test(Buffer.from(bytes).toString("latin1"));
 }
 
 function assertOutputExtensionMatches(target: ExportOptions["to"], out?: string): void {

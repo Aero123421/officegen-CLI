@@ -8,6 +8,10 @@ export interface ViewOptions {
     dpi?: number;
     mode?: ExportMode;
     timeoutMs?: number;
+    objectId?: string;
+    crop?: boolean;
+    objectMapLimit?: number;
+    objectMapOffset?: number;
     config?: OfficegenConfig;
 }
 export interface ViewPage {
@@ -21,11 +25,51 @@ export interface ViewPage {
     renderer?: string;
     objectMap: ObjectMapEntry[];
 }
+export interface ViewCropArtifact {
+    objectId: string;
+    page: number;
+    format: "svg" | "html";
+    content: string;
+    width: number;
+    height: number;
+    renderer: string;
+    fidelity: "approximate" | "internal" | "native";
+    metadata: ViewCropMetadata;
+}
+export interface ViewCropMetadata {
+    requested: boolean;
+    objectId?: string;
+    status: "not_requested" | "created" | "object_not_found" | "bbox_unavailable";
+    source: "objectMap" | "objectGraph" | "none";
+    bbox?: [number, number, number, number];
+    page?: number;
+    padding: number;
+    objectKind?: string;
+    graphNodeId?: string;
+}
+export interface ViewCursor {
+    objectMapOffset: number;
+    objectMapLimit: number;
+    objectMapReturned: number;
+    objectMapTotal: number;
+    hasMore: boolean;
+    nextObjectMapOffset?: number;
+}
 export interface ViewResult {
     schema: "officegen.view.result@1.2";
     fidelity: "approximate" | "internal" | "native";
+    renderer: {
+        id: string;
+        mode: ExportMode | "approximate";
+        fidelity: "approximate" | "internal" | "native";
+    };
     caveats: string[];
     pages: ViewPage[];
+    crops: ViewCropArtifact[];
+    crop: ViewCropMetadata;
+    summary: Record<string, unknown>;
+    cursor?: ViewCursor;
+    nextActions: string[];
     objectMap: ObjectMapEntry[];
     trusted: {
         sourceSchema: string;

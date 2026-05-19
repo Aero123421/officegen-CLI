@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { computeCapabilitiesHash } from "./capabilities.js";
 import { OFFICEGEN_CLI_VERSION } from "./types.js";
@@ -76,8 +76,7 @@ export async function updateManifest(folder, updater) {
     return updated;
 }
 export async function appendTrace(folder, record) {
-    const existing = await readFile(folder.tracePath, "utf8").catch(() => "");
-    await writeFile(folder.tracePath, `${existing}${JSON.stringify(record)}\n`, "utf8");
+    await appendFile(folder.tracePath, `${JSON.stringify(record)}\n`, "utf8");
 }
 export async function sha256File(filePath) {
     const hash = createHash("sha256");

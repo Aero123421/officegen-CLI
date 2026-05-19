@@ -15,6 +15,7 @@ import {
 import { inspectParagraphs } from "./ooxml/docx.js";
 import { inspectSlides } from "./ooxml/pptx.js";
 import { inspectSheets } from "./ooxml/xlsx.js";
+import { buildObjectGraph, type BuildObjectGraphOptions, type ObjectGraph, type ObjectGraphRiskFlag } from "./graphs/objectGraph.js";
 import { inspectPdfObjectGraph } from "./pdf/objectGraph.js";
 import { PDFDocument } from "pdf-lib";
 
@@ -28,10 +29,14 @@ export interface InspectOptions {
   sheet?: string;
   range?: string;
   config?: OfficegenConfig;
+  emit?: "inspect" | "object-graph";
+  includeObjectGraph?: boolean;
+  objectGraph?: Pick<BuildObjectGraphOptions, "nodeOffset" | "nodeLimit" | "edgeOffset" | "edgeLimit">;
 }
 
 export interface InspectResult extends AgentSeparatedResult<Record<string, unknown>> {
   schema: "officegen.inspect.result@1.2";
+  objectGraph?: ObjectGraph;
 }
 
 export async function inspect(input: InputLike, options: InspectOptions = {}): Promise<InspectResult> {
@@ -71,7 +76,7 @@ async function inspectPptx(input: Awaited<ReturnType<typeof normalizeInput>>, op
     : slides;
 
   const macros = paths.filter((path) => /vbaProject\.bin$/i.test(path));
-  return {
+  return withObjectGraph({
     schema: "officegen.inspect.result@1.2",
     trusted: trustedMeta(
       "officegen.inspect.result@1.2",
@@ -117,7 +122,7 @@ async function inspectPptx(input: Awaited<ReturnType<typeof normalizeInput>>, op
     },
     objectMap: summaryDepth ? compactObjectMap(objectMap, 25) : objectMap,
     agentInstruction: AGENT_UNTRUSTED_INSTRUCTION
-  };
+  }, objectMap, input, options, riskFlagsFromMacros(macros, "PPTX_MACROS_PRESENT"));
 }
 
 function docxStructureObjectMap(structureMap: Record<string, unknown> | undefined): InspectResult["objectMap"] {
@@ -175,7 +180,8 @@ async function inspectDocx(input: Awaited<ReturnType<typeof normalizeInput>>, op
   const summaryDepth = options.depth === "summary";
   const structureMap = options.structure ? await inspectDocxStructure(zip, paths) : undefined;
 
-  return {
+  const fullObjectMap = [...objectMap, ...docxStructureObjectMap(structureMap)];
+  return withObjectGraph({
     schema: "officegen.inspect.result@1.2",
     trusted: trustedMeta(
       "officegen.inspect.result@1.2",
@@ -212,9 +218,9 @@ async function inspectDocx(input: Awaited<ReturnType<typeof normalizeInput>>, op
       })),
       ...(options.depth === "full" || options.include?.includes("rawPaths") ? { rawPaths: paths } : {})
     },
-    objectMap: summaryDepth ? compactObjectMap([...objectMap, ...docxStructureObjectMap(structureMap)], 35) : [...objectMap, ...docxStructureObjectMap(structureMap)],
+    objectMap: summaryDepth ? compactObjectMap(fullObjectMap, 35) : fullObjectMap,
     agentInstruction: AGENT_UNTRUSTED_INSTRUCTION
-  };
+  }, fullObjectMap, input, options, riskFlagsFromMacros(macros, "DOCX_MACROS_PRESENT"));
 }
 
 async function inspectXlsx(input: Awaited<ReturnType<typeof normalizeInput>>, options: InspectOptions): Promise<InspectResult> {
@@ -272,7 +278,7 @@ async function inspectXlsx(input: Awaited<ReturnType<typeof normalizeInput>>, op
         }))
       }))
     : namedSheets;
-  return {
+  return withObjectGraph({
     schema: "officegen.inspect.result@1.2",
     trusted: trustedMeta(
       "officegen.inspect.result@1.2",
@@ -311,7 +317,7 @@ async function inspectXlsx(input: Awaited<ReturnType<typeof normalizeInput>>, op
     },
     objectMap: summaryDepth ? compactObjectMap(scopedObjectMap, 50) : scopedObjectMap,
     agentInstruction: AGENT_UNTRUSTED_INSTRUCTION
-  };
+  }, scopedObjectMap, input, options, riskFlagsFromMacros(macros, "XLSX_MACROS_PRESENT"));
 }
 
 async function inspectPdf(input: Awaited<ReturnType<typeof normalizeInput>>, options: InspectOptions): Promise<InspectResult> {
@@ -345,7 +351,7 @@ async function inspectPdf(input: Awaited<ReturnType<typeof normalizeInput>>, opt
     modificationDate: pdf.getModificationDate()?.toISOString(),
     ...graph.metadata
   };
-  return {
+  return withObjectGraph({
     schema: "officegen.inspect.result@1.2",
     trusted: trustedMeta(
       "officegen.inspect.result@1.2",
@@ -356,12 +362,14 @@ async function inspectPdf(input: Awaited<ReturnType<typeof normalizeInput>>, opt
         annotations: graph.annotations.length,
         images: graph.scan.imageObjects,
         embeddedFiles: graph.scan.embeddedFiles,
+        encrypted: graph.scan.encrypted,
         unsupportedFilters: graph.scan.unsupportedFilters.length,
         riskFlags: graph.riskFlags.length
       },
       [
         "PDF text extraction is best-effort; scanned/image PDFs should be reviewed through page preview artifacts.",
         "PDF redact operations are intentionally blocked; overlay text or rectangles do not remove underlying content.",
+        ...(graph.scan.encrypted ? ["PDF_ENCRYPTED: inspect is allowed for risk reporting, but PDF mutation/export operations are blocked by default."] : []),
         ...graph.caveats
       ]
     ),
@@ -389,7 +397,41 @@ async function inspectPdf(input: Awaited<ReturnType<typeof normalizeInput>>, opt
     },
     objectMap: summaryDepth ? compactObjectMap(objectMap, 60) : objectMap,
     agentInstruction: AGENT_UNTRUSTED_INSTRUCTION
+  }, objectMap, input, options, graph.riskFlags);
+}
+
+function withObjectGraph(
+  result: InspectResult,
+  fullObjectMap: InspectResult["objectMap"],
+  input: Awaited<ReturnType<typeof normalizeInput>>,
+  options: InspectOptions,
+  riskFlags: ObjectGraphRiskFlag[] = []
+): InspectResult {
+  if (!options.includeObjectGraph && options.emit !== "object-graph") return result;
+  return {
+    ...result,
+    objectGraph: buildObjectGraph(fullObjectMap, {
+      format: input.format,
+      inputPath: input.path,
+      inputSha256: result.trusted.sha256,
+      nodeOffset: options.objectGraph?.nodeOffset,
+      nodeLimit: options.objectGraph?.nodeLimit,
+      edgeOffset: options.objectGraph?.edgeOffset,
+      edgeLimit: options.objectGraph?.edgeLimit,
+      riskFlags
+    })
   };
+}
+
+function riskFlagsFromMacros(paths: string[], code: string): ObjectGraphRiskFlag[] {
+  return paths.length
+    ? [{
+        code,
+        severity: "warning",
+        message: "Macro project content was detected; inspect treats macros as package content only.",
+        source: paths[0]
+      }]
+    : [];
 }
 
 function groupPdfTextByPage(textBlocks: Array<{ page: number; text: string }>): Map<number, string> {

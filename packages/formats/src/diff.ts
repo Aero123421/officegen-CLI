@@ -267,8 +267,8 @@ async function visualDiff(
 async function pdfByteVisualDiff(beforeInput: InputLike, afterInput: InputLike, options: DiffOptions): Promise<NonNullable<DiffResult["visual"]>> {
   const beforeNormalized = await normalizeInput(beforeInput);
   const afterNormalized = await normalizeInput(afterInput);
-  const beforeDoc = await PDFDocument.load(beforeNormalized.bytes, { ignoreEncryption: true });
-  const afterDoc = await PDFDocument.load(afterNormalized.bytes, { ignoreEncryption: true });
+  const beforeDoc = await loadPdfForReporting(beforeNormalized.bytes);
+  const afterDoc = await loadPdfForReporting(afterNormalized.bytes);
   const raster = await rasterPdfVisualDiff(beforeNormalized.bytes, afterNormalized.bytes, beforeDoc.getPageCount(), afterDoc.getPageCount(), "approximate", "pdfjs-canvas", options);
   if (raster.status === "compared") return raster;
   const pagesCompared = Math.min(beforeDoc.getPageCount(), afterDoc.getPageCount(), options.maxPages ?? Number.MAX_SAFE_INTEGER);
@@ -307,8 +307,8 @@ async function nativeVisualDiff(beforeInput: InputLike, afterInput: InputLike, o
     await exportDocument(afterInput, { to: "pdf", mode: "native", out: afterPdf, config: options.config });
     const beforeBytes = await readFile(beforePdf);
     const afterBytes = await readFile(afterPdf);
-    const beforeDoc = await PDFDocument.load(beforeBytes, { ignoreEncryption: true });
-    const afterDoc = await PDFDocument.load(afterBytes, { ignoreEncryption: true });
+    const beforeDoc = await loadPdfForReporting(beforeBytes);
+    const afterDoc = await loadPdfForReporting(afterBytes);
     const raster = await rasterPdfVisualDiff(beforeBytes, afterBytes, beforeDoc.getPageCount(), afterDoc.getPageCount(), "native", `${beforeExport.renderer?.id ?? "native"}+pdfjs-canvas`, options);
     if (raster.status === "compared") return raster;
     const pagesCompared = Math.min(beforeDoc.getPageCount(), afterDoc.getPageCount(), options.maxPages ?? Number.MAX_SAFE_INTEGER);
@@ -403,6 +403,10 @@ function blockedVisualDiff(fidelity: "approximate" | "native", message: string, 
     renderer,
     message
   };
+}
+
+function loadPdfForReporting(bytes: Uint8Array): Promise<PDFDocument> {
+  return PDFDocument.load(bytes, { ignoreEncryption: true });
 }
 
 function byteWindows(bytes: Uint8Array, windows: number): string[] {

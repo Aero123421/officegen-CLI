@@ -1,5 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import os from "node:os";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { diagnose } from "./diagnose.js";
 import { exportDocument } from "./export.js";
@@ -33,6 +32,7 @@ export interface VerifyGates {
 
 export interface VerifyResult {
   schema: "officegen.verify.result@1.2";
+  verificationReport: VerificationReportV2;
   readiness: "pass" | "pass_with_environment_gap" | "warning" | "blocked";
   partial?: boolean;
   phaseTimings?: Array<{ phase: string; durationMs: number; timeout?: boolean }>;
@@ -61,6 +61,28 @@ export interface VerifyResult {
   recommendedRepairs: Array<{ code: string; command?: string; reason: string }>;
   artifacts: Record<string, unknown>;
   gates?: { passed: boolean; failed: string[]; warnings: string[] };
+}
+
+export interface VerificationReportV2 {
+  schema: "officegen.verify@2";
+  version: 2;
+  format: string;
+  readiness: VerifyResult["readiness"];
+  score: number;
+  partial: boolean;
+  gates: Record<VerificationGateName, VerificationGateProjection>;
+  issues: Array<{ code: string; severity: "info" | "warning" | "error"; category: WarningCategory; message: string; gate?: VerificationGateName }>;
+  artifacts: Array<{ artifactId: string; role: string; path?: string; format?: string; managed: boolean; exists?: boolean; sourceCommand?: string }>;
+  recommendedRepairs: VerifyResult["recommendedRepairs"];
+}
+
+type VerificationGateName = "schema" | "package" | "semantic" | "visual" | "native" | "security" | "accessibility" | "goal";
+
+interface VerificationGateProjection {
+  status: "pass" | "warning" | "fail" | "skipped";
+  score?: number;
+  summary?: Record<string, unknown>;
+  issues: string[];
 }
 
 export async function verify(input: InputLike, options: VerifyOptions = {}): Promise<VerifyResult> {
@@ -210,6 +232,25 @@ export async function verify(input: InputLike, options: VerifyOptions = {}): Pro
     .map((risk) => ({ code: risk.code, reason: risk.repair ?? "", command: commandForRisk(risk.code, normalized.format) }));
   const result: VerifyResult = {
     schema: "officegen.verify.result@1.2",
+    verificationReport: buildVerificationReport({
+      format: normalized.format,
+      readiness,
+      partial,
+      score,
+      openable,
+      noRepairDialogExpected,
+      inspected,
+      diagnosed,
+      visual,
+      visualDiff,
+      nativeRenderer,
+      gateResult,
+      warnings,
+      blockingIssues,
+      warningSummary,
+      recommendedRepairs,
+      artifacts
+    }),
     readiness,
     partial,
     phaseTimings,
@@ -375,12 +416,21 @@ function hasVisiblePreviewObject(entry: { kind: string; text?: string; textPrevi
 async function verifyNative(input: Awaited<ReturnType<typeof normalizeInput>>, options: VerifyOptions, artifacts: Record<string, unknown>): Promise<NonNullable<VerifyResult["nativeRenderer"]>> {
   if (!["pptx", "docx", "xlsx"].includes(input.format)) return { attempted: false, ok: false, message: "Native renderer verification is only available for Office inputs." };
   if (!input.path) return { attempted: false, ok: false, message: "Native renderer verification requires an input file path." };
-  const dir = await mkdtemp(path.join(os.tmpdir(), "officegen-verify-"));
-  const pdfPath = path.join(dir, "native.pdf");
+  const artifactDir = managedVerifyArtifactDir(input.path, options.out);
+  await mkdir(artifactDir, { recursive: true });
+  const pdfPath = path.join(artifactDir, `${path.basename(input.path, path.extname(input.path))}.native.pdf`);
   try {
     const exported = await exportDocument(input.path, { to: "pdf", mode: "native", out: pdfPath, config: options.config, timeoutMs: options.timeoutMs });
-    const pdf = await PDFDocument.load(await import("node:fs/promises").then((fs) => fs.readFile(pdfPath)), { ignoreEncryption: true });
-    artifacts.nativePdf = pdfPath;
+    const pdf = await PDFDocument.load(await import("node:fs/promises").then((fs) => fs.readFile(pdfPath)));
+    artifacts.nativePdf = {
+      artifactId: "verify-native-pdf",
+      role: "native-render",
+      path: pdfPath,
+      format: "pdf",
+      managed: true,
+      exists: true,
+      sourceCommand: "verify --native"
+    };
     return {
       attempted: true,
       ok: true,
@@ -389,9 +439,163 @@ async function verifyNative(input: Awaited<ReturnType<typeof normalizeInput>>, o
       message: `Native renderer produced ${pdf.getPageCount()} PDF page(s) with ${exported.renderer?.id ?? "renderer"}.`
     };
   } catch (error) {
-    await rm(dir, { recursive: true, force: true });
+    await rm(pdfPath, { force: true });
     return { attempted: true, ok: false, message: error instanceof Error ? error.message : String(error) };
   }
+}
+
+function managedVerifyArtifactDir(inputPath: string, reportOut: string | undefined): string {
+  if (reportOut) {
+    return path.join(path.dirname(reportOut), `${path.basename(reportOut, path.extname(reportOut))}-artifacts`);
+  }
+  return path.join(path.dirname(inputPath), ".officegen", "verify-artifacts");
+}
+
+function buildVerificationReport(context: {
+  format: string;
+  readiness: VerifyResult["readiness"];
+  partial: boolean;
+  score: number;
+  openable: boolean;
+  noRepairDialogExpected: boolean;
+  inspected: Awaited<ReturnType<typeof inspect>> | undefined;
+  diagnosed: Awaited<ReturnType<typeof diagnose>> | undefined;
+  visual: VerifyResult["visual"] | undefined;
+  visualDiff: VerifyResult["visualDiff"] | undefined;
+  nativeRenderer: VerifyResult["nativeRenderer"] | undefined;
+  gateResult: VerifyResult["gates"] | undefined;
+  warnings: string[];
+  blockingIssues: string[];
+  warningSummary: VerifyResult["warningSummary"];
+  recommendedRepairs: VerifyResult["recommendedRepairs"];
+  artifacts: Record<string, unknown>;
+}): VerificationReportV2 {
+  const summary = (context.inspected?.trusted.summary ?? {}) as Record<string, unknown>;
+  const caveats = context.inspected?.trusted.caveats ?? [];
+  const riskFlags = asArrayRecord((context.inspected?.untrusted as Record<string, unknown> | undefined)?.pdfGraph)
+    .riskFlags as Array<{ code?: string; severity?: string; message?: string }> | undefined;
+  const securityIssues = [
+    ...context.warningSummary.filter((item) => item.category === "security").flatMap((item) => item.examples),
+    ...(riskFlags ?? []).filter((flag) => flag.severity === "warning" || flag.severity === "error").map((flag) => `${flag.code}: ${flag.message}`)
+  ];
+  const goalIssues = [...(context.gateResult?.failed ?? []), ...(context.gateResult?.warnings ?? [])];
+  const gates: VerificationReportV2["gates"] = {
+    schema: gate(context.openable && !context.blockingIssues.includes("INPUT_NOT_OPENABLE"), {
+      format: context.format,
+      openable: context.openable
+    }, context.openable ? [] : ["INPUT_NOT_OPENABLE"]),
+    package: gate(context.openable && context.noRepairDialogExpected, {
+      noRepairDialogExpected: context.noRepairDialogExpected,
+      caveatCount: caveats.length,
+      summary
+    }, [
+      ...context.blockingIssues.filter((issue) => /REPAIR|OPENABLE|PACKAGE|ZIP/i.test(issue)),
+      ...caveats.filter((caveat) => /repair|zip|package/i.test(caveat))
+    ]),
+    semantic: gate(Boolean(context.inspected), {
+      objectCount: context.inspected?.objectMap.length ?? 0,
+      textBlocks: summary.textBlocks,
+      textObjects: summary.textObjects
+    }, context.blockingIssues.filter((issue) => /TEXT|SEMANTIC|REQUIRED|FORBIDDEN/i.test(issue))),
+    visual: context.visual || context.visualDiff
+      ? gate(!(context.visualDiff?.status === "blocked") && !(context.visual?.blankPages && context.visual.blankPages > 0), {
+          fidelity: context.visual?.fidelity ?? context.visualDiff?.fidelity,
+          pagesChecked: context.visual?.pagesChecked,
+          blankPages: context.visual?.blankPages ?? 0,
+          diffStatus: context.visualDiff?.status
+        }, context.warnings.filter((issue) => /^VISUAL_|GATE_MAX_BLANK_PAGES/.test(issue)))
+      : skippedGate("Visual verification was not requested."),
+    native: context.nativeRenderer
+      ? gate(context.nativeRenderer.ok, {
+          attempted: context.nativeRenderer.attempted,
+          ok: context.nativeRenderer.ok,
+          repairDialogExpected: context.nativeRenderer.repairDialogExpected,
+          artifact: context.nativeRenderer.artifact
+        }, context.blockingIssues.filter((issue) => /NATIVE|REPAIR_DIALOG/i.test(issue)))
+      : skippedGate("Native renderer verification was not requested."),
+    security: securityIssues.length
+      ? { status: "warning", summary: { riskFlagCount: riskFlags?.length ?? 0 }, issues: securityIssues }
+      : { status: "pass", summary: { riskFlagCount: riskFlags?.length ?? 0 }, issues: [] },
+    accessibility: skippedGate("Accessibility checks are not implemented for this format yet."),
+    goal: context.gateResult
+      ? gate(context.gateResult.passed, {
+          passed: context.gateResult.passed,
+          failed: context.gateResult.failed.length,
+          warnings: context.gateResult.warnings.length
+        }, goalIssues)
+      : skippedGate("No explicit verification gates were supplied.")
+  };
+  return {
+    schema: "officegen.verify@2",
+    version: 2,
+    format: context.format,
+    readiness: context.readiness,
+    score: context.score,
+    partial: context.partial,
+    gates,
+    issues: reportIssues(context.warningSummary, context.blockingIssues, gates),
+    artifacts: reportArtifacts(context.artifacts),
+    recommendedRepairs: context.recommendedRepairs
+  };
+}
+
+function gate(ok: boolean, summary: Record<string, unknown>, issues: string[]): VerificationGateProjection {
+  return {
+    status: ok ? issues.length ? "warning" : "pass" : "fail",
+    summary,
+    issues
+  };
+}
+
+function skippedGate(reason: string): VerificationGateProjection {
+  return { status: "skipped", issues: [reason] };
+}
+
+function reportIssues(
+  warningSummary: VerifyResult["warningSummary"],
+  blockingIssues: string[],
+  gates: VerificationReportV2["gates"]
+): VerificationReportV2["issues"] {
+  const gateByIssue = new Map<string, VerificationGateName>();
+  for (const [gateName, projection] of Object.entries(gates) as Array<[VerificationGateName, VerificationGateProjection]>) {
+    for (const issue of projection.issues) gateByIssue.set(issue, gateName);
+  }
+  const warnings = warningSummary.flatMap((item) => item.examples.map((message) => ({
+    code: item.code,
+    severity: item.severity,
+    category: item.category,
+    message,
+    gate: gateByIssue.get(message)
+  })));
+  const blocking = blockingIssues.map((message) => ({
+    code: message.split(":")[0]?.trim() || message,
+    severity: "error" as const,
+    category: warningCategory(message.split(":")[0]?.trim() || message),
+    message,
+    gate: gateByIssue.get(message)
+  }));
+  return [...warnings, ...blocking];
+}
+
+function reportArtifacts(artifacts: Record<string, unknown>): VerificationReportV2["artifacts"] {
+  return Object.entries(artifacts).flatMap(([key, value]) => {
+    const record = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+    const pathValue = typeof record.path === "string" ? record.path : typeof value === "string" ? value : undefined;
+    if (!pathValue && !Object.keys(record).length) return [];
+    return [{
+      artifactId: String(record.artifactId ?? key),
+      role: String(record.role ?? key),
+      path: pathValue,
+      format: typeof record.format === "string" ? record.format : undefined,
+      managed: record.managed !== false,
+      exists: typeof record.exists === "boolean" ? record.exists : undefined,
+      sourceCommand: typeof record.sourceCommand === "string" ? record.sourceCommand : undefined
+    }];
+  });
+}
+
+function asArrayRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
 export const verifyDocument = verify;

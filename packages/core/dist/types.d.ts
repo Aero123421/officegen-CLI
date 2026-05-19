@@ -1,5 +1,5 @@
 export declare const OFFICEGEN_SCHEMA_VERSION = "1.2";
-export declare const OFFICEGEN_CLI_VERSION = "3.0.0";
+export declare const OFFICEGEN_CLI_VERSION = "3.1.0";
 export declare const SCHEMA_REGISTRY_VERSION = "1.2.0";
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | {
@@ -137,6 +137,7 @@ export interface CapabilityContract {
     summary: string;
     limitations: string[];
 }
+export type RuntimeProfileId = "current-limited-v3.1" | "perfect-runtime-target";
 export interface CapabilitiesDocument {
     schema: "officegen.capabilities@1.2";
     ok: true;
@@ -149,6 +150,8 @@ export interface CapabilitiesDocument {
     jsonBudgetBytes: number;
     featureContracts: CapabilityContract[];
     formatCapabilities: JsonObject;
+    runtimeProfiles: JsonObject;
+    specProfile: JsonObject;
     knownLimitations: string[];
     unsupportedNow: string[];
     nextSuggestedCommands: string[];
@@ -226,7 +229,7 @@ export interface RedactionResult<T> {
     redactions: RedactionRecord[];
 }
 export interface ZipSafetyWarning {
-    code: "ZIP_PATH_TRAVERSAL" | "ZIP_ENTRY_LIMIT_EXCEEDED" | "ZIP_EXPANDED_BYTES_EXCEEDED" | "ZIP_COMPRESSION_RATIO_EXCEEDED" | "ZIP_NESTED_ZIP_DETECTED" | "ZIP_XML_PART_TOO_LARGE" | "ZIP_XML_ENTITY_DENIED" | "ZIP_RELATIONSHIP_LIMIT_EXCEEDED" | "ZIP_EXTERNAL_RELATIONSHIP" | "ZIP_MACRO_DETECTED" | "ZIP_EMBEDDED_OBJECT";
+    code: "ZIP_PATH_TRAVERSAL" | "ZIP_DUPLICATE_ENTRY" | "ZIP_ENCRYPTED_ENTRY" | "ZIP64_UNSUPPORTED" | "ZIP_CENTRAL_DIRECTORY_INVALID" | "ZIP_ENTRY_LIMIT_EXCEEDED" | "ZIP_EXPANDED_BYTES_EXCEEDED" | "ZIP_COMPRESSION_RATIO_EXCEEDED" | "ZIP_NESTED_ZIP_DETECTED" | "ZIP_XML_PART_TOO_LARGE" | "ZIP_XML_ENTITY_DENIED" | "ZIP_RELATIONSHIP_LIMIT_EXCEEDED" | "ZIP_EXTERNAL_RELATIONSHIP" | "ZIP_MACRO_DETECTED" | "ZIP_EMBEDDED_OBJECT";
     severity: ErrorSeverity;
     message: string;
     entry?: string;

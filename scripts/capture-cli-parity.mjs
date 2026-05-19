@@ -130,6 +130,10 @@ const parityAssertions = buildParityAssertions(commands);
 const capabilityTerms = [
   "featureContracts",
   "formatCapabilities",
+  "runtimeProfiles",
+  "specProfile",
+  "current-limited-v3.1",
+  "perfect-runtime-target",
   "knownLimitations",
   "unsupportedNow",
   "SmartArt creation and full SmartArt editing are unsupported",
@@ -242,7 +246,7 @@ function parseOutput(spec, stdout, exitCode) {
     format: "text",
     schemaId: null,
     resultSchemaId: null,
-    ok: exitCode === 0 && /completed/i.test(stdout),
+    ok: exitCode === 0 && (spec.parse === "human-ok" ? stdout.trim().length > 0 : /completed/i.test(stdout)),
     status: exitCode === 0 ? "completed" : "failed"
   };
 }

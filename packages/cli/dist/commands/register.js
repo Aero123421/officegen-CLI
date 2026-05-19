@@ -2,9 +2,8 @@ import { Command } from "commander";
 import { OFFICEGEN_CLI_VERSION } from "../../../core/dist/index.js";
 import { commandFromArgv, positionalArgs } from "../shared/argv.js";
 import { makeEnvelope, writeResult } from "../shared/envelope.js";
-import { COMMAND_METADATA, metadataFor } from "../shared/metadata.js";
-import { CliFailure } from "../shared/types.js";
-import { agentPayload, assetPayload, capabilitiesPayload, chartPayload, configPayload, designPayload, diagnosePayload, diffPayload, preparePayload, manifestPayload, selectPayload, planPayload, rollbackPayload, lockPayload, mergePayload, critiquePayload, improvePayload, benchmarkPayload, diagramPayload, doctorPayload, editPayload, errorInspectPayload, errorsListPayload, exportPayload, groupPayload, helpPayload, inspectPayload, layoutPayload, mcpPayload, pluginPayload, renderPayload, rendererPayload, repairPayload, runPayload, scaffoldPayload, schemaGetPayload, schemaListPayload, schemaMigratePayload, templatePayload, validatePayload, verifyPayload, viewPayload } from "./payloads.js";
+import { COMMAND_METADATA, acceptedOptionSpecsFor, effectiveOptionSpecsFor, metadataFor, optionSyntax } from "../shared/metadata.js";
+import { agentPayload, assetPayload, capabilitiesPayload, chartPayload, configPayload, configSetPayload, designPayload, diagnosePayload, diffPayload, preparePayload, manifestPayload, selectPayload, planPayload, rollbackPayload, lockPayload, mergePayload, critiquePayload, improvePayload, benchmarkPayload, diagramPayload, doctorPayload, editPayload, errorInspectPayload, errorsListPayload, exportPayload, groupPayload, helpPayload, inspectPayload, layoutPayload, mcpPayload, pluginPayload, renderPayload, rendererPayload, repairPayload, runPayload, scaffoldPayload, schemaGetPayload, schemaListPayload, schemaMigratePayload, templatePayload, validatePayload, verifyPayload, viewPayload } from "./payloads.js";
 const leafPayloads = {
     capabilities: capabilitiesPayload,
     help: (ctx) => helpPayload(ctx, positionalArgs(ctx.argv, 3)),
@@ -174,6 +173,8 @@ export function writeCommandHelp(context, commandGroup, subcommand, stdout) {
     stdout(lines.join("\n"));
 }
 function usageSuffix(commandGroup, subcommand) {
+    if (commandGroup === "config" && subcommand === "set")
+        return " <key> <value>";
     if (commandGroup === "inspect" || commandGroup === "view" || commandGroup === "diagnose" || commandGroup === "repair" || commandGroup === "export" || commandGroup === "verify")
         return " <input>";
     if (commandGroup === "diff")
@@ -210,6 +211,8 @@ function usageSuffix(commandGroup, subcommand) {
         return " <before.json> <after.json>";
     if (commandGroup === "benchmark")
         return " [manifest.json]";
+    if (commandGroup === "run" && subcommand === "office-agent")
+        return " office-agent --input <file> --goal <goal.md> --out <dir>";
     return "";
 }
 function commandExamples(commandGroup, subcommand) {
@@ -218,8 +221,21 @@ function commandExamples(commandGroup, subcommand) {
             "officegen inspect deck.pptx --depth summary --agent --json",
             "officegen inspect workbook.xlsx --depth full --json-budget-bytes 500000 --json"
         ];
+    if (commandGroup === "config" && subcommand === "set")
+        return [
+            "officegen config set features.design.visibleToAgents false --scope project --json",
+            "officegen config set profile authoring --scope user --json"
+        ];
+    if (commandGroup === "config")
+        return [
+            "officegen config show --json",
+            "officegen config set features.design.visibleToAgents false --scope project --json"
+        ];
     if (commandGroup === "view")
-        return ["officegen view deck.pptx --out .officegen/runs/deck-view --json"];
+        return [
+            "officegen view deck.pptx --out .officegen/runs/deck-view --json",
+            "officegen view deck.pptx --object <stableObjectId> --crop --out .officegen/runs/object-crop --json"
+        ];
     if (commandGroup === "edit")
         return [
             "officegen edit deck.pptx --ops ops.json --dry-run --resolve-selectors --agent --json",
@@ -231,8 +247,16 @@ function commandExamples(commandGroup, subcommand) {
         return ["officegen diff before.pptx after.pptx --visual --json"];
     if (commandGroup === "prepare")
         return ["officegen prepare --reference problem.pdf --target deck.pptx --out .officegen/run --json"];
+    if (commandGroup === "run" && subcommand === "office-agent")
+        return [
+            "officegen run office-agent --input deck.pptx --goal goal.md --out .officegen/office-agent --manifest .officegen/office-agent/manifest.json --summary .officegen/office-agent/summary.md --agent --json"
+        ];
     if (commandGroup === "run")
-        return ["officegen run plan.json --manifest .officegen/run-manifest.json --json", "officegen run prepare-reference --reference problem.pdf --target deck.pptx --out .officegen/run --json"];
+        return [
+            "officegen run plan.json --manifest .officegen/run-manifest.json --json",
+            "officegen run prepare-reference --reference problem.pdf --target deck.pptx --out .officegen/run --json",
+            "officegen run office-agent --input deck.pptx --goal goal.md --out .officegen/office-agent --agent --json"
+        ];
     if (commandGroup === "verify")
         return ["officegen verify deck.pptx --visual --json", "officegen verify deck.pptx --gates gates.json --json", "OFFICEGEN_PROFILE=enterprise officegen verify deck.pptx --native --out verify-report.json --json"];
     if (commandGroup === "asset" && subcommand === "replace")
@@ -286,92 +310,55 @@ function commandExamples(commandGroup, subcommand) {
         return ["officegen schema list --agent --json", "officegen schema validate deck.ir.json --schema officegen.ir.document@1.2 --json"];
     return [`officegen ${subcommand ? `${commandGroup} ${subcommand}` : commandGroup} --json`];
 }
+const optionHelpLines = (specs) => specs.map((spec) => `  ${optionSyntax(spec).padEnd(30)} ${spec.description}`);
 function commandSpecificHelpOptions(commandGroup, subcommand) {
-    if (commandGroup === "inspect")
+    const optionLines = optionHelpLines(effectiveOptionSpecsFor(commandGroup, subcommand));
+    if (commandGroup === "config" && subcommand === "set")
         return [
-            "  --depth <summary|shallow|full>  inspection depth",
-            "  --structure                    include DOCX structure map",
-            "  --sheet <name>                 limit XLSX inspect to a sheet",
-            "  --range <range>                limit XLSX inspect to an A1 range",
-            "  --fields <csv>                 project selected top-level result fields",
-            "  --object-map-limit <number>    limit object map entries",
-            "  --report-out <path>            write JSON report"
-        ];
-    if (commandGroup === "edit")
-        return [
-            "  --ops <path>                   edit operations JSON",
-            "  --out <path>                   output Office path",
-            "  --dry-run                      resolve without writing",
-            "  --resolve-selectors            include selector resolution details",
-            "  --overwrite                    allow overwriting an existing output"
+            "  --scope <project|user>         config file to update; default project",
+            "  key allowlist                  profile, paths.*, features.<name>.*, security.*, agent.* leaves",
+            "  value                          JSON scalar/array value, or plain string for enum values"
         ];
     if (commandGroup === "improve")
         return [
-            "  --dry-run                      optional; improve is always plan-only",
-            "  --profile <profile>            critique/improve profile",
-            "  --report-out <path>            write the improvement plan JSON",
+            ...optionLines,
             "  planOnly: true; mutatesOffice: false",
             "  successCondition: returns actionable suggestions; no Office artifact is expected"
         ];
     if (commandGroup === "benchmark")
         return [
-            "  --manifest <path>              benchmark manifest JSON",
-            "  --report-out <path>            write benchmark JSON report",
+            ...optionLines,
             "  positional manifest.json       alias for benchmark run --manifest manifest.json",
             "  setup: run npm run benchmark:fetch before public corpus runs"
         ];
+    if (commandGroup === "run" && subcommand === "office-agent")
+        return [
+            ...optionLines,
+            "  skeletonOnly: true             writes a 13-phase manifest; does not execute full autonomous repair",
+            "  phases                         preflight/intake/inspect/view/select/plan/dry-run/edit/verify/diff/repair/report/handoff"
+        ];
     if (commandGroup === "chart" && subcommand === "render")
         return [
-            "  --out <path>                   write rendered SVG to disk",
+            ...optionLines,
             "  input: JSON chart spec with title, data.values, and encoding fields"
         ];
     if (commandGroup === "diagram" && subcommand === "render")
         return [
-            "  --out <path>                   write rendered SVG to disk",
+            ...optionLines,
             "  input: Mermaid-like text with simple A-->B edges"
         ];
     if (commandGroup === "layout" && subcommand === "apply")
         return [
-            "  --out <path>                   write plan JSON or mutate PPTX when output ends in .pptx",
-            "  --overwrite                    allow overwriting an existing PPTX output",
+            ...optionLines,
             "  input: JSON plan with boxes, constraints, and optional targetPath"
         ];
-    if (commandGroup === "run")
-        return [
-            "  --reference <path>            reference file for prepare-reference mode",
-            "  --target <path>               target file for prepare-reference mode",
-            "  --out <dir>                   output directory for prepare-reference mode",
-            "  --max-pages <number>          maximum preview pages",
-            "  --manifest <path>             write run manifest for plan mode",
-            "  --log-jsonl <path>            write JSONL run log for plan mode",
-            "  --summary <path>              write Markdown summary for plan mode",
-            "  --output-root <path>          restrict plan outputs to a directory",
-            "  --expected-artifacts <path>   expected artifact list for plan mode"
-        ];
-    if (commandGroup === "prepare")
-        return [
-            "  --reference <path>            reference file path",
-            "  --target <path>               target Office/PDF file path",
-            "  --out <dir>                   output directory for prepared artifacts",
-            "  --max-pages <number>          maximum preview pages",
-            "  --output-root <path>          restrict outputs to a directory",
-            "  --deny-outside-output-root    fail outputs outside --output-root"
-        ];
-    if (commandGroup === "asset" && subcommand === "inspect")
-        return [
-            "  --embedded                     list embedded media inside PPTX/DOCX/XLSX packages"
-        ];
-    if (commandGroup === "design" && subcommand === "capture")
-        return [
-            "  --name <name>                  design pack name; run design init first if missing"
-        ];
-    return [];
+    return optionLines;
 }
 function registerLeaf(program, feature, context, stdout, now, payloadFactory) {
     const metadata = metadataFor(feature);
     if (!metadata || !isCommandVisibleInNativeHelp(context, feature))
         return;
-    program.addCommand(baseCommand(metadata.commandGroup, metadata.description).action(async () => {
+    program.addCommand(baseCommand(metadata.commandGroup, metadata.description, metadata.commandGroup).action(async () => {
         if (feature === "help" && !context.json) {
             writeNativeHelp(context, stdout);
             return;
@@ -385,12 +372,12 @@ function registerGroup(program, feature, context, stdout, now, payloadFactory) {
     if (!metadata || !isCommandVisibleInNativeHelp(context, feature))
         return;
     const subcommands = metadata.commands.map((command) => command.split(" ")[1]).filter((value) => Boolean(value));
-    const group = baseCommand(metadata.commandGroup, metadata.description).action(async () => {
+    const group = baseCommand(metadata.commandGroup, metadata.description, metadata.commandGroup).action(async () => {
         const payload = await payloadFactory(context);
         writeResult(context, makeEnvelope(context, commandFromArgv(context.argv), payload, now), stdout);
     });
     for (const subcommand of subcommands) {
-        group.addCommand(baseCommand(subcommand, `${metadata.commandGroup} ${subcommand}`).action(async () => {
+        group.addCommand(baseCommand(subcommand, `${metadata.commandGroup} ${subcommand}`, metadata.commandGroup, subcommand).action(async () => {
             const payload = await payloadFactory(context, subcommand);
             writeResult(context, makeEnvelope(context, commandFromArgv(context.argv), payload, now), stdout);
         }));
@@ -401,18 +388,14 @@ function registerConfig(program, context, stdout, now) {
     if (!isCommandVisibleInNativeHelp(context, "config"))
         return;
     const metadata = metadataFor("config");
-    const config = baseCommand("config", metadata.description).action(async () => {
+    const config = baseCommand("config", metadata.description, "config").action(async () => {
         writeResult(context, makeEnvelope(context, commandFromArgv(context.argv), configPayload(context), now), stdout);
     });
-    config.addCommand(baseCommand("show", "show active config").action(async () => {
+    config.addCommand(baseCommand("show", "show active config", "config", "show").action(async () => {
         writeResult(context, makeEnvelope(context, commandFromArgv(context.argv), configPayload(context), now), stdout);
     }));
-    config.addCommand(baseCommand("set", "set config value").action(async () => {
-        throw new CliFailure({
-            code: "FEATURE_NOT_IMPLEMENTED",
-            command: "config set",
-            message: "config set does not persist configuration yet. Use config show to inspect active settings."
-        }, 5);
+    config.addCommand(baseCommand("set", "set config value", "config", "set").action(async () => {
+        writeResult(context, makeEnvelope(context, commandFromArgv(context.argv), await configSetPayload(context), now), stdout);
     }));
     program.addCommand(config);
 }
@@ -420,25 +403,25 @@ function registerSchema(program, context, stdout, now) {
     if (!isCommandVisibleInNativeHelp(context, "schema"))
         return;
     const metadata = metadataFor("schema");
-    const schema = baseCommand("schema", metadata.description).action(async () => {
+    const schema = baseCommand("schema", metadata.description, "schema").action(async () => {
         writeResult(context, makeEnvelope(context, commandFromArgv(context.argv), schemaListPayload(context), now), stdout);
     });
-    schema.addCommand(baseCommand("list", "list schemas").action(async () => writeResult(context, makeEnvelope(context, commandFromArgv(context.argv), schemaListPayload(context), now), stdout)));
-    schema.addCommand(baseCommand("get", "get schema").action(async () => writeResult(context, makeEnvelope(context, commandFromArgv(context.argv), schemaGetPayload(context), now), stdout)));
-    schema.addCommand(baseCommand("fetch", "alias for schema get").action(async () => writeResult(context, makeEnvelope(context, commandFromArgv(context.argv), schemaGetPayload(context), now), stdout)));
-    schema.addCommand(baseCommand("validate", "validate schema").action(async () => writeResult(context, makeEnvelope(context, commandFromArgv(context.argv), await validatePayload(context), now), stdout)));
-    schema.addCommand(baseCommand("migrate", "migrate schema").action(async () => writeResult(context, makeEnvelope(context, commandFromArgv(context.argv), await schemaMigratePayload(context), now), stdout)));
+    schema.addCommand(baseCommand("list", "list schemas", "schema", "list").action(async () => writeResult(context, makeEnvelope(context, commandFromArgv(context.argv), schemaListPayload(context), now), stdout)));
+    schema.addCommand(baseCommand("get", "get schema", "schema", "get").action(async () => writeResult(context, makeEnvelope(context, commandFromArgv(context.argv), schemaGetPayload(context), now), stdout)));
+    schema.addCommand(baseCommand("fetch", "alias for schema get", "schema", "fetch").action(async () => writeResult(context, makeEnvelope(context, commandFromArgv(context.argv), schemaGetPayload(context), now), stdout)));
+    schema.addCommand(baseCommand("validate", "validate schema", "schema", "validate").action(async () => writeResult(context, makeEnvelope(context, commandFromArgv(context.argv), await validatePayload(context), now), stdout)));
+    schema.addCommand(baseCommand("migrate", "migrate schema", "schema", "migrate").action(async () => writeResult(context, makeEnvelope(context, commandFromArgv(context.argv), await schemaMigratePayload(context), now), stdout)));
     program.addCommand(schema);
 }
 function registerErrors(program, context, stdout, now) {
     if (!isCommandVisibleInNativeHelp(context, "errors"))
         return;
     const metadata = metadataFor("errors");
-    const errors = baseCommand("errors", metadata.description).action(async () => {
+    const errors = baseCommand("errors", metadata.description, "errors").action(async () => {
         writeResult(context, makeEnvelope(context, commandFromArgv(context.argv), errorsListPayload(), now), stdout);
     });
-    errors.addCommand(baseCommand("list", "list errors").action(async () => writeResult(context, makeEnvelope(context, commandFromArgv(context.argv), errorsListPayload(), now), stdout)));
-    errors.addCommand(baseCommand("inspect", "inspect error").action(async () => writeResult(context, makeEnvelope(context, commandFromArgv(context.argv), errorInspectPayload(context), now), stdout)));
+    errors.addCommand(baseCommand("list", "list errors", "errors", "list").action(async () => writeResult(context, makeEnvelope(context, commandFromArgv(context.argv), errorsListPayload(), now), stdout)));
+    errors.addCommand(baseCommand("inspect", "inspect error", "errors", "inspect").action(async () => writeResult(context, makeEnvelope(context, commandFromArgv(context.argv), errorInspectPayload(context), now), stdout)));
     program.addCommand(errors);
 }
 function isCommandVisibleInNativeHelp(context, feature) {
@@ -447,83 +430,19 @@ function isCommandVisibleInNativeHelp(context, feature) {
     const entry = context.registry.find((candidate) => candidate.commandGroup === feature);
     return Boolean(entry?.enabled && entry.visibleInHelp && (!context.agent || entry.visibleToAgents));
 }
-function baseCommand(name, description) {
+function baseCommand(name, description, commandGroup, subcommand) {
     const command = new Command(name);
     suppressCommanderOutput(command);
-    return command
+    command
         .description(description)
         .allowUnknownOption(false)
         .allowExcessArguments(true)
         .argument("[args...]", "arguments")
-        .option("--json", "emit JSON envelope")
-        .option("--agent", "filter output for agents")
-        .option("--strict-json", "force JSON-only stdout for agent execution")
-        .option("--capabilities-hash <hash>", "expected active capabilities hash")
-        .option("--json-budget-bytes <bytes>", "agent JSON output budget")
-        .option("--report-out <path>", "write JSON report for report-style commands")
-        .option("--depth <depth>", "inspection depth")
-        .option("--format <format>", "view/export format")
-        .option("--max-pages <number>", "maximum pages")
-        .option("--dpi <dpi>", "raster render resolution for PNG/JPEG view output")
-        .option("--slides <range>", "limit PPTX operations to slides")
-        .option("--pages <range>", "limit PDF/page operations to pages")
-        .option("--object-map-limit <number>", "limit object map entries in output")
-        .option("--no-object-map", "omit object map arrays from output")
-        .option("--matches-only", "emit only selector matches for select output")
-        .option("--summary-only", "emit compact summaries for large candidate outputs")
-        .option("--fields <csv>", "project selected top-level result fields")
-        .option("--out <path>", "output path")
-        .option("--overwrite", "allow overwriting an existing output")
-        .option("--schema <id>", "schema id")
-        .option("--kind <kind>", "document kind")
-        .option("--title <title>", "document title")
-        .option("--ops <path>", "edit operations JSON")
-        .option("--dry-run", "resolve without writing")
-        .option("--resolve-selectors", "include selector resolution details")
-        .option("--to <format>", "export target format")
-        .option("--mode <mode>", "export mode")
-        .option("--issues <path>", "repair issues JSON")
-        .option("--gates <path>", "verification gates JSON")
-        .option("--verify <list>", "verification gates for integrated workflows")
-        .option("--goal <path>", "natural-language goal or constraints file")
-        .option("--input <path>", "input file for integrated workflows")
-        .option("--tx <path>", "transaction record JSON")
-        .option("--tx-out <path>", "write transaction record JSON")
-        .option("--lock <path>", "lock file JSON")
-        .option("--owner <agent>", "lock owner agent id; preferred over lock --agent <id>")
-        .option("--images", "extract image assets")
-        .option("--embedded", "inspect embedded media in Office packages")
-        .option("--visual", "include approximate visual diff/regression output")
-        .option("--native", "use native renderer when enabled by policy")
-        .option("--timeout-ms <ms>", "per-command timeout budget where supported")
-        .option("--structure", "include DOCX structure map")
-        .option("--sheet <name>", "limit XLSX inspect to a sheet")
-        .option("--range <range>", "limit XLSX inspect to an A1 range")
-        .option("--strategy <strategy>", "design apply strategy: theme-only, inspired, or faithful")
-        .option("--validate-only", "validate without writing")
-        .option("--formulas", "verify XLSX formulas")
-        .option("--named-ranges", "verify XLSX named ranges")
-        .option("--external-links", "verify external links")
-        .option("--protected-sheets", "verify protected or hidden sheets")
-        .option("--log-jsonl <path>", "write UTF-8 JSONL run log")
-        .option("--manifest <path>", "write run artifact manifest")
-        .option("--summary <path>", "write run Markdown summary")
-        .option("--output-root <path>", "restrict run outputs to a directory")
-        .option("--deny-outside-output-root", "fail run outputs outside --output-root")
-        .option("--expected-artifacts <path>", "JSON list of expected artifacts")
-        .option("--profile <profile>", "critique or scaffold profile")
-        .option("--asset <path>", "asset zip path")
-        .option("--reference <path>", "reference file path")
-        .option("--selector <selector>", "asset or object selector")
-        .option("--name <name>", "template, design, plugin, or renderer name")
-        .option("--map <path>", "template map JSON")
-        .option("--data <path>", "template data JSON")
-        .option("--sha256 <hash>", "expected sha256")
-        .option("--trust <pin>", "trust pin")
-        .option("--from <schema>", "source schema")
-        .option("--target <target>", "adapter target")
-        .option("--scope <scope>", "scope")
         .exitOverride();
+    for (const spec of acceptedOptionSpecsFor(commandGroup, subcommand)) {
+        command.option(optionSyntax(spec), spec.description);
+    }
+    return command;
 }
 function suppressCommanderOutput(command) {
     command.configureOutput({

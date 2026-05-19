@@ -7,6 +7,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
+import { comparePngPixels } from "./visualDiff.js";
 export async function diffDocuments(before, after, options = {}) {
     const beforeInspect = await inspect(before, { depth: "shallow", config: options.config });
     const afterInspect = await inspect(after, { depth: "shallow", config: options.config });
@@ -39,14 +40,21 @@ export async function diffDocuments(before, after, options = {}) {
         semantic,
         visual,
         caveats: [
-            visual?.fidelity === "native"
-                ? "Native visual regression compares trusted renderer PDF outputs; fidelity depends on installed renderer filters and fonts."
-                : visual?.renderer === "pdf-bytes"
-                    ? "PDF visual diff without native renderer compares page-aware PDF byte windows; it avoids zero-content false negatives but is not raster fidelity."
-                    : "Visual diff is based on officegen's approximate SVG/HTML view, not a native Office rasterization.",
+            visualCaveat(visual),
             "StableObjectId matching is best-effort across generated files and preserves strongest value for edits within the same document lineage."
         ]
     };
+}
+function visualCaveat(visual) {
+    if (visual?.status === "blocked")
+        return `Visual diff was blocked: ${visual.message ?? "renderer unavailable"}.`;
+    if (visual?.kind === "raster-pixel")
+        return "Visual diff compares rasterized page pixels with deterministic thresholding and changed-pixel bounding boxes.";
+    if (visual?.fidelity === "native")
+        return "Native visual regression compares trusted renderer PDF outputs; fidelity depends on installed renderer filters and fonts.";
+    if (visual?.renderer === "pdf-bytes")
+        return "PDF visual diff without native renderer compares page-aware PDF byte windows; it avoids zero-content false negatives but is not raster fidelity.";
+    return "Visual diff is based on officegen's approximate SVG/HTML view, not a native Office rasterization.";
 }
 function semanticDiff(before, after) {
     const beforeMap = new Map(before.objectMap.map((entry) => [entry.stableObjectId, entry]));
@@ -187,6 +195,8 @@ async function visualDiff(beforeInput, afterInput, before, after, options) {
         });
     }
     return {
+        status: "compared",
+        kind: "approximate-string",
         fidelity: "approximate",
         pagesCompared,
         beforePages: beforeView.pages.length,
@@ -198,8 +208,11 @@ async function visualDiff(beforeInput, afterInput, before, after, options) {
 async function pdfByteVisualDiff(beforeInput, afterInput, options) {
     const beforeNormalized = await normalizeInput(beforeInput);
     const afterNormalized = await normalizeInput(afterInput);
-    const beforeDoc = await PDFDocument.load(beforeNormalized.bytes, { ignoreEncryption: true });
-    const afterDoc = await PDFDocument.load(afterNormalized.bytes, { ignoreEncryption: true });
+    const beforeDoc = await loadPdfForReporting(beforeNormalized.bytes);
+    const afterDoc = await loadPdfForReporting(afterNormalized.bytes);
+    const raster = await rasterPdfVisualDiff(beforeNormalized.bytes, afterNormalized.bytes, beforeDoc.getPageCount(), afterDoc.getPageCount(), "approximate", "pdfjs-canvas", options);
+    if (raster.status === "compared")
+        return raster;
     const pagesCompared = Math.min(beforeDoc.getPageCount(), afterDoc.getPageCount(), options.maxPages ?? Number.MAX_SAFE_INTEGER);
     const beforeWindows = byteWindows(beforeNormalized.bytes, pagesCompared);
     const afterWindows = byteWindows(afterNormalized.bytes, pagesCompared);
@@ -213,13 +226,17 @@ async function pdfByteVisualDiff(beforeInput, afterInput, options) {
         });
     }
     return {
+        status: "compared",
+        kind: "pdf-byte-window",
         fidelity: "approximate",
         pagesCompared,
         beforePages: beforeDoc.getPageCount(),
         afterPages: afterDoc.getPageCount(),
         pageCountChanged: beforeDoc.getPageCount() !== afterDoc.getPageCount(),
         pageScores,
-        renderer: "pdf-bytes"
+        renderer: "pdf-bytes",
+        fallback: true,
+        message: raster.message ? `Raster pixel diff unavailable; used deterministic byte-window fallback. ${raster.message}` : "Raster pixel diff unavailable; used deterministic byte-window fallback."
     };
 }
 async function nativeVisualDiff(beforeInput, afterInput, options) {
@@ -231,8 +248,11 @@ async function nativeVisualDiff(beforeInput, afterInput, options) {
         await exportDocument(afterInput, { to: "pdf", mode: "native", out: afterPdf, config: options.config });
         const beforeBytes = await readFile(beforePdf);
         const afterBytes = await readFile(afterPdf);
-        const beforeDoc = await PDFDocument.load(beforeBytes, { ignoreEncryption: true });
-        const afterDoc = await PDFDocument.load(afterBytes, { ignoreEncryption: true });
+        const beforeDoc = await loadPdfForReporting(beforeBytes);
+        const afterDoc = await loadPdfForReporting(afterBytes);
+        const raster = await rasterPdfVisualDiff(beforeBytes, afterBytes, beforeDoc.getPageCount(), afterDoc.getPageCount(), "native", `${beforeExport.renderer?.id ?? "native"}+pdfjs-canvas`, options);
+        if (raster.status === "compared")
+            return raster;
         const pagesCompared = Math.min(beforeDoc.getPageCount(), afterDoc.getPageCount(), options.maxPages ?? Number.MAX_SAFE_INTEGER);
         const beforeText = byteWindows(beforeBytes, pagesCompared);
         const afterText = byteWindows(afterBytes, pagesCompared);
@@ -246,18 +266,81 @@ async function nativeVisualDiff(beforeInput, afterInput, options) {
             });
         }
         return {
+            status: "compared",
+            kind: "pdf-byte-window",
             fidelity: "native",
             pagesCompared,
             beforePages: beforeDoc.getPageCount(),
             afterPages: afterDoc.getPageCount(),
             pageCountChanged: beforeDoc.getPageCount() !== afterDoc.getPageCount(),
             pageScores,
-            renderer: beforeExport.renderer?.id ?? "native"
+            renderer: `${beforeExport.renderer?.id ?? "native"}+pdf-bytes`,
+            fallback: true,
+            message: raster.message ? `Raster pixel diff unavailable; used deterministic byte-window fallback. ${raster.message}` : "Raster pixel diff unavailable; used deterministic byte-window fallback."
         };
+    }
+    catch (error) {
+        return blockedVisualDiff("native", error instanceof Error ? error.message : String(error));
     }
     finally {
         await rm(dir, { recursive: true, force: true });
     }
+}
+async function rasterPdfVisualDiff(beforePdf, afterPdf, beforePages, afterPages, fidelity, renderer, options) {
+    try {
+        const [beforeView, afterView] = await Promise.all([
+            view({ data: beforePdf, format: "pdf" }, { format: "png", maxPages: options.maxPages, config: options.config }),
+            view({ data: afterPdf, format: "pdf" }, { format: "png", maxPages: options.maxPages, config: options.config })
+        ]);
+        const pagesCompared = Math.min(beforeView.pages.length, afterView.pages.length);
+        const pageScores = [];
+        for (let index = 0; index < pagesCompared; index += 1) {
+            const beforeBytes = beforeView.pages[index]?.bytes ?? new Uint8Array();
+            const afterBytes = afterView.pages[index]?.bytes ?? new Uint8Array();
+            const pixelDiff = await comparePngPixels(beforeBytes, afterBytes, { threshold: options.pixelThreshold });
+            if (pixelDiff.status !== "compared") {
+                return blockedVisualDiff(fidelity, pixelDiff.message ?? "Raster page decode failed.", `${renderer}+blocked`);
+            }
+            pageScores.push({
+                page: index + 1,
+                beforeHash: pixelDiff.beforeHash,
+                afterHash: pixelDiff.afterHash,
+                score: pixelDiff.changedRatio,
+                pixelDiff
+            });
+        }
+        return {
+            status: "compared",
+            kind: "raster-pixel",
+            fidelity,
+            pagesCompared,
+            beforePages,
+            afterPages,
+            pageCountChanged: beforePages !== afterPages,
+            pageScores,
+            renderer
+        };
+    }
+    catch (error) {
+        return blockedVisualDiff(fidelity, error instanceof Error ? error.message : String(error), renderer);
+    }
+}
+function blockedVisualDiff(fidelity, message, renderer = "native") {
+    return {
+        status: "blocked",
+        kind: "raster-pixel",
+        fidelity,
+        pagesCompared: 0,
+        beforePages: 0,
+        afterPages: 0,
+        pageCountChanged: false,
+        pageScores: [],
+        renderer,
+        message
+    };
+}
+function loadPdfForReporting(bytes) {
+    return PDFDocument.load(bytes, { ignoreEncryption: true });
 }
 function byteWindows(bytes, windows) {
     if (windows <= 0)

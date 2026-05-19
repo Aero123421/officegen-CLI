@@ -1,17 +1,22 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
+import { homedir } from "node:os";
 import {
   appendTrace,
   createRunFolder,
+  FEATURE_NAMES,
   getCapabilities,
   getSchema,
+  loadConfig,
   listErrors,
   listSchemas,
   OFFICEGEN_CLI_VERSION,
   compactSchemaErrors,
   redactJson,
   sha256File,
+  type OfficegenConfigInput,
   type JsonValue,
   updateManifest,
   validateSchema
@@ -84,8 +89,8 @@ import {
   validatedOutOption,
   validateOutputPath
 } from "../shared/io.js";
-import { COMMAND_METADATA } from "../shared/metadata.js";
-import { CLI_SPEC_VERSION, CliFailure, type FeatureKey, type RuntimeContext } from "../shared/types.js";
+import { COMMAND_METADATA, acceptedOptionsFor, effectiveOptionsFor } from "../shared/metadata.js";
+import { CLI_SPEC_VERSION, CliFailure, RUNTIME_ENVELOPE_SCHEMA, type FeatureKey, type RuntimeContext } from "../shared/types.js";
 
 export function capabilitiesPayload(context: RuntimeContext): unknown {
   const enabled = context.registry.filter((entry) => entry.enabled);
@@ -100,6 +105,10 @@ export function capabilitiesPayload(context: RuntimeContext): unknown {
     disabled: context.registry.filter((entry) => !entry.enabled).map((entry) => entry.feature),
     agentCommands: agentVisible.map((entry) => entry.commandGroup),
     visibleCommands: coreCapabilities.visibleCommands,
+    optionSupport: {
+      globalAcceptedOptions: acceptedOptionsFor("__global__").filter((option) => ["--json", "--agent", "--strict-json", "--capabilities-hash", "--json-budget-bytes"].includes(option)),
+      subcommandEffectiveOptions: commandOptionSurfaces()
+    },
     hiddenFromAgents: enabled.filter((entry) => !entry.visibleToAgents).map((entry) => entry.feature),
     jsonBudgetBytes: context.jsonBudgetBytes ?? context.config.agent.defaultJsonBudgetBytes,
     commands: enabled
@@ -127,6 +136,7 @@ export function capabilitiesPayload(context: RuntimeContext): unknown {
         ,
         supportedFormats: supportedFormatsForFeature(entry.feature),
         formatCapabilities: formatCapabilitiesForFeature(entry.feature),
+        effectiveOptions: effectiveOptionsFor(entry.commandGroup),
         requiresNativeRenderer: ["export", "verify", "diff"].includes(entry.feature) ? "only when --mode native or --native is requested" : false,
         knownLimitations: knownLimitationsForFeature(entry.feature),
         examples: examplesForHelp(entry.commandGroup)
@@ -157,8 +167,9 @@ export function helpPayload(context: RuntimeContext, topic: string[]): unknown {
       description: entry.description,
       requiredFeature: entry.feature,
       commands: entry.commands,
-      acceptedOptions: acceptedOptionsForHelp(entry.commandGroup, topic[1]),
-      effectiveOptions: effectiveOptionsForHelp(entry.commandGroup, topic[1]),
+      acceptedOptions: acceptedOptionsFor(entry.commandGroup, topic[1]),
+      effectiveOptions: effectiveOptionsFor(entry.commandGroup, topic[1]),
+      examples: examplesForHelp(entry.commandGroup, topic[1]),
       successCondition: successConditionForHelp(entry.commandGroup),
       planOnlyWhen: entry.commandGroup === "improve" ? ["always"] : entry.commandGroup === "edit" ? ["--dry-run"] : [],
       artifactRequiredWhen: artifactRequiredWhenForHelp(entry.commandGroup, topic[1])
@@ -182,35 +193,21 @@ export function helpPayload(context: RuntimeContext, topic: string[]): unknown {
   };
 }
 
-function acceptedOptionsForHelp(commandGroup: string, subcommand?: string): string[] {
-  return [...new Set([...globalAcceptedOptions(), ...effectiveOptionsForHelp(commandGroup, subcommand)])];
+function commandOptionSurfaces(): Array<{ command: string; effectiveOptions: string[] }> {
+  const exposed = new Set(["run office-agent", "benchmark compare", "template candidates", "layout apply"]);
+  return COMMAND_METADATA.flatMap((entry) => entry.commands
+    .filter((command) => exposed.has(command))
+    .map((command) => ({
+      command,
+      effectiveOptions: effectiveOptionsFor(entry.commandGroup, subcommandForCommand(entry.commandGroup, command))
+    })))
+    .filter((surface) => surface.effectiveOptions.length > 0);
 }
 
-function effectiveOptionsForHelp(commandGroup: string, subcommand?: string): string[] {
-  if (commandGroup === "inspect") return ["--depth", "--structure", "--sheet", "--range", "--fields", "--object-map-limit", "--report-out"];
-  if (commandGroup === "view") return ["--format", "--max-pages", "--out", "--object-map-limit", "--report-out"];
-  if (commandGroup === "edit") return ["--ops", "--out", "--dry-run", "--resolve-selectors", "--overwrite", "--report-out"];
-  if (commandGroup === "select") return ["--selector", "--matches-only", "--no-object-map", "--report-out"];
-  if (commandGroup === "render") return ["--target", "--out", "--overwrite", "--report-out"];
-  if (commandGroup === "verify") return ["--visual", "--native", "--timeout-ms", "--gates", "--out", "--report-out"];
-  if (commandGroup === "run") return ["--reference", "--target", "--out", "--max-pages", "--manifest", "--log-jsonl", "--summary", "--output-root", "--expected-artifacts", "--report-out"];
-  if (commandGroup === "benchmark") return ["--manifest", "--report-out", "--timeout-ms"];
-  if (commandGroup === "improve") return ["--dry-run", "--profile", "--report-out"];
-  if (commandGroup === "asset" && subcommand === "inspect") return ["--embedded"];
-  if (commandGroup === "asset" && subcommand === "extract") return ["--images", "--out"];
-  if (commandGroup === "asset" && subcommand === "replace") return ["--asset", "--selector", "--out", "--overwrite"];
-  if (commandGroup === "asset") return ["--embedded", "--images", "--out", "--asset", "--selector"];
-  if (commandGroup === "chart" && subcommand === "render") return ["--out", "--report-out"];
-  if (commandGroup === "diagram" && subcommand === "render") return ["--out", "--report-out"];
-  if (commandGroup === "design" && subcommand === "capture") return ["--name", "--report-out"];
-  if (commandGroup === "design") return ["--name", "--out", "--strategy", "--data", "--report-out"];
-  if (commandGroup === "template") return ["--name", "--map", "--data", "--out", "--validate-only", "--summary-only", "--report-out"];
-  if (commandGroup === "layout" && subcommand === "apply") return ["--out", "--overwrite", "--report-out"];
-  return [];
-}
-
-function globalAcceptedOptions(): string[] {
-  return ["--json", "--agent", "--strict-json", "--capabilities-hash", "--json-budget-bytes"];
+function subcommandForCommand(commandGroup: string, command: string): string | undefined {
+  if (command === commandGroup) return undefined;
+  const prefix = `${commandGroup} `;
+  return command.startsWith(prefix) ? command.slice(prefix.length) : undefined;
 }
 
 function artifactRequiredWhenForHelp(commandGroup: string, subcommand?: string): string[] {
@@ -220,6 +217,7 @@ function artifactRequiredWhenForHelp(commandGroup: string, subcommand?: string):
 }
 
 function successConditionForHelp(commandGroup: string): string {
+  if (commandGroup === "config") return "config show reports effective settings; config set writes a scoped user/project config leaf atomically.";
   if (commandGroup === "benchmark") return "objectiveOk is true only when all benchmark documents succeed.";
   if (commandGroup === "improve") return "Always plan-only; success means actionable suggestions were returned, not that an Office file changed.";
   if (commandGroup === "asset") return "asset inspect reports file or embedded assets; asset replace requires changed:true and output artifact exists.";
@@ -231,6 +229,14 @@ function successConditionForHelp(commandGroup: string): string {
 }
 
 function examplesForHelp(commandGroup?: string, subcommand?: string): string[] {
+  if (commandGroup === "config" && subcommand === "set") return [
+    "officegen config set features.design.visibleToAgents false --scope project --json",
+    "officegen config set profile authoring --scope user --json"
+  ];
+  if (commandGroup === "config") return [
+    "officegen config show --json",
+    "officegen config set features.design.visibleToAgents false --scope project --json"
+  ];
   if (commandGroup === "benchmark" && subcommand === "run") return [
     "npm run benchmark:fetch",
     "officegen benchmark run --manifest benchmarks/office-corpus/manifest.json --report-out .officegen/benchmark-results/v2.5.0.json --agent --json",
@@ -243,6 +249,9 @@ function examplesForHelp(commandGroup?: string, subcommand?: string): string[] {
     "officegen benchmark run --manifest benchmarks/office-corpus/manifest.json --agent --json",
     "officegen benchmark benchmarks/office-corpus/manifest.json --agent --json",
     "officegen benchmark compare before.json after.json --json"
+  ];
+  if (commandGroup === "run" && subcommand === "office-agent") return [
+    "officegen run office-agent --input deck.pptx --goal goal.md --out .officegen/office-agent --manifest .officegen/office-agent/manifest.json --summary .officegen/office-agent/summary.md --agent --json"
   ];
   if (commandGroup === "chart" && subcommand === "render") return [
     "officegen chart render specs/revenue.chart.json --out .officegen/assets/revenue.svg --json"
@@ -321,6 +330,19 @@ function workflowHelp(id: string | undefined): unknown[] {
       ]
     },
     {
+      id: "office-agent",
+      summary: "Write the 13-phase office-agent runtime skeleton and evidence manifest; it does not claim full autonomous repair.",
+      steps: [
+        "officegen run office-agent --input input.pptx --goal goal.md --out .officegen/office-agent --manifest .officegen/office-agent/manifest.json --summary .officegen/office-agent/summary.md --agent --json",
+        "Review generated office-agent-workflow.json before executing mutating edit/repair steps.",
+        "Run officegen run office-agent output as release evidence only when its caveats remain attached."
+      ],
+      caveats: [
+        "Skeleton phases include command templates for inspect/select/plan/dry-run/edit/verify/diff/repair/report.",
+        "The alias writes manifests and summaries; it is not a complete autonomous repair loop."
+      ]
+    },
+    {
       id: "native-verify-export",
       summary: "Use a trusted native renderer to verify Office openability, repair risk, visual readiness, and PDF export.",
       steps: [
@@ -367,17 +389,325 @@ export function configPayload(context: RuntimeContext): unknown {
   };
 }
 
-export function doctorPayload(context: RuntimeContext): unknown {
+export async function configSetPayload(context: RuntimeContext): Promise<unknown> {
+  const args = positionalArgs(context.argv, 4);
+  const key = args[0];
+  const rawValue = args[1];
+  const scope = optionValue(context.argv, "--scope") ?? "project";
+  if (!key || rawValue === undefined) {
+    throw new CliFailure({
+      code: "SCHEMA_INVALID",
+      command: "config set",
+      message: "config set requires <key> <value>. Example: config set features.design.visibleToAgents false --scope project."
+    }, 2);
+  }
+  if (scope !== "project" && scope !== "user") {
+    throw new CliFailure({
+      code: "SCHEMA_INVALID",
+      command: "config set",
+      message: "config set --scope must be project or user.",
+      details: { scope }
+    }, 2);
+  }
+
+  const value = parseConfigSetValue(rawValue);
+  assertAllowedConfigSet(key, value);
+  const configPath = scope === "project"
+    ? path.join(context.cwd, ".officegen", "config.json")
+    : path.join(homedir(), ".officegen", "config.json");
+  const before = await readConfigInputIfExists(configPath);
+  const next = structuredClone(before);
+  setDottedConfigValue(next, key, value);
+  await writeJsonAtomic(configPath, next);
+
+  const effective = await loadConfig({ cwd: context.cwd });
+  return {
+    schema: "officegen.config.result@1.2",
+    status: "changed",
+    scope,
+    configPath,
+    key,
+    value,
+    effectiveValue: readDottedValue(effective as unknown as Record<string, unknown>, key),
+    capabilitiesHashChanged: context.capabilitiesHash !== getCapabilities(effective).capabilitiesHash,
+    summary: `Updated ${scope} config ${key}.`
+  };
+}
+
+async function readConfigInputIfExists(filePath: string): Promise<OfficegenConfigInput> {
+  try {
+    const raw = await fs.readFile(filePath, "utf8");
+    const parsed = JSON.parse(raw.replace(/^\uFEFF/, ""));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as OfficegenConfigInput : {};
+  } catch (error) {
+    const nodeError = error as NodeJS.ErrnoException;
+    if (nodeError.code === "ENOENT") return {};
+    throw error;
+  }
+}
+
+async function writeJsonAtomic(filePath: string, value: unknown): Promise<void> {
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  const tempPath = path.join(path.dirname(filePath), `.${path.basename(filePath)}.${process.pid}.${Date.now()}.tmp`);
+  await fs.writeFile(tempPath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+  await fs.rename(tempPath, filePath);
+}
+
+function parseConfigSetValue(raw: string): JsonValue {
+  try {
+    return JSON.parse(raw) as JsonValue;
+  } catch {
+    return raw;
+  }
+}
+
+function assertAllowedConfigSet(key: string, value: JsonValue): void {
+  const parts = key.split(".");
+  if (parts.some((part) => !part || part === "__proto__" || part === "prototype" || part === "constructor")) {
+    throw invalidConfigSet(key, "Config key must be a safe dotted path.");
+  }
+  if (key === "profile") {
+    if (value === "substrate" || value === "authoring" || value === "enterprise") return;
+    throw invalidConfigSet(key, "profile must be substrate, authoring, or enterprise.");
+  }
+  if (parts[0] === "features" && parts.length === 3) {
+    const feature = parts[1];
+    const leaf = parts[2];
+    if (!FEATURE_NAMES.includes(feature as (typeof FEATURE_NAMES)[number])) throw invalidConfigSet(key, `Unknown feature: ${feature}.`);
+    if (leaf !== "enabled" && leaf !== "visibleInHelp" && leaf !== "visibleToAgents") throw invalidConfigSet(key, "Feature config key must be enabled, visibleInHelp, or visibleToAgents.");
+    if (typeof value === "boolean") return;
+    throw invalidConfigSet(key, "Feature visibility values must be boolean.");
+  }
+  if (parts[0] === "paths" && parts.length === 2) {
+    if (["projectRoot", "projectConfigDir", "userConfigDir", "defaultOutputDir", "defaultRunsDir"].includes(parts[1] ?? "") && typeof value === "string") return;
+    throw invalidConfigSet(key, "Path config values must be strings.");
+  }
+  if (parts[0] === "agent" && parts.length === 2) {
+    if (parts[1] === "defaultJsonBudgetBytes" && typeof value === "number" && Number.isInteger(value) && value > 0) return;
+    if (parts[1] === "inspectDefaultDepth" && (value === "summary" || value === "full")) return;
+    if (parts[1] === "largeOutputMode" && (value === "path-only" || value === "inline")) return;
+    if (parts[1] === "requireCapabilitiesCheck" && typeof value === "boolean") return;
+    throw invalidConfigSet(key, "Unsupported agent config key or value.");
+  }
+  if (parts[0] === "security") {
+    assertAllowedSecurityConfigSet(key, parts, value);
+    return;
+  }
+  throw invalidConfigSet(key, "Unsupported config key. Use config show to inspect writable fields.");
+}
+
+function assertAllowedSecurityConfigSet(key: string, parts: string[], value: JsonValue): void {
+  if (parts.length === 2) {
+    const leaf = parts[1];
+    if ((leaf === "network" || leaf === "externalProcess") && (value === "deny" || value === "allow")) return;
+    if (leaf === "outOfProjectPolicy" && (value === "deny" || value === "warn" || value === "allow")) return;
+    if (["allowOverwrite", "allowAbsoluteInputPaths", "allowAbsoluteOutputPaths", "redactAbsolutePathsInJson", "redactSecretsInJson", "followSymlinks", "allowHardlinks"].includes(leaf ?? "") && typeof value === "boolean") return;
+    if (leaf === "trustedRoots" && Array.isArray(value) && value.every((item) => typeof item === "string")) return;
+  }
+  if (parts.length === 3 && parts[1] === "untrustedInput") {
+    const leaf = parts[2];
+    if (["maxInputFileBytes", "maxZipEntries", "maxZipExpandedBytes", "maxSingleXmlPartBytes", "maxRelationships", "maxNestedZipDepth"].includes(leaf ?? "") && typeof value === "number" && Number.isInteger(value) && value > 0) return;
+    if (leaf === "xmlExternalEntities" && (value === "deny" || value === "allow")) return;
+    if (leaf === "externalRelationships" && (value === "warn-and-drop-by-default" || value === "allow" || value === "deny")) return;
+    if (leaf === "macros" && (value === "warn-and-preserve-only-if-requested" || value === "allow" || value === "deny")) return;
+    if ((leaf === "embeddedObjects" || leaf === "externalHyperlinks") && (value === "warn" || value === "allow" || value === "deny")) return;
+  }
+  throw invalidConfigSet(key, "Unsupported security config key or value.");
+}
+
+function invalidConfigSet(key: string, reason: string): CliFailure {
+  return new CliFailure({
+    code: "SCHEMA_INVALID",
+    command: "config set",
+    message: `Cannot set ${key}: ${reason}`,
+    details: { key, reason }
+  }, 2);
+}
+
+function setDottedConfigValue(target: OfficegenConfigInput, key: string, value: JsonValue): void {
+  const parts = key.split(".");
+  let cursor = target as Record<string, unknown>;
+  for (const part of parts.slice(0, -1)) {
+    const next = cursor[part];
+    if (!next || typeof next !== "object" || Array.isArray(next)) cursor[part] = {};
+    cursor = cursor[part] as Record<string, unknown>;
+  }
+  cursor[parts[parts.length - 1]!] = value;
+}
+
+function readDottedValue(target: Record<string, unknown>, key: string): unknown {
+  let cursor: unknown = target;
+  for (const part of key.split(".")) {
+    if (!cursor || typeof cursor !== "object" || Array.isArray(cursor)) return undefined;
+    cursor = (cursor as Record<string, unknown>)[part];
+  }
+  return cursor;
+}
+
+type DoctorCheckStatus = "pass" | "fail" | "warning";
+type DoctorCheckSeverity = "info" | "warning" | "error";
+
+interface RuntimeReadinessCheck {
+  id: string;
+  ok: boolean;
+  detail: string;
+  required?: string;
+  actual?: string;
+  status?: DoctorCheckStatus;
+  severity?: DoctorCheckSeverity;
+  remediation?: string;
+}
+
+export async function doctorPayload(context: RuntimeContext): Promise<unknown> {
+  const nodeRuntime = evaluateNodeRuntime(await readPackageNodeEngine(), process.version);
+  const checks: RuntimeReadinessCheck[] = [
+    {
+      id: "node",
+      ok: nodeRuntime.ok,
+      detail: nodeRuntime.detail,
+      required: nodeRuntime.required,
+      actual: nodeRuntime.actual,
+      status: nodeRuntime.status,
+      severity: nodeRuntime.severity,
+      remediation: nodeRuntime.remediation
+    },
+    { id: "profile", ok: true, detail: context.config.profile, status: "pass", severity: "info" },
+    { id: "command-metadata", ok: true, detail: `${COMMAND_METADATA.length} command groups registered`, status: "pass", severity: "info" },
+    { id: "optional-renderers", ok: true, detail: "disabled unless enabled by config", status: "pass", severity: "info" }
+  ];
+  const failedChecks = checks.filter((check) => !check.ok);
+
   return {
     schema: "officegen.doctor@1.2",
-    summary: "Officegen CLI command surface is wired.",
-    checks: [
-      { id: "node", ok: true, detail: process.version },
-      { id: "profile", ok: true, detail: context.config.profile },
-      { id: "command-metadata", ok: true, detail: `${COMMAND_METADATA.length} command groups registered` },
-      { id: "optional-renderers", ok: true, detail: "disabled unless enabled by config" }
-    ]
+    summary: failedChecks.length ? "Officegen CLI runtime readiness is blocked." : "Officegen CLI command surface is wired.",
+    readiness: failedChecks.length ? "blocked" : "pass",
+    status: failedChecks.length ? "fail" : "pass",
+    checks
   };
+}
+
+export function evaluateNodeRuntime(requiredRange: string | undefined, actualVersion: string): RuntimeReadinessCheck {
+  const required = requiredRange?.trim();
+  const actual = normalizeVersion(actualVersion);
+  if (!required) {
+    return {
+      id: "node",
+      ok: false,
+      detail: `${actualVersion} does not have a package.json engines.node requirement to validate against`,
+      required: undefined,
+      actual,
+      status: "fail",
+      severity: "error",
+      remediation: "Ensure package.json defines engines.node before release or runtime readiness checks."
+    };
+  }
+
+  const ok = satisfiesSemverRange(actual, required);
+  return {
+    id: "node",
+    ok,
+    detail: ok ? `${actualVersion} satisfies ${required}` : `${actualVersion} does not satisfy ${required}`,
+    required,
+    actual,
+    status: ok ? "pass" : "fail",
+    severity: ok ? "info" : "error",
+    remediation: ok ? undefined : `Install Node ${required} and re-run officegen doctor --agent --json.`
+  };
+}
+
+async function readPackageNodeEngine(): Promise<string | undefined> {
+  const starts = [
+    path.dirname(fileURLToPath(import.meta.url)),
+    process.cwd()
+  ];
+  for (const start of starts) {
+    const found = await findPackageNodeEngine(start);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+async function findPackageNodeEngine(startDir: string): Promise<string | undefined> {
+  let current = path.resolve(startDir);
+  while (true) {
+    const packagePath = path.join(current, "package.json");
+    try {
+      const parsed = JSON.parse(await fs.readFile(packagePath, "utf8")) as { engines?: { node?: unknown } };
+      if (typeof parsed.engines?.node === "string" && parsed.engines.node.trim()) return parsed.engines.node;
+    } catch (error) {
+      const code = typeof error === "object" && error ? (error as { code?: unknown }).code : undefined;
+      if (code !== "ENOENT") return undefined;
+    }
+    const parent = path.dirname(current);
+    if (parent === current) return undefined;
+    current = parent;
+  }
+}
+
+interface SemverParts {
+  major: number;
+  minor: number;
+  patch: number;
+}
+
+function satisfiesSemverRange(actualVersion: string, range: string): boolean {
+  const actual = parseSemver(actualVersion);
+  if (!actual) return false;
+  return range
+    .split("||")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .some((alternative) => alternative.split(/\s+/).every((comparator) => satisfiesComparator(actual, comparator)));
+}
+
+function satisfiesComparator(actual: SemverParts, comparator: string): boolean {
+  const match = comparator.match(/^(>=|>|<=|<|=)?\s*v?(\d+)(?:\.(\d+|x|X|\*))?(?:\.(\d+|x|X|\*))?(?:[-+].*)?$/);
+  if (!match) return false;
+  const operator = match[1] ?? "=";
+  const expected = parseComparatorVersion(match);
+  if (!expected) return false;
+  const comparison = compareSemver(actual, expected);
+  if (operator === ">=") return comparison >= 0;
+  if (operator === ">") return comparison > 0;
+  if (operator === "<=") return comparison <= 0;
+  if (operator === "<") return comparison < 0;
+  return comparison === 0;
+}
+
+function parseComparatorVersion(match: RegExpMatchArray): SemverParts | undefined {
+  const [, operator, major, minor = "0", patch = "0"] = match;
+  if (!operator && (isWildcard(minor) || isWildcard(patch))) {
+    return undefined;
+  }
+  return {
+    major: Number(major),
+    minor: isWildcard(minor) ? 0 : Number(minor),
+    patch: isWildcard(patch) ? 0 : Number(patch)
+  };
+}
+
+function compareSemver(left: SemverParts, right: SemverParts): number {
+  if (left.major !== right.major) return left.major - right.major;
+  if (left.minor !== right.minor) return left.minor - right.minor;
+  return left.patch - right.patch;
+}
+
+function parseSemver(version: string): SemverParts | undefined {
+  const match = normalizeVersion(version).match(/^(\d+)\.(\d+)\.(\d+)/);
+  if (!match) return undefined;
+  return {
+    major: Number(match[1]),
+    minor: Number(match[2]),
+    patch: Number(match[3])
+  };
+}
+
+function normalizeVersion(version: string): string {
+  return version.trim().replace(/^v/, "");
+}
+
+function isWildcard(value: string): boolean {
+  return value === "x" || value === "X" || value === "*";
 }
 
 export function schemaListPayload(context: RuntimeContext): unknown {
@@ -461,6 +791,20 @@ export async function validatePayload(context: RuntimeContext): Promise<unknown>
   };
 }
 
+function schemaValidationFailureDetails(
+  schemaId: string,
+  validation: Extract<ReturnType<typeof validateSchema>, { ok: false }>,
+  context: RuntimeContext
+): Record<string, unknown> {
+  const diagnostics = context.agent || context.json;
+  return {
+    schema: schemaId,
+    errors: diagnostics ? compactSchemaErrors(validation.errors, validation.diagnostics) : validation.errors,
+    rawErrorCount: validation.errors.length,
+    ...(validation.diagnostics?.length ? { diagnostics: validation.diagnostics } : {})
+  };
+}
+
 export async function schemaMigratePayload(context: RuntimeContext): Promise<unknown> {
   const input = positionalArgs(context.argv, 4)[0];
   const out = optionValue(context.argv, "--out");
@@ -527,6 +871,7 @@ function supportedFormatsForFeature(feature: FeatureKey): string[] {
 }
 
 function formatCapabilitiesForFeature(feature: FeatureKey): Record<string, unknown> | undefined {
+  if (feature === "config") return { set: "allowlisted leaf writes only", scopes: ["project", "user"], writeMode: "atomic-json" };
   if (feature === "template") {
     return {
       pptx: { text: true, image: true, chartData: true, table: "limited" },
@@ -590,13 +935,16 @@ function formatCapabilitiesForFeature(feature: FeatureKey): Record<string, unkno
 }
 
 function knownLimitationsForFeature(feature: FeatureKey): string[] {
+  if (feature === "config") return ["config set only writes allowlisted leaf values; use project/user config JSON review for broader edits."];
+  if (feature === "run") return ["run office-agent writes a skeleton/evidence manifest only; it does not execute complete autonomous repair or prove final document readiness."];
   if (feature === "template") return ["Office mutation requires a source Office file, resolvable mapping, and Office --out path.", "Unsupported bindings fail atomically instead of returning a plan as success."];
   if (feature === "design") return ["theme-only is limited by design; inspired/faithful apply best-effort style tokens and disclose limitations."];
   if (feature === "edit") return [
     "PPTX/XLSX chart data ops are single-series only; multi-series, secondary-axis, and combo chart editing are unsupported.",
     "SmartArt creation and full SmartArt editing are unsupported.",
     "PDF edit ops are overlays/annotations only; physical redaction and content rewriting are unsupported.",
-    "DOCX/XLSX/PDF edits are scoped operations, not full application-level editing engines."
+    "DOCX/XLSX/PDF edits are scoped operations, not full application-level editing engines.",
+    "Direct edit writes do not run verify; treat readiness as warning until officegen verify passes."
   ];
   if (feature === "inspect") return ["PDF text extraction is best-effort; scanned or compressed PDFs should be reviewed through page preview artifacts."];
   if (feature === "export" || feature === "verify") return ["Native renderer paths are optional-gated by security.externalProcess/renderers policy."];
@@ -633,6 +981,10 @@ function applyOutputProjection(context: RuntimeContext, payload: unknown): unkno
   if (objectMapLimit !== undefined && isPlainObject(result) && Array.isArray(result.objectMap)) {
     result = { ...result, objectMap: result.objectMap.slice(0, objectMapLimit), objectMapTruncated: result.objectMap.length > objectMapLimit };
   }
+  if (hasFlag(context.argv, "--no-object-map") && isPlainObject(result) && Array.isArray(result.objectMap)) {
+    const { objectMap: _objectMap, ...withoutObjectMap } = result;
+    result = withoutObjectMap;
+  }
   if (fields?.length && isPlainObject(result)) {
     const projected: Record<string, unknown> = {};
     for (const field of fields) if (field in result) projected[field] = result[field];
@@ -651,13 +1003,29 @@ function isPlainObject(value: unknown): value is Record<string, any> {
 
 export async function inspectPayload(context: RuntimeContext): Promise<unknown> {
   const input = requireInput(context, 3, "inspect");
+  const emit = optionValue(context.argv, "--emit");
+  if (emit !== undefined && emit !== "inspect" && emit !== "object-graph") {
+    throw new CliFailure({
+      code: "SCHEMA_INVALID",
+      command: "inspect",
+      message: `inspect --emit ${emit} is not supported. Supported values are inspect and object-graph.`,
+      details: { emit, supported: ["inspect", "object-graph"] }
+    }, 2);
+  }
+  const objectMapLimit = numberOption(context, "--object-map-limit");
   const result = await inspect(await validateInputPath(context, input), withFormatConfig(context, {
     depth: (optionValue(context.argv, "--depth") as "summary" | "shallow" | "full" | undefined) ?? "summary",
     structure: hasFlag(context.argv, "--structure"),
     sheet: optionValue(context.argv, "--sheet"),
-    range: optionValue(context.argv, "--range")
+    range: optionValue(context.argv, "--range"),
+    emit: emit as "inspect" | "object-graph" | undefined,
+    includeObjectGraph: context.agent || emit === "object-graph",
+    objectGraph: {
+      nodeLimit: objectMapLimit,
+      edgeLimit: objectMapLimit
+    }
   }));
-  return maybeWriteReport(context, result, "inspect");
+  return maybeWriteReport(context, emit === "object-graph" ? result.objectGraph : result, "inspect");
 }
 
 export async function viewPayload(context: RuntimeContext): Promise<unknown> {
@@ -677,7 +1045,10 @@ export async function viewPayload(context: RuntimeContext): Promise<unknown> {
     maxPages: numberOption(context, "--max-pages"),
     dpi: numberOption(context, "--dpi"),
     mode: (optionValue(context.argv, "--mode") as "fast" | "internal" | "native" | undefined) ?? "fast",
-    timeoutMs: numberOption(context, "--timeout-ms")
+    timeoutMs: numberOption(context, "--timeout-ms"),
+    objectId: optionValue(context.argv, "--object") ?? optionValue(context.argv, "--selector"),
+    crop: hasFlag(context.argv, "--crop"),
+    objectMapLimit: numberOption(context, "--object-map-limit")
   }));
   const out = optionValue(context.argv, "--out");
   if (out) {
@@ -702,6 +1073,7 @@ function publicViewPage(page: Awaited<ReturnType<typeof view>>["pages"][number])
 async function writeViewArtifacts(context: RuntimeContext, outDir: string, result: Awaited<ReturnType<typeof view>>, sourceCommand: string): Promise<Array<Record<string, unknown>>> {
   await fs.mkdir(outDir, { recursive: true });
   const pageRecords = [];
+  const cropRecords = [];
   for (const page of result.pages) {
     const fileName = `page-${String(page.page).padStart(3, "0")}.${page.format}`;
     const filePath = path.join(outDir, fileName);
@@ -729,18 +1101,46 @@ async function writeViewArtifacts(context: RuntimeContext, outDir: string, resul
       objectMapEntries: page.objectMap.length
     });
   }
+  for (const crop of result.crops ?? []) {
+    const fileName = `crop-${String(crop.page).padStart(3, "0")}-${safeArtifactName(crop.objectId)}.${crop.format}`;
+    const filePath = path.join(outDir, fileName);
+    await writeGeneratedText(context, filePath, crop.content);
+    const cropSha256 = await sha256File(filePath).catch(() => undefined);
+    cropRecords.push({
+      artifactId: `view-crop-${String(cropRecords.length + 1).padStart(3, "0")}`,
+      role: "object-crop",
+      page: crop.page,
+      objectId: crop.objectId,
+      path: filePath,
+      fileName,
+      format: crop.format,
+      sha256: cropSha256,
+      width: crop.width,
+      height: crop.height,
+      renderer: crop.renderer,
+      fidelity: crop.fidelity,
+      coordinateSystem: "px",
+      crop: crop.metadata
+    });
+  }
   const objectMapPath = path.join(outDir, "object-map.json");
   const manifestPath = path.join(outDir, "manifest.json");
   const contactSheetPath = path.join(outDir, "contact-sheet.html");
   await writeGeneratedJson(context, objectMapPath, result.objectMap);
-  await writeGeneratedText(context, contactSheetPath, contactSheetHtml(pageRecords));
+  await writeGeneratedText(context, contactSheetPath, contactSheetHtml(pageRecords, cropRecords));
   const manifest = {
     schema: "officegen.view.manifest@1.2",
     fidelity: result.fidelity,
+    rendererMode: result.renderer.mode,
     renderer: pageRecords.find((page) => page.renderer)?.renderer ?? "officegen-approximate-svg-html",
     sourceFormat: result.trusted.sourceFormat,
     generatedAt: result.trusted.generatedAt,
     pages: pageRecords,
+    crops: cropRecords,
+    crop: result.crop,
+    summary: result.summary,
+    cursor: result.cursor,
+    nextActions: result.nextActions,
     objectMapPath,
     objectMapHash: sha256Json(result.objectMap),
     contactSheetPath,
@@ -752,7 +1152,8 @@ async function writeViewArtifacts(context: RuntimeContext, outDir: string, resul
     await artifactRecord(manifestPath, "view-manifest", "json", sourceCommand),
     await artifactRecord(contactSheetPath, "contact-sheet", "html", sourceCommand),
     await artifactRecord(objectMapPath, "object-map", "json", sourceCommand),
-    ...await Promise.all(pageRecords.map((page) => artifactRecord(page.path, "view-page", page.format, sourceCommand)))
+    ...await Promise.all(pageRecords.map((page) => artifactRecord(page.path, "view-page", page.format, sourceCommand))),
+    ...await Promise.all(cropRecords.map((crop) => artifactRecord(crop.path, "object-crop", crop.format, sourceCommand)))
   ];
 }
 
@@ -793,7 +1194,14 @@ function viewPageDimensions(content: string): { width?: number; height?: number 
   };
 }
 
-function contactSheetHtml(pages: Array<{ page: number; fileName: string; format?: unknown; stableObjectId: string; width?: number; height?: number; objectMapEntries: number }>): string {
+function safeArtifactName(value: string): string {
+  return value.replace(/[^a-z0-9._-]+/gi, "-").replace(/^-+|-+$/g, "").slice(0, 80) || "object";
+}
+
+function contactSheetHtml(
+  pages: Array<{ page: number; fileName: string; format?: unknown; stableObjectId: string; width?: number; height?: number; objectMapEntries: number }>,
+  crops: Array<{ page: number; fileName: string; format?: unknown; objectId: string; width?: number; height?: number }> = []
+): string {
   return [
     "<!doctype html><meta charset=\"utf-8\"><title>officegen contact sheet</title>",
     "<style>body{font-family:Arial,sans-serif;margin:24px;background:#f6f8fa;color:#111}main{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:16px}.page{background:#fff;border:1px solid #d0d7de;padding:12px}.frame{width:100%;aspect-ratio:16/9;border:1px solid #d0d7de;background:#fff;overflow:hidden}iframe,img{width:100%;height:100%;border:0;object-fit:contain}p{margin:8px 0 0;color:#57606a;font-size:12px}</style>",
@@ -803,6 +1211,12 @@ function contactSheetHtml(pages: Array<{ page: number; fileName: string; format?
         ? `<img src="${escapeHtmlAttr(page.fileName)}" alt="page ${page.page}">`
         : `<iframe src="${escapeHtmlAttr(page.fileName)}" title="page ${page.page}"></iframe>`;
       return `<section class="page"><div class="frame">${media}</div><p>page ${page.page} · ${escapeHtmlAttr(page.stableObjectId)} · ${page.objectMapEntries} objects${page.width && page.height ? ` · ${page.width}x${page.height}` : ""}</p></section>`;
+    }),
+    ...crops.map((crop) => {
+      const media = crop.format === "png" || crop.format === "jpeg"
+        ? `<img src="${escapeHtmlAttr(crop.fileName)}" alt="crop ${crop.page}">`
+        : `<iframe src="${escapeHtmlAttr(crop.fileName)}" title="crop ${crop.page}"></iframe>`;
+      return `<section class="page"><div class="frame">${media}</div><p>crop page ${crop.page} · ${escapeHtmlAttr(crop.objectId)}${crop.width && crop.height ? ` · ${crop.width}x${crop.height}` : ""}</p></section>`;
     }),
     "</main>"
   ].join("");
@@ -825,40 +1239,92 @@ export async function editPayload(context: RuntimeContext): Promise<unknown> {
   const raw = await readInputJson(context, opsPath);
   const editOptions = asRecord(asRecord(raw).options);
   const operations = await hydrateEditOperationAssets(context, normalizeEditOperations(raw));
-  const editOpsValidation = validateSchema("officegen.edit.ops@1.2", editOpsValidationPayload(raw, operations, input));
+  const editOpsValidation = validateSchema("officegen.edit.ops@1.2", editOpsValidationPayload(raw, operations, input), { diagnostics: context.agent || context.json });
   if (!editOpsValidation.ok) {
     throw new CliFailure({
       code: "SCHEMA_INVALID",
       command: "edit",
       message: "edit operations must conform to officegen.edit.ops@1.2.",
-      details: { errors: editOpsValidation.errors }
+      details: schemaValidationFailureDetails("officegen.edit.ops@1.2", editOpsValidation, context)
     }, 3);
   }
   const inputPath = await validateInputPath(context, input);
   const dryRun = hasFlag(context.argv, "--dry-run");
-  const out = dryRun ? optionValue(context.argv, "--out") : await validatedOutOption(context);
+  const allowPartial = hasFlag(context.argv, "--allow-partial") || booleanOption(editOptions, "allowPartial") === true;
+  const outResolution = dryRun ? { out: optionValue(context.argv, "--out"), inPlace: false } : await resolveEditOutputPath(context, inputPath);
+  const out = outResolution.out;
+  const inPlaceBackup = outResolution.inPlace ? await createInPlaceEditBackup(context, inputPath) : undefined;
+  const editOut = inPlaceBackup && out ? inPlaceBackup.tempOutputPath : out;
   await assertMutationLock(context, inputPath, operations);
   if (!dryRun) await assertSafeOoxmlMutationInput(inputPath, "edit");
-  const result = await edit(inputPath, operations, withFormatConfig(context, {
-    out,
-    dryRun,
-    resolveSelectors: hasFlag(context.argv, "--resolve-selectors"),
-    atomic: booleanOption(editOptions, "atomic"),
-    validateFirst: booleanOption(editOptions, "validateFirst"),
-    continueOnError: booleanOption(editOptions, "continueOnError"),
-    idempotencyKey: typeof editOptions.idempotencyKey === "string" ? editOptions.idempotencyKey : undefined,
-    expectedInputSha256: typeof editOptions.expectedInputSha256 === "string" ? editOptions.expectedInputSha256 : undefined,
-    expectedObjectMapHash: typeof editOptions.expectedObjectMapHash === "string" ? editOptions.expectedObjectMapHash : undefined,
-    minSelectorConfidence: typeof editOptions.minSelectorConfidence === "number" ? editOptions.minSelectorConfidence : undefined
-  }));
-  const attributedResult = {
-    ...asRecord(result),
-    attribution: editAttribution(context, operations)
-  };
-  if (!dryRun && optionValue(context.argv, "--tx-out") && result.changed && out) {
-    await writeEditTransaction(context, optionValue(context.argv, "--tx-out")!, inputPath, out, operations);
+  let result;
+  try {
+    result = await edit(inputPath, operations, withFormatConfig(context, {
+      out: editOut,
+      dryRun,
+      resolveSelectors: hasFlag(context.argv, "--resolve-selectors"),
+      atomic: booleanOption(editOptions, "atomic") ?? (allowPartial ? false : undefined),
+      validateFirst: booleanOption(editOptions, "validateFirst"),
+      continueOnError: booleanOption(editOptions, "continueOnError") ?? (allowPartial ? true : undefined),
+      allowPartial,
+      idempotencyKey: typeof editOptions.idempotencyKey === "string" ? editOptions.idempotencyKey : undefined,
+      expectedInputSha256: typeof editOptions.expectedInputSha256 === "string" ? editOptions.expectedInputSha256 : undefined,
+      expectedObjectMapHash: typeof editOptions.expectedObjectMapHash === "string" ? editOptions.expectedObjectMapHash : undefined,
+      expectedObjectGraphHash: typeof editOptions.expectedObjectGraphHash === "string" ? editOptions.expectedObjectGraphHash : undefined,
+      selectionLock: selectionLockOption(editOptions),
+      minSelectorConfidence: typeof editOptions.minSelectorConfidence === "number" ? editOptions.minSelectorConfidence : undefined
+    }));
+    if (inPlaceBackup && out) {
+      await finalizeInPlaceEditOutput(inPlaceBackup.tempOutputPath, out, result);
+      result = { ...asRecord(result), out: asRecord(result).changed === true ? out : undefined };
+    }
+  } catch (error) {
+    if (inPlaceBackup) await fs.unlink(inPlaceBackup.tempOutputPath).catch(() => undefined);
+    throw error;
   }
-  return dryRun ? attributedResult : withOutputArtifact(attributedResult, out, "edit", inputPath);
+  const resultRecord = asRecord(result);
+  const transaction = !dryRun && optionValue(context.argv, "--tx-out") && resultRecord.changed === true && out
+    ? await writeEditTransaction(context, optionValue(context.argv, "--tx-out")!, inputPath, out, operations, resultRecord, inPlaceBackup)
+    : inPlaceBackup && out
+      ? await writeEditTransaction(context, inPlaceBackup.transactionPath, inputPath, out, operations, resultRecord, inPlaceBackup)
+      : undefined;
+  const inPlace = inPlaceBackup ? inPlaceBackupResult(inPlaceBackup, transaction?.transactionPath) : undefined;
+  const artifacts = [
+    ...(inPlaceBackup ? [
+      await artifactRecord(inPlaceBackup.backupPath, "edit-backup", targetFromInput(inputPath), "edit", inputPath),
+      ...(transaction?.transactionPath ? [await artifactRecord(transaction.transactionPath, "edit-transaction", "json", "edit", inputPath)] : [])
+    ] : [])
+  ];
+  const attributedResult = {
+    ...resultRecord,
+    attribution: editAttribution(context, operations),
+    inPlace,
+    artifacts: artifacts.length ? [...asArray(resultRecord.artifacts).map(asRecord), ...artifacts] : resultRecord.artifacts
+  };
+  return dryRun ? attributedResult : withOutputArtifact(withVerifyPendingWarning(attributedResult, out, "edit"), out, "edit", inputPath, { skipValidation: Boolean(inPlaceBackup) });
+}
+
+function withVerifyPendingWarning(result: unknown, out: string | undefined, command: string): unknown {
+  if (!out) return result;
+  const record = asRecord(result);
+  const warning = {
+    code: "VERIFY_NOT_RUN_AFTER_MUTATION",
+    severity: "warning",
+    message: `${command} wrote an output artifact but did not run verify; run officegen verify on the output before release.`,
+    nextSuggestedCommand: `officegen verify ${quoteCommandValue(out)} --visual --json`
+  };
+  return {
+    ...record,
+    readiness: record.readiness ?? "warning",
+    readinessNotes: [
+      ...asArray(record.readinessNotes),
+      "Output artifact has not been verified after mutation."
+    ],
+    warnings: [
+      ...asArray(record.warnings),
+      warning
+    ]
+  };
 }
 
 async function hydrateEditOperationAssets(context: RuntimeContext, operations: ReturnType<typeof normalizeEditOperations>): Promise<ReturnType<typeof normalizeEditOperations>> {
@@ -931,28 +1397,168 @@ function editAttribution(context: RuntimeContext, operations: ReturnType<typeof 
   };
 }
 
-async function writeEditTransaction(context: RuntimeContext, txOut: string, inputPath: string, outputPath: string, operations: ReturnType<typeof normalizeEditOperations>): Promise<void> {
-  const txPath = await validateOutputPath(context, txOut);
+interface EditOutputResolution {
+  out?: string;
+  inPlace: boolean;
+}
+
+interface InPlaceEditBackup {
+  inputPath: string;
+  backupPath: string;
+  backupSha256: string;
+  inputSha256: string;
+  tempOutputPath: string;
+  transactionPath: string;
+  createdAt: string;
+}
+
+async function resolveEditOutputPath(context: RuntimeContext, inputPath: string): Promise<EditOutputResolution> {
+  const requestedOut = optionValue(context.argv, "--out");
+  const inPlace = hasFlag(context.argv, "--in-place");
+  if (!requestedOut) {
+    if (inPlace) {
+      throw new CliFailure({
+        code: "OPTION_NOT_EFFECTIVE",
+        command: "edit",
+        message: "--in-place requires --out to be the same file as the edit input."
+      }, 2);
+    }
+    return { inPlace: false };
+  }
+
+  const requestedOutPath = path.isAbsolute(requestedOut) ? requestedOut : path.resolve(context.cwd, requestedOut);
+  const samePath = await pathsReferToSameFile(inputPath, requestedOutPath);
+  if (samePath && !inPlace) {
+    throw new CliFailure({
+      code: "EDIT_IN_PLACE_BLOCKED",
+      command: "edit",
+      message: "Refusing in-place edit: edit input and --out refer to the same file. Re-run with --in-place to create a backup transaction first.",
+      details: {
+        inputPath,
+        out: requestedOut,
+        overwriteIsNotEnough: true,
+        requiredFlag: "--in-place"
+      }
+    }, 3);
+  }
+  if (!samePath && inPlace) {
+    throw new CliFailure({
+      code: "OPTION_NOT_EFFECTIVE",
+      command: "edit",
+      message: "--in-place is only valid when --out refers to the same file as the edit input.",
+      details: { inputPath, out: requestedOut }
+    }, 2);
+  }
+
+  return {
+    out: await validateOutputPath(context, requestedOut, { overwrite: samePath ? true : undefined }),
+    inPlace: samePath
+  };
+}
+
+async function pathsReferToSameFile(leftPath: string, rightPath: string): Promise<boolean> {
+  const normalize = (value: string): string => process.platform === "win32" ? value.toLowerCase() : value;
+  const leftResolved = path.resolve(leftPath);
+  const rightResolved = path.resolve(rightPath);
+  if (normalize(leftResolved) === normalize(rightResolved)) return true;
+  const [leftReal, rightReal] = await Promise.all([
+    fs.realpath(leftResolved).catch(() => leftResolved),
+    fs.realpath(rightResolved).catch(() => rightResolved)
+  ]);
+  if (normalize(leftReal) === normalize(rightReal)) return true;
+  const [leftStats, rightStats] = await Promise.all([
+    fs.stat(leftResolved).catch(() => undefined),
+    fs.stat(rightResolved).catch(() => undefined)
+  ]);
+  return Boolean(leftStats && rightStats && leftStats.dev === rightStats.dev && leftStats.ino === rightStats.ino);
+}
+
+async function createInPlaceEditBackup(context: RuntimeContext, inputPath: string): Promise<InPlaceEditBackup> {
   const backupDir = path.join(context.cwd, ".officegen", "transactions");
   await fs.mkdir(backupDir, { recursive: true });
-  const backupPath = path.join(backupDir, `${path.basename(inputPath)}.${Date.now()}.bak`);
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const token = randomUUID();
+  const backupPath = path.join(backupDir, `${path.basename(inputPath)}.${stamp}.${token}.bak`);
+  const tempOutputPath = path.join(path.dirname(inputPath), `.${path.basename(inputPath)}.${process.pid}.${token}.officegen-tmp`);
+  const transactionPath = optionValue(context.argv, "--tx-out")
+    ? await validateOutputPath(context, optionValue(context.argv, "--tx-out")!)
+    : path.join(backupDir, `${path.basename(inputPath)}.${stamp}.${token}.tx.json`);
+  const inputSha256 = await sha256File(inputPath);
   await fs.copyFile(inputPath, backupPath);
-  const tx = {
+  const backupSha256 = await sha256File(backupPath);
+  return {
+    inputPath,
+    backupPath,
+    backupSha256,
+    inputSha256,
+    tempOutputPath,
+    transactionPath,
+    createdAt: new Date().toISOString()
+  };
+}
+
+async function finalizeInPlaceEditOutput(tempOutputPath: string, outputPath: string, result: unknown): Promise<void> {
+  const record = asRecord(result);
+  if (asArray(record.errors).length || record.changed !== true) {
+    await fs.unlink(tempOutputPath).catch(() => undefined);
+    return;
+  }
+  await assertValidOoxmlMutationOutput(tempOutputPath, "edit");
+  await fs.rename(tempOutputPath, outputPath);
+}
+
+function inPlaceBackupResult(backup: InPlaceEditBackup, transactionPath = backup.transactionPath): Record<string, unknown> {
+  return {
+    enabled: true,
+    backupPath: backup.backupPath,
+    backupSha256: `sha256:${backup.backupSha256}`,
+    inputSha256: `sha256:${backup.inputSha256}`,
+    transactionPath,
+    restoreCommand: `officegen rollback --tx ${quoteCommandValue(transactionPath)} --out ${quoteCommandValue(backup.inputPath)} --overwrite --json`,
+    createdAt: backup.createdAt
+  };
+}
+
+async function writeEditTransaction(
+  context: RuntimeContext,
+  txOut: string,
+  inputPath: string,
+  outputPath: string,
+  operations: ReturnType<typeof normalizeEditOperations>,
+  editResult: Record<string, unknown>,
+  existingBackup?: InPlaceEditBackup
+): Promise<Record<string, unknown> & { transactionPath: string }> {
+  const txPath = existingBackup && path.resolve(txOut) === path.resolve(existingBackup.transactionPath)
+    ? existingBackup.transactionPath
+    : await validateOutputPath(context, txOut);
+  const backupDir = path.join(context.cwd, ".officegen", "transactions");
+  await fs.mkdir(backupDir, { recursive: true });
+  const backupPath = existingBackup?.backupPath ?? path.join(backupDir, `${path.basename(inputPath)}.${Date.now()}.bak`);
+  if (!existingBackup) await fs.copyFile(inputPath, backupPath);
+  const sourceFingerprint = asRecord(editResult.sourceFingerprint);
+  const tx = stripUndefined({
     schema: "officegen.transaction@1.2",
     inputPath,
     outputPath,
     backupPath,
-    inputSha256: await sha256File(inputPath),
+    backupSha256: existingBackup?.backupSha256 ?? await sha256File(backupPath),
+    inputSha256: typeof editResult.inputSha256 === "string" ? editResult.inputSha256 : existingBackup?.inputSha256 ?? await sha256File(inputPath),
     outputSha256: await sha256File(outputPath).catch(() => undefined),
+    objectMapHash: typeof editResult.objectMapHash === "string" ? editResult.objectMapHash : undefined,
+    objectGraphHash: typeof editResult.objectGraphHash === "string" ? editResult.objectGraphHash : undefined,
+    sourceFingerprint: typeof sourceFingerprint.algorithm === "string" ? sourceFingerprint : undefined,
+    patchPlanInputSha256: asRecord(editResult.patchPlan).inputSha256,
     attribution: editAttribution(context, operations),
     lockPath: optionValue(context.argv, "--lock"),
     scope: optionValue(context.argv, "--scope"),
-    createdAt: new Date().toISOString(),
-    rollbackCommand: `officegen rollback --tx ${quoteCommandValue(txPath)} --out ${quoteCommandValue(inputPath)} --json`
-  };
+    inPlace: Boolean(existingBackup),
+    createdAt: existingBackup?.createdAt ?? new Date().toISOString(),
+    rollbackCommand: `officegen rollback --tx ${quoteCommandValue(txPath)} --out ${quoteCommandValue(inputPath)} --overwrite --json`
+  }) as Record<string, unknown>;
   await fs.mkdir(path.dirname(txPath), { recursive: true });
   await fs.writeFile(txPath, `${JSON.stringify(tx, null, 2)}\n`, "utf8");
   await fs.appendFile(path.join(backupDir, "history.jsonl"), `${JSON.stringify(tx)}\n`, "utf8");
+  return { ...tx, transactionPath: txPath };
 }
 
 function editOpsValidationPayload(raw: unknown, operations: ReturnType<typeof normalizeEditOperations>, input: string): unknown {
@@ -1091,13 +1697,15 @@ export async function repairPayload(context: RuntimeContext): Promise<unknown> {
   const issues = issuesPath ? await readInputJson(context, issuesPath) : undefined;
   const inputPath = await validateInputPath(context, input);
   const out = await validatedOutOption(context);
-  if (!hasFlag(context.argv, "--dry-run")) await assertSafeOoxmlMutationInput(inputPath, "repair");
+  const planOnly = hasFlag(context.argv, "--plan");
+  if (!hasFlag(context.argv, "--dry-run") && !planOnly) await assertSafeOoxmlMutationInput(inputPath, "repair");
   const result = await repair(inputPath, withFormatConfig(context, {
     out,
-    dryRun: hasFlag(context.argv, "--dry-run"),
+    dryRun: hasFlag(context.argv, "--dry-run") || planOnly,
     issues: issues as never
   }));
-  return withOutputArtifact(result, out, "repair", inputPath);
+  if (planOnly) return result.repairPlan;
+  return withOutputArtifact(withVerifyPendingWarning(result, out, "repair"), out, "repair", inputPath);
 }
 
 export async function diffPayload(context: RuntimeContext): Promise<unknown> {
@@ -1237,11 +1845,16 @@ export async function selectPayload(context: RuntimeContext): Promise<unknown> {
   const input = requireInput(context, 3, "select");
   const selector = await selectorFromCli(context);
   const result = await resolveEditSelectors(await validateInputPath(context, input), [{ op: "setText", selector, text: "" }], withFormatConfig(context, {}));
+  const resolution = result.resolutions[0];
+  const selectorResolution = resolution?.selectorResolution;
+  const status = String(selectorResolution?.status ?? (resolution?.reason === "not-found" ? "not_found" : resolution?.reason === "low-confidence" ? "low_confidence" : resolution?.reason ?? "matched"));
   const payload = {
     ...result,
     selector,
-    resolution: result.resolutions[0],
-    readiness: result.resolutions[0]?.reason ? "blocked" : "pass",
+    resolution,
+    selectorResolution,
+    readiness: status === "matched" ? "pass" : "blocked",
+    ...(status === "matched" ? {} : { error: selectResolutionError(status, resolution) }),
     nextSuggestedCommands: [
       `officegen edit ${quoteCommandValue(input)} --ops ${quoteCommandValue("ops.json")} --dry-run --resolve-selectors --agent --json`
     ]
@@ -1258,12 +1871,19 @@ function compactSelectPayload(context: RuntimeContext, payload: Record<string, u
       inputSha256: payload.inputSha256,
       objectMapHash: payload.objectMapHash,
       selector: payload.selector,
+      selectorResolution: payload.selectorResolution,
+      status: asRecord(payload.selectorResolution).status,
       matched: resolution.matched === true,
       matchCount: resolution.matchCount ?? asArray(resolution.matches).length,
       confidence: resolution.confidence,
+      evidence: asRecord(payload.selectorResolution).evidence,
+      ambiguityReason: asRecord(payload.selectorResolution).ambiguityReason,
+      nextActions: asRecord(payload.selectorResolution).nextActions,
+      selectionLock: asRecord(payload.selectorResolution).selectionLock,
       reason: resolution.reason,
       matches: asArray(resolution.matches),
       readiness: payload.readiness,
+      error: payload.error,
       caveats: payload.caveats,
       nextSuggestedCommands: payload.nextSuggestedCommands
     };
@@ -1273,6 +1893,31 @@ function compactSelectPayload(context: RuntimeContext, payload: Record<string, u
     return withoutObjectMap;
   }
   return payload;
+}
+
+function selectResolutionError(status: string, resolutionValue: unknown): Record<string, unknown> {
+  const resolution = asRecord(resolutionValue);
+  const code = status === "ambiguous"
+    ? "SELECTOR_AMBIGUOUS"
+    : status === "not_found"
+      ? "SELECTOR_NOT_FOUND"
+      : status === "low_confidence"
+        ? "SELECTOR_LOW_CONFIDENCE"
+        : status === "stale"
+          ? "EDIT_STALE_SELECTION_LOCK"
+          : "SELECTOR_UNSUPPORTED";
+  const matchCount = Number(resolution?.matchCount ?? 0);
+  return {
+    code,
+    message: status === "ambiguous"
+      ? `Selector matched ${matchCount} objects.`
+      : status === "not_found"
+        ? "Selector matched no objects."
+        : status === "low_confidence"
+          ? `Selector confidence ${String(resolution?.confidence ?? 0)} is below the runtime threshold.`
+          : "Selector resolution is blocked.",
+    details: { status, matchCount }
+  };
 }
 
 async function selectorFromCli(context: RuntimeContext): Promise<Record<string, unknown>> {
@@ -1353,6 +1998,8 @@ export async function planPayload(context: RuntimeContext): Promise<unknown> {
   const inspected = await inspect(inputPath, withFormatConfig(context, { depth: "summary" as const, structure: true }));
   const ops = intentOpsFromGoal(goal, targetFromInput(input));
   const selectorProbe = ops.length ? await resolveEditSelectors(inputPath, ops, withFormatConfig(context, {})) : undefined;
+  const selectorResolutionsV2 = selectorProbe?.resolutions.map((resolution) => resolution.selectorResolution).filter((resolution): resolution is NonNullable<typeof resolution> => Boolean(resolution));
+  const primarySelectorResolution = selectorResolutionsV2?.[0];
   const plan = {
     schema: "officegen.plan.result@1.2",
     input: inputPath,
@@ -1365,11 +2012,25 @@ export async function planPayload(context: RuntimeContext): Promise<unknown> {
       options: {
         atomic: true,
         expectedInputSha256: selectorProbe?.inputSha256,
-        expectedObjectMapHash: selectorProbe?.objectMapHash
+        expectedObjectMapHash: selectorProbe?.objectMapHash,
+        expectedObjectGraphHash: selectorProbe?.objectGraphHash
       },
       ops
     },
-    selectorResolution: selectorProbe,
+    editPlan: {
+      schema: "officegen.editPlan@2",
+      input: inputPath,
+      target: inspected.trusted.format,
+      inputSha256: selectorProbe?.inputSha256,
+      objectMapHash: selectorProbe?.objectMapHash,
+      objectGraphHash: selectorProbe?.objectGraphHash,
+      operations: ops,
+      selectorResolution: primarySelectorResolution,
+      selectorResolutions: selectorProbe,
+      wouldWrite: false
+    },
+    selectorResolution: primarySelectorResolution,
+    selectorResolutions: selectorProbe,
     confidence: selectorProbe?.resolutions.length ? Math.min(...selectorProbe.resolutions.map((resolution) => resolution.confidence ?? 0.5)) : undefined,
     warnings: ops.length ? [] : ["PLAN_INTENT_UNSUPPORTED: deterministic intent parser could not produce EditOps from the goal."],
     nextSuggestedCommands: [
@@ -1800,6 +2461,7 @@ export async function runPayload(context: RuntimeContext): Promise<unknown> {
   const planPath = positionalArgs(context.argv, 3)[0];
   if (planPath === "prepare-reference") return prepareReferencePayload(context);
   if (planPath === "office-edit") return officeEditPayload(context);
+  if (planPath === "office-agent") return officeAgentPayload(context);
   if (!planPath) {
     throw new CliFailure({
       code: "SCHEMA_INVALID",
@@ -1821,6 +2483,7 @@ export async function runPayload(context: RuntimeContext): Promise<unknown> {
   const manifestOut = optionValue(context.argv, "--manifest") ? await validateOutputPath(context, optionValue(context.argv, "--manifest")!) : undefined;
   const summaryOut = optionValue(context.argv, "--summary") ? await validateOutputPath(context, optionValue(context.argv, "--summary")!) : undefined;
   const outputRoot = optionValue(context.argv, "--output-root") ? await validateOutputPath(context, optionValue(context.argv, "--output-root")!, { directory: true }) : undefined;
+  const expectedArtifactsInput = optionValue(context.argv, "--expected-artifacts");
   const denyOutsideOutputRoot = hasFlag(context.argv, "--deny-outside-output-root") || (context.agent && Boolean(outputRoot));
   const globalTimeoutMs = numberOption(context, "--timeout-ms");
   if (logJsonl) await fs.mkdir(path.dirname(logJsonl), { recursive: true });
@@ -1833,9 +2496,11 @@ export async function runPayload(context: RuntimeContext): Promise<unknown> {
   const results = [];
   const artifacts: Array<Record<string, unknown>> = [];
   const validatedPlanPath = await validateInputPath(context, planPath);
+  const planInputSha256 = await sha256File(validatedPlanPath);
+  const expectedArtifactsPath = expectedArtifactsInput ? await validateInputPath(context, expectedArtifactsInput) : undefined;
   await fs.copyFile(validatedPlanPath, path.join(folder.irDir, "plan.json"));
   await updateManifest(folder, (manifest) => {
-    manifest.inputs.push({ path: validatedPlanPath });
+    manifest.inputs.push({ path: validatedPlanPath, sha256: planInputSha256 });
   });
 
   let failed = false;
@@ -1903,10 +2568,34 @@ export async function runPayload(context: RuntimeContext): Promise<unknown> {
       failed = true;
     }
   }
+  const runManifestPath = path.join(folder.logsDir, "run-manifest.json");
+  const evidencePaths = {
+    runManifestPath,
+    coreManifestPath: folder.manifestPath,
+    tracePath: folder.tracePath,
+    logJsonl,
+    manifestOut,
+    summaryOut,
+    logsDir: folder.logsDir
+  };
+  const replayArgv = replayRunArgv({
+    planPath: validatedPlanPath,
+    outputRoot,
+    expectedArtifactsPath,
+    logJsonl,
+    manifestOut,
+    summaryOut,
+    agent: context.agent,
+    strictJson: context.strictJson,
+    json: context.json
+  });
   const runManifest = {
     schema: "officegen.run.manifest@2.4",
     runId: folder.runId,
     planPath: validatedPlanPath,
+    commandLine: commandLineFromArgv(context.argv),
+    inputSha256: `sha256:${planInputSha256}`,
+    runtimeEnvelope: RUNTIME_ENVELOPE_SCHEMA,
     root: folder.root,
     outputRoot,
     status: failed || missingExpected.length || finalError ? "failed" : "completed",
@@ -1916,10 +2605,18 @@ export async function runPayload(context: RuntimeContext): Promise<unknown> {
     missingExpectedArtifacts: missingExpected,
     unexpectedArtifacts,
     error: finalError,
+    evidencePaths,
+    replay: {
+      command: "officegen run",
+      argv: replayArgv,
+      commandLine: replayArgv.map(quoteCommandValue).join(" "),
+      planPath: validatedPlanPath,
+      inputSha256: `sha256:${planInputSha256}`,
+      runtimeEnvelope: RUNTIME_ENVELOPE_SCHEMA
+    },
     logJsonl,
     tracePath: folder.tracePath
   };
-  const runManifestPath = path.join(folder.logsDir, "run-manifest.json");
   await fs.writeFile(runManifestPath, `${JSON.stringify(runManifest, null, 2)}\n`, "utf8");
   if (manifestOut) await fs.writeFile(manifestOut, `${JSON.stringify(runManifest, null, 2)}\n`, "utf8");
   if (summaryOut) await fs.writeFile(summaryOut, runSummaryMarkdown(runManifest), "utf8");
@@ -1940,11 +2637,265 @@ export async function runPayload(context: RuntimeContext): Promise<unknown> {
     expectedArtifacts,
     missingExpectedArtifacts: missingExpected,
     unexpectedArtifacts,
+    evidencePaths,
+    replay: runManifest.replay,
     error: finalError,
     readiness: failed || missingExpected.length || finalError ? "blocked" : "pass",
     partial: false,
     caveats: ["Run executes deterministic built-in steps and can invoke native verification/export only when the active security policy enables renderers."]
   };
+}
+
+interface OfficeAgentPhase {
+  index: number;
+  id: string;
+  standardName: string;
+  manifestRole: string;
+  commandTemplate: string;
+  mutatesOffice: boolean;
+  requiredBefore?: string[];
+  evidence: string[];
+  status: "skeleton" | "manual-ready";
+}
+
+const OFFICE_AGENT_PHASES: OfficeAgentPhase[] = [
+  officeAgentPhase(0, "preflight", "capabilities", "capabilities", "officegen capabilities --agent --json", false, [], ["capabilities.json"]),
+  officeAgentPhase(1, "intake", "intake", "input-intake", "record --input, --goal, --out, active profile, and capabilitiesHash", false, ["preflight"], ["office-agent-manifest.json"]),
+  officeAgentPhase(2, "inspect", "inspect", "inspect", "officegen inspect <input> --depth summary --agent --json", false, ["intake"], ["inspect.json"]),
+  officeAgentPhase(3, "view", "view", "view", "officegen view <input> --out <run>/view --json", false, ["inspect"], ["view/manifest.json"]),
+  officeAgentPhase(4, "select", "select", "selector-resolution", "officegen select <input> --selector <selector.json> --matches-only --agent --json", false, ["inspect"], ["select.json"]),
+  officeAgentPhase(5, "plan", "plan", "edit-plan", "officegen plan <input> --goal <goal.md> --out <run>/ops.json --agent --json", false, ["select"], ["ops.json", "plan.json"]),
+  officeAgentPhase(6, "dry-run", "dry-run", "dry-run-edit", "officegen edit <input> --ops <run>/ops.json --dry-run --resolve-selectors --agent --json", false, ["plan"], ["dry-run.json"]),
+  officeAgentPhase(7, "edit", "edit", "edit-output", "officegen edit <input> --ops <run>/ops.json --out <output> --json", true, ["dry-run"], ["edited-office-file", "edit.json"]),
+  officeAgentPhase(8, "verify", "verify", "verification", "officegen verify <output> --visual --agent --json", false, ["edit"], ["verify.json"]),
+  officeAgentPhase(9, "diff", "diff", "diff", "officegen diff <input> <output> --visual --agent --json", false, ["verify"], ["diff.json"]),
+  officeAgentPhase(10, "repair", "repair", "repair-plan", "officegen repair <output> --issues <issues.json> --dry-run --json", true, ["verify", "diff"], ["repair.json"]),
+  officeAgentPhase(11, "report", "report", "human-report", "write summary.md and reviewer notes from manifest/artifacts", false, ["verify", "diff", "repair"], ["summary.md"]),
+  officeAgentPhase(12, "handoff", "handoff", "release-handoff", "attach manifest, events.jsonl, summary.md, and caveats to release evidence", false, ["report"], ["events.jsonl", "office-agent-manifest.json"])
+];
+
+function officeAgentPhase(
+  index: number,
+  id: string,
+  standardName: string,
+  manifestRole: string,
+  commandTemplate: string,
+  mutatesOffice: boolean,
+  requiredBefore: string[],
+  evidence: string[]
+): OfficeAgentPhase {
+  return {
+    index,
+    id: `phase-${String(index).padStart(2, "0")}-${id}`,
+    standardName,
+    manifestRole,
+    commandTemplate,
+    mutatesOffice,
+    requiredBefore,
+    evidence,
+    status: mutatesOffice ? "manual-ready" : "skeleton"
+  };
+}
+
+async function officeAgentPayload(context: RuntimeContext): Promise<unknown> {
+  const input = optionValue(context.argv, "--input") ?? positionalArgs(context.argv, 4)[0];
+  const goal = optionValue(context.argv, "--goal");
+  const requestedOut = optionValue(context.argv, "--out");
+  const outputRoot = optionValue(context.argv, "--output-root") ? await validateOutputPath(context, optionValue(context.argv, "--output-root")!, { directory: true }) : undefined;
+  const denyOutsideOutputRoot = hasFlag(context.argv, "--deny-outside-output-root") || (context.agent && Boolean(outputRoot));
+  if (outputRoot) await fs.mkdir(outputRoot, { recursive: true });
+  const folder = requestedOut || outputRoot ? undefined : await createRunFolder(context.config);
+  const outDir = requestedOut
+    ? await validateOutputPath(context, requestedOut, { directory: true })
+    : outputRoot
+      ? path.join(outputRoot, "office-agent")
+      : path.join(folder!.root, "office-agent");
+  const manifestOut = optionValue(context.argv, "--manifest") ? await validateOutputPath(context, optionValue(context.argv, "--manifest")!) : undefined;
+  const summaryOut = optionValue(context.argv, "--summary") ? await validateOutputPath(context, optionValue(context.argv, "--summary")!) : undefined;
+  const logJsonlOut = optionValue(context.argv, "--log-jsonl") ? await validateOutputPath(context, optionValue(context.argv, "--log-jsonl")!) : undefined;
+  const inputPath = input ? await validateInputPath(context, input) : undefined;
+  const goalPath = goal ? await validateInputPath(context, goal) : undefined;
+  const targetOut = optionValue(context.argv, "--target")
+    ? await validateOutputPath(context, optionValue(context.argv, "--target")!)
+    : path.join(outDir, inputPath ? `edited${path.extname(inputPath) || ".pptx"}` : "edited.pptx");
+  assertRunOutputRoot("run office-agent", outputRoot, denyOutsideOutputRoot, [
+    { label: "--out", path: outDir },
+    { label: "--target", path: targetOut },
+    ...(manifestOut ? [{ label: "--manifest", path: manifestOut }] : []),
+    ...(summaryOut ? [{ label: "--summary", path: summaryOut }] : []),
+    ...(logJsonlOut ? [{ label: "--log-jsonl", path: logJsonlOut }] : [])
+  ]);
+  await fs.mkdir(outDir, { recursive: true });
+
+  const generatedAt = new Date().toISOString();
+  const workflowPath = path.join(outDir, "office-agent-workflow.json");
+  const localManifestPath = path.join(outDir, "office-agent-manifest.json");
+  const eventsPath = path.join(outDir, "events.jsonl");
+  const localSummaryPath = path.join(outDir, "summary.md");
+  const workflow = officeAgentWorkflowSkeleton({
+    generatedAt,
+    inputPath,
+    goalPath,
+    outDir,
+    targetOut
+  });
+  await writeGeneratedJson(context, workflowPath, workflow);
+
+  const events = officeAgentEvents(generatedAt, workflow);
+  await writeGeneratedText(context, eventsPath, events);
+  if (logJsonlOut) await writeGeneratedText(context, logJsonlOut, events);
+
+  const manifest = {
+    schema: "officegen.office-agent.manifest@3.1",
+    generatedAt,
+    release: "3.1.0",
+    runtimeSpec: "perfect-runtime-spec",
+    runtimeProjection: "runtime-v2",
+    mode: "skeleton-evidence",
+    status: "skeleton",
+    phaseCount: OFFICE_AGENT_PHASES.length,
+    input: inputPath,
+    goal: goalPath,
+    outDir,
+    targetOut,
+    workflowPath,
+    eventsPath,
+    logJsonlOut,
+    phases: asArray(workflow.steps).map(asRecord),
+    limitations: [
+      "run office-agent writes the standard workflow skeleton and evidence manifest only.",
+      "It does not execute complete autonomous repair or claim final document readiness.",
+      "Mutating edit and repair phases remain manual-ready until explicit ops, dry-run evidence, and verify/diff results exist."
+    ],
+    requiredPhaseNames: ["inspect", "select", "plan", "dry-run", "edit", "verify", "diff", "repair", "report"]
+  };
+  await writeGeneratedJson(context, localManifestPath, manifest);
+  if (manifestOut) await writeGeneratedJson(context, manifestOut, manifest);
+
+  const summary = officeAgentSummaryMarkdown(manifest);
+  await writeGeneratedText(context, localSummaryPath, summary);
+  if (summaryOut) await writeGeneratedText(context, summaryOut, summary);
+
+  const artifacts = [
+    await artifactRecord(workflowPath, "office-agent-workflow", "json", "run office-agent", inputPath),
+    await artifactRecord(localManifestPath, "office-agent-manifest", "json", "run office-agent", inputPath),
+    await artifactRecord(localSummaryPath, "office-agent-summary", "md", "run office-agent", inputPath),
+    await artifactRecord(eventsPath, "office-agent-events", "jsonl", "run office-agent", inputPath),
+    ...(manifestOut ? [await artifactRecord(manifestOut, "office-agent-manifest", "json", "run office-agent", inputPath)] : []),
+    ...(summaryOut ? [await artifactRecord(summaryOut, "office-agent-summary", "md", "run office-agent", inputPath)] : []),
+    ...(logJsonlOut ? [await artifactRecord(logJsonlOut, "office-agent-events", "jsonl", "run office-agent", inputPath)] : [])
+  ];
+
+  const result = {
+    schema: "officegen.office-agent.result@3.1",
+    generatedAt,
+    release: "3.1.0",
+    runtimeProjection: "runtime-v2",
+    mode: "skeleton-evidence",
+    readiness: "warning",
+    phaseCount: OFFICE_AGENT_PHASES.length,
+    requiredPhaseNames: manifest.requiredPhaseNames,
+    outDir,
+    workflowPath,
+    manifestPath: localManifestPath,
+    manifestOut,
+    summaryPath: localSummaryPath,
+    summaryOut,
+    eventsPath,
+    logJsonl: logJsonlOut ?? eventsPath,
+    phases: asArray(workflow.steps).map(asRecord),
+    artifacts,
+    caveats: manifest.limitations,
+    nextSuggestedCommands: [
+      "Review office-agent-workflow.json and replace placeholders before mutating files.",
+      inputPath && goalPath ? `officegen plan ${quoteCommandValue(inputPath)} --goal ${quoteCommandValue(goalPath)} --out ${quoteCommandValue(path.join(outDir, "ops.json"))} --agent --json` : "officegen plan <input> --goal <goal.md> --out <run>/ops.json --agent --json",
+      "officegen edit <input> --ops <run>/ops.json --dry-run --resolve-selectors --agent --json"
+    ]
+  };
+  return maybeWriteReport(context, result, "run office-agent");
+}
+
+function assertRunOutputRoot(command: string, outputRoot: string | undefined, denyOutsideOutputRoot: boolean, outputs: Array<{ label: string; path: string }>): void {
+  if (!outputRoot || !denyOutsideOutputRoot) return;
+  const outside = outputs.filter((output) => isOutside(outputRoot, output.path));
+  if (!outside.length) return;
+  throw new CliFailure({
+    code: "SECURITY_PATH_OUTSIDE_ROOT",
+    command,
+    message: `${command} outputs must stay inside --output-root when --deny-outside-output-root is set.`,
+    details: { outputRoot, outside }
+  }, 4);
+}
+
+function officeAgentWorkflowSkeleton(input: {
+  generatedAt: string;
+  inputPath?: string;
+  goalPath?: string;
+  outDir: string;
+  targetOut: string;
+}): Record<string, unknown> {
+  const token = {
+    input: input.inputPath ?? "<input>",
+    goal: input.goalPath ?? "<goal.md>",
+    run: input.outDir,
+    output: input.targetOut
+  };
+  return {
+    schema: "officegen.office-agent.workflow@3.1",
+    generatedAt: input.generatedAt,
+    release: "3.1.0",
+    runtimeProjection: "runtime-v2",
+    phaseCount: OFFICE_AGENT_PHASES.length,
+    skeletonOnly: true,
+    steps: OFFICE_AGENT_PHASES.map((phase) => ({
+      ...phase,
+      commandTemplate: phase.commandTemplate
+        .replaceAll("<input>", token.input)
+        .replaceAll("<goal.md>", token.goal)
+        .replaceAll("<run>", token.run)
+        .replaceAll("<output>", token.output)
+        .replaceAll("<selector.json>", path.join(token.run, "selector.json"))
+        .replaceAll("<issues.json>", path.join(token.run, "issues.json")),
+      manifestPath: path.join(token.run, `${phase.id}.json`),
+      execution: phase.mutatesOffice ? "manual-gated" : "skeleton"
+    }))
+  };
+}
+
+function officeAgentEvents(generatedAt: string, workflow: Record<string, unknown>): string {
+  const steps = asArray(workflow.steps).map(asRecord);
+  const events = [
+    { type: "office-agent.skeleton.started", generatedAt, release: "3.1.0", runtimeProjection: "runtime-v2" },
+    ...steps.map((phase) => ({
+      type: "office-agent.phase.declared",
+      generatedAt,
+      id: phase.id,
+      standardName: phase.standardName,
+      manifestRole: phase.manifestRole,
+      execution: phase.execution
+    })),
+    { type: "office-agent.skeleton.completed", generatedAt, phaseCount: steps.length }
+  ];
+  return `${events.map((event) => JSON.stringify(event)).join("\n")}\n`;
+}
+
+function officeAgentSummaryMarkdown(manifest: Record<string, unknown>): string {
+  const phases = asArray(manifest.phases).map(asRecord);
+  return `${[
+    "# officegen run office-agent summary",
+    "",
+    `- release: ${manifest.release}`,
+    `- runtimeProjection: ${manifest.runtimeProjection}`,
+    `- mode: ${manifest.mode}`,
+    `- phaseCount: ${manifest.phaseCount}`,
+    `- status: ${manifest.status}`,
+    "",
+    "## Phases",
+    ...phases.map((phase) => `- ${phase.id}: ${phase.standardName} (${phase.execution})`),
+    "",
+    "## Caveats",
+    ...asArray(manifest.limitations).map((limitation) => `- ${limitation}`)
+  ].join("\n")}\n`;
 }
 
 async function officeEditPayload(context: RuntimeContext): Promise<unknown> {
@@ -1987,7 +2938,8 @@ async function officeEditPayload(context: RuntimeContext): Promise<unknown> {
     options: {
       atomic: true,
       expectedInputSha256: selectorPlan.inputSha256,
-      expectedObjectMapHash: selectorPlan.objectMapHash
+      expectedObjectMapHash: selectorPlan.objectMapHash,
+      expectedObjectGraphHash: selectorPlan.objectGraphHash
     },
     ops: operations
   };
@@ -2247,21 +3199,32 @@ async function executeRunStep(
     const effectiveOut = out ?? path.join(folder.outputDir, `${String(index + 1).padStart(2, "0")}-edited.${path.extname(editInput).replace(".", "") || "pptx"}`);
     const opsInput = await resolveRunInput(context, step.ops, stepOutputs);
     const rawOps = await readInputJson(context, requireRunInput(command, opsInput));
+    const editOptions = asRecord(asRecord(rawOps).options);
+    const allowPartial = step.allowPartial === true || booleanOption(editOptions, "allowPartial") === true;
     const operations = await hydrateEditOperationAssets(context, normalizeEditOperations(rawOps));
-    const editOpsValidation = validateSchema("officegen.edit.ops@1.2", editOpsValidationPayload(rawOps, operations, editInput));
+    const editOpsValidation = validateSchema("officegen.edit.ops@1.2", editOpsValidationPayload(rawOps, operations, editInput), { diagnostics: context.agent || context.json });
     if (!editOpsValidation.ok) {
       throw new CliFailure({
         code: "SCHEMA_INVALID",
         command: "run",
         message: "run edit step operations must conform to officegen.edit.ops@1.2.",
-        details: { step: step.id, errors: editOpsValidation.errors }
+        details: { step: step.id, ...schemaValidationFailureDetails("officegen.edit.ops@1.2", editOpsValidation, context) }
       }, 3);
     }
     if (effectiveOut && step.dryRun !== true) await assertSafeOoxmlMutationInput(editInput, "run edit");
     return edit(editInput, operations, withFormatConfig(context, {
       out: effectiveOut,
       dryRun: step.dryRun === true,
-      resolveSelectors: step.resolveSelectors === true
+      resolveSelectors: step.resolveSelectors === true,
+      atomic: booleanOption(editOptions, "atomic") ?? (allowPartial ? false : undefined),
+      validateFirst: booleanOption(editOptions, "validateFirst"),
+      continueOnError: booleanOption(editOptions, "continueOnError") ?? (allowPartial ? true : undefined),
+      allowPartial,
+      expectedInputSha256: typeof editOptions.expectedInputSha256 === "string" ? editOptions.expectedInputSha256 : undefined,
+      expectedObjectMapHash: typeof editOptions.expectedObjectMapHash === "string" ? editOptions.expectedObjectMapHash : undefined,
+      expectedObjectGraphHash: typeof editOptions.expectedObjectGraphHash === "string" ? editOptions.expectedObjectGraphHash : undefined,
+      selectionLock: selectionLockOption(editOptions),
+      minSelectorConfidence: typeof editOptions.minSelectorConfidence === "number" ? editOptions.minSelectorConfidence : undefined
     }));
   }
   if (command === "export") {
@@ -2347,7 +3310,8 @@ async function assertRunStepOutcome(command: string, result: unknown, artifacts:
   const dryRun = step.dryRun === true || record.planOnly === true || record.dryRun === true;
   if ((command === "edit" || command === "repair") && !dryRun) {
     const errors = asArray(record.errors);
-    if (command === "edit" && errors.length) {
+    const allowPartial = step.allowPartial === true || record.allowPartial === true;
+    if (command === "edit" && errors.length && (!allowPartial || Number(record.applied ?? 0) <= 0)) {
       const code = runEditFailureCode(errors);
       throw new CliFailure({
         code,
@@ -2430,6 +3394,36 @@ async function appendRunJsonl(filePath: string | undefined, record: Record<strin
   await fs.appendFile(filePath, `${JSON.stringify(record)}\n`, "utf8");
 }
 
+function commandLineFromArgv(argv: string[]): string {
+  return argv.slice(1).map(quoteCommandValue).join(" ");
+}
+
+function replayRunArgv(input: {
+  planPath: string;
+  outputRoot?: string;
+  expectedArtifactsPath?: string;
+  logJsonl?: string;
+  manifestOut?: string;
+  summaryOut?: string;
+  agent: boolean;
+  strictJson: boolean;
+  json: boolean;
+}): string[] {
+  return [
+    "officegen",
+    "run",
+    input.planPath,
+    ...(input.outputRoot ? ["--output-root", input.outputRoot] : []),
+    ...(input.expectedArtifactsPath ? ["--expected-artifacts", input.expectedArtifactsPath] : []),
+    ...(input.logJsonl ? ["--log-jsonl", input.logJsonl] : []),
+    ...(input.manifestOut ? ["--manifest", input.manifestOut] : []),
+    ...(input.summaryOut ? ["--summary", input.summaryOut] : []),
+    ...(input.agent ? ["--agent"] : []),
+    ...(input.strictJson ? ["--strict-json"] : []),
+    ...(input.json ? ["--json"] : [])
+  ];
+}
+
 async function readExpectedArtifacts(context: RuntimeContext): Promise<Array<Record<string, unknown>>> {
   const expectedPath = optionValue(context.argv, "--expected-artifacts");
   if (!expectedPath) return [];
@@ -2466,9 +3460,15 @@ async function collectResultArtifacts(result: unknown, command: string, input?: 
   return artifacts;
 }
 
-async function withOutputArtifact(result: unknown, requestedOut: string | undefined, command: string, input?: string): Promise<unknown> {
+async function withOutputArtifact(
+  result: unknown,
+  requestedOut: string | undefined,
+  command: string,
+  input?: string,
+  options: { skipValidation?: boolean } = {}
+): Promise<unknown> {
   if (!requestedOut) return result;
-  if (command === "edit" || command === "repair" || command === "asset replace") await assertValidOoxmlMutationOutput(requestedOut, command);
+  if (!options.skipValidation && (command === "edit" || command === "repair" || command === "asset replace")) await assertValidOoxmlMutationOutput(requestedOut, command);
   const record = asRecord(result);
   const existing = asArray(record.artifacts).map(asRecord);
   if (existing.some((artifact) => artifact.path === requestedOut)) return result;
@@ -2927,6 +3927,16 @@ async function designCaptureArtifacts(optional: ReturnType<typeof optionalContex
 function booleanOption(record: Record<string, unknown>, key: string): boolean | undefined {
   if (!(key in record)) return undefined;
   return record[key] === true;
+}
+
+function selectionLockOption(record: Record<string, unknown>): { objectGraphHash: string; nodeId?: string; sourceFingerprint?: string } | undefined {
+  const lock = asRecord(record.selectionLock);
+  if (typeof lock.objectGraphHash !== "string") return undefined;
+  return {
+    objectGraphHash: lock.objectGraphHash,
+    ...(typeof lock.nodeId === "string" ? { nodeId: lock.nodeId } : {}),
+    ...(typeof lock.sourceFingerprint === "string" ? { sourceFingerprint: lock.sourceFingerprint } : {})
+  };
 }
 
 function withFormatConfig<T extends object>(context: RuntimeContext, options: T): T {

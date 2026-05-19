@@ -24,7 +24,7 @@ export const COMMAND_SPECS = [
     spec("rollback", ["rollback"]),
     spec("lock", ["lock"]),
     spec("merge", ["merge"]),
-    spec("run", ["run", "run prepare-reference", "run office-edit"]),
+    spec("run", ["run", "run prepare-reference", "run office-edit", "run office-agent"]),
     spec("critique", ["critique"]),
     spec("improve", ["improve"]),
     spec("benchmark", ["benchmark run", "benchmark compare"]),
@@ -79,6 +79,13 @@ export const formatCapabilities = {
 };
 export const featureContracts = [
     {
+        area: "Configuration mutation",
+        formats: ["json"],
+        support: "limited",
+        summary: "config set persists an allowlisted leaf value to either project or user config with an atomic JSON write.",
+        limitations: ["Arbitrary config object rewrites are not exposed.", "Values are validated against the portable CLI config contract before writing."]
+    },
+    {
         area: "PPTX SmartArt",
         formats: ["pptx"],
         support: "unsupported",
@@ -114,6 +121,133 @@ export const featureContracts = [
         limitations: ["DOCX is not a full DTP/legal-contract authoring engine.", "XLSX does not recalculate or fully author chart/pivot/slicer models internally.", "PDF content rewriting is not implemented."]
     }
 ];
+export const runtimeProfiles = {
+    "current-limited-v3.1": {
+        id: "current-limited-v3.1",
+        role: "current",
+        runtime: "v3.1 portable CLI",
+        summary: "Current v3.1 support is a limited, evidence-backed runtime profile. It includes runtime v2 projections and scoped Office/PDF operations, but it does not include perfect-runtime target capabilities.",
+        capabilities: [
+            {
+                id: "runtime-v2-projections",
+                area: "Runtime v2 projections",
+                support: "supported",
+                summary: "Runtime v2 envelope, selector, object graph, edit/patch plan, and verify projections are current supported contract surfaces.",
+                evidence: [
+                    "officegen.envelope@2",
+                    "officegen.selectorResolution@2",
+                    "officegen.objectGraph@2",
+                    "officegen.editPlan@2",
+                    "officegen.patchPlan@2",
+                    "officegen.verify@2"
+                ],
+                gaps: []
+            },
+            {
+                id: "office-agent-skeleton-evidence",
+                area: "office-agent runtime skeleton",
+                support: "supported",
+                summary: "officegen run office-agent writes the 13-phase runtime-v2 skeleton and evidence manifest for release review.",
+                evidence: ["officegen.office-agent.manifest@3.1", "officegen.office-agent.workflow@3.1", "officegen.office-agent.result@3.1"],
+                gaps: ["Does not execute complete autonomous repair or prove final document readiness by itself."]
+            },
+            {
+                id: "scoped-office-pdf-editops",
+                area: "Scoped Office/PDF EditOps",
+                support: "limited",
+                summary: "Current edit operations are scoped, auditable mutations with dry-run and verification follow-up rather than full application-level engines.",
+                evidence: ["officegen.edit.ops@1.2", "featureContracts", "formatCapabilities"],
+                gaps: ["Multi-series charts, full pivot/slicer authoring, complete DOCX layout editing, and PDF content rewriting remain outside current support."]
+            },
+            {
+                id: "smartart-editing",
+                area: "PPTX SmartArt editing",
+                support: "unsupported",
+                summary: "SmartArt creation, node editing, layout changes, and conversion are unsupported in current-limited-v3.1.",
+                evidence: ["unsupportedNow", "PPTX SmartArt feature contract"],
+                gaps: ["Target profile requires SmartArt edit semantics and verification evidence."]
+            },
+            {
+                id: "pdf-true-redaction",
+                area: "PDF true redaction",
+                support: "unsupported",
+                summary: "PDF overlays and annotations are supported as additive marks only; physical redaction and content rewrite are unsupported in current-limited-v3.1.",
+                evidence: ["unsupportedNow", "PDF editing and redaction feature contract", "pdf.textOverlay x-officegen-support"],
+                gaps: ["Target profile requires removal or cryptographic scrubbing evidence for underlying PDF content."]
+            },
+            {
+                id: "complete-autonomous-repair",
+                area: "Complete autonomous repair",
+                support: "unsupported",
+                summary: "Current office-agent evidence is skeleton-only and does not claim complete autonomous repair.",
+                evidence: ["office-agent caveats", "runtimeProjection=runtime-v2"],
+                gaps: ["Target profile requires executed repair, verify, diff, and final readiness evidence."]
+            }
+        ]
+    },
+    "perfect-runtime-target": {
+        id: "perfect-runtime-target",
+        role: "target",
+        runtime: "perfect runtime spec",
+        summary: "Perfect runtime target describes desired capability, not current v3.1 support. Target-only entries must not be advertised as supported by current-limited-v3.1.",
+        capabilities: [
+            {
+                id: "runtime-v2-projections",
+                area: "Runtime v2 projections",
+                support: "supported",
+                summary: "Runtime v2 projections remain part of the target and are already supported by the current profile.",
+                evidence: ["current-limited-v3.1/runtime-v2-projections"],
+                gaps: []
+            },
+            {
+                id: "smartart-editing",
+                area: "PPTX SmartArt editing",
+                support: "target-only",
+                summary: "Target profile includes SmartArt authoring and editing, but current-limited-v3.1 marks it unsupported.",
+                evidence: [],
+                gaps: ["Implement SmartArt edit ops, safety checks, and verification evidence before moving to current support."]
+            },
+            {
+                id: "pdf-true-redaction",
+                area: "PDF true redaction",
+                support: "target-only",
+                summary: "Target profile includes true PDF redaction/content removal, but current-limited-v3.1 marks it unsupported.",
+                evidence: [],
+                gaps: ["Implement physical content removal/scrubbing and negative extraction tests before moving to current support."]
+            },
+            {
+                id: "complete-autonomous-repair",
+                area: "Complete autonomous repair",
+                support: "target-only",
+                summary: "Target profile includes end-to-end autonomous repair through final verify/diff readiness, not just skeleton evidence.",
+                evidence: [],
+                gaps: ["Attach executed edit, repair, verify, diff, and readiness artifacts."]
+            },
+            {
+                id: "full-fidelity-office-engines",
+                area: "Full-fidelity Office application engines",
+                support: "target-only",
+                summary: "Target profile includes richer Office behaviors such as multi-series chart editing, pivot/slicer authoring, and full DOCX layout/legal editing.",
+                evidence: [],
+                gaps: ["Promote each engine only after operation schemas, implementation, fixtures, and release evidence exist."]
+            }
+        ]
+    }
+};
+export const specProfile = {
+    currentProfileId: "current-limited-v3.1",
+    targetProfileId: "perfect-runtime-target",
+    runtimeProjection: "runtime-v2",
+    truthfulnessPolicy: "Agents must treat current-limited-v3.1 as the only supported runtime profile. perfect-runtime-target is aspirational until a capability has current evidence.",
+    currentEvidence: [
+        "runtimeProfiles.current-limited-v3.1.capabilities",
+        "featureContracts",
+        "formatCapabilities",
+        "unsupportedNow",
+        "goal/v3.1.0-evidence-matrix.json"
+    ],
+    targetGapIds: ["smartart-editing", "pdf-true-redaction", "complete-autonomous-repair", "full-fidelity-office-engines"]
+};
 export const knownLimitations = featureContracts.flatMap((contract) => contract.limitations.map((limitation) => `${contract.area}: ${limitation}`));
 function spec(feature, commands) {
     return { feature, commands };
@@ -150,6 +284,8 @@ export function computeCapabilitiesHash(config, cliVersion = OFFICEGEN_CLI_VERSI
         releaseCapabilityContractVersion: RELEASE_CAPABILITY_CONTRACT_VERSION,
         formatCapabilities,
         featureContracts,
+        runtimeProfiles,
+        specProfile,
         schemaRegistryVersion: SCHEMA_REGISTRY_VERSION
     };
     return `sha256:${createHash("sha256").update(stableStringify(payload)).digest("hex")}`;
@@ -177,11 +313,14 @@ export function getCapabilities(config, options = {}) {
         jsonBudgetBytes: config.agent.defaultJsonBudgetBytes,
         featureContracts,
         formatCapabilities,
+        runtimeProfiles,
+        specProfile,
         knownLimitations,
         unsupportedNow: [
             "SmartArt creation and full SmartArt editing are unsupported.",
             "Multi-series, secondary-axis, and combo chart editing are unsupported; chart data ops are single-series only.",
             "PDF physical redaction and PDF content rewriting are unsupported; PDF mutation is overlay/annotation only.",
+            "Direct edit commands write artifacts but do not prove final readiness; run verify after mutation before release.",
             "Complete DOCX, XLSX, PPTX, and PDF application-level editing engines are outside the portable CLI contract."
         ],
         nextSuggestedCommands: visibleCommands.some((command) => command === "schema" || command.startsWith("schema "))

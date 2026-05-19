@@ -2,7 +2,21 @@ import { type FeatureKey, type RuntimeContext } from "../shared/types.js";
 export declare function capabilitiesPayload(context: RuntimeContext): unknown;
 export declare function helpPayload(context: RuntimeContext, topic: string[]): unknown;
 export declare function configPayload(context: RuntimeContext): unknown;
-export declare function doctorPayload(context: RuntimeContext): unknown;
+export declare function configSetPayload(context: RuntimeContext): Promise<unknown>;
+type DoctorCheckStatus = "pass" | "fail" | "warning";
+type DoctorCheckSeverity = "info" | "warning" | "error";
+interface RuntimeReadinessCheck {
+    id: string;
+    ok: boolean;
+    detail: string;
+    required?: string;
+    actual?: string;
+    status?: DoctorCheckStatus;
+    severity?: DoctorCheckSeverity;
+    remediation?: string;
+}
+export declare function doctorPayload(context: RuntimeContext): Promise<unknown>;
+export declare function evaluateNodeRuntime(requiredRange: string | undefined, actualVersion: string): RuntimeReadinessCheck;
 export declare function schemaListPayload(context: RuntimeContext): unknown;
 export declare function schemaGetPayload(context: RuntimeContext): unknown;
 export declare function validatePayload(context: RuntimeContext): Promise<unknown>;
@@ -43,3 +57,4 @@ export declare function wiredPayload(feature: FeatureKey): (context: RuntimeCont
 export declare function scaffoldPayload(context: RuntimeContext): Promise<unknown>;
 export declare function groupPayload(context: RuntimeContext, subcommand?: string): unknown;
 export declare function agentPayload(context: RuntimeContext, subcommand?: string): Promise<unknown>;
+export {};

@@ -1,6 +1,6 @@
 import { OFFICEGEN_CLI_VERSION, redactJson, type JsonValue } from "@officegen/core";
 import { availableCommands, nextSuggestedCommands } from "./context.js";
-import { ENVELOPE_SCHEMA, type CliErrorPayload, type Envelope, type RuntimeContext } from "./types.js";
+import { ENVELOPE_SCHEMA, RUNTIME_ENVELOPE_SCHEMA, type CliErrorPayload, type Envelope, type RuntimeContext } from "./types.js";
 
 export function makeEnvelope(context: RuntimeContext, command: string, data: unknown, now: Date): Envelope {
   const result = redactForJson(data, context);
@@ -14,8 +14,10 @@ export function makeEnvelope(context: RuntimeContext, command: string, data: unk
       message: objective.message,
       details: { ...objective.details, artifacts: objective.artifacts }
     });
+    const nextActions = errorSuggestedCommands(context, error);
     return {
       schema: ENVELOPE_SCHEMA,
+      runtimeEnvelope: RUNTIME_ENVELOPE_SCHEMA,
       ok: false,
       command,
       runId: runId(now),
@@ -28,17 +30,21 @@ export function makeEnvelope(context: RuntimeContext, command: string, data: unk
       artifactStatus: objective.artifactStatus,
       readiness: objective.readiness,
       partial: objective.partial,
+      failureClass: failureClassFor({ error, result, readiness: objective.readiness, partial: objective.partial }),
       result,
       error,
       warnings,
       diagnostics,
       artifacts: objective.artifacts,
       availableCommands: availableCommands(context),
-      nextSuggestedCommands: errorSuggestedCommands(context, error)
+      nextSuggestedCommands: nextActions,
+      nextActions
     };
   }
+  const nextActions = nextSuggestedCommands(context);
   return {
     schema: ENVELOPE_SCHEMA,
+    runtimeEnvelope: RUNTIME_ENVELOPE_SCHEMA,
     ok: true,
     command,
     runId: runId(now),
@@ -51,12 +57,14 @@ export function makeEnvelope(context: RuntimeContext, command: string, data: unk
     artifactStatus: objective.artifactStatus,
     readiness: objective.readiness,
     partial: objective.partial,
+    failureClass: failureClassFor({ result, readiness: objective.readiness, partial: objective.partial }),
     result,
     warnings,
     diagnostics,
     artifacts: objective.artifacts,
     availableCommands: availableCommands(context),
-    nextSuggestedCommands: nextSuggestedCommands(context)
+    nextSuggestedCommands: nextActions,
+    nextActions
   };
 }
 
@@ -68,8 +76,11 @@ export function makeErrorEnvelope(
 ): Envelope {
   const details = error.details ?? {};
   const artifacts = Array.isArray(details.artifacts) ? details.artifacts : [];
+  const normalizedError = normalizeCliError(error);
+  const nextActions = errorSuggestedCommands(context, normalizedError);
   return {
     schema: ENVELOPE_SCHEMA,
+    runtimeEnvelope: RUNTIME_ENVELOPE_SCHEMA,
     ok: false,
     command,
     runId: runId(now),
@@ -82,12 +93,14 @@ export function makeErrorEnvelope(
     artifactStatus: artifacts.some((artifact) => artifact && typeof artifact === "object" && (artifact as Record<string, unknown>).exists === false) ? "missing" : "not_expected",
     readiness: "blocked",
     partial: false,
-    error: normalizeCliError(error),
+    failureClass: failureClassFor({ error: normalizedError, readiness: "blocked", partial: false }),
+    error: normalizedError,
     warnings: contextWarnings(context),
     diagnostics: [],
     artifacts,
     availableCommands: availableCommands(context),
-    nextSuggestedCommands: errorSuggestedCommands(context, error)
+    nextSuggestedCommands: nextActions,
+    nextActions
   };
 }
 
@@ -120,6 +133,39 @@ export function normalizeCliError(error: CliErrorPayload): CliErrorPayload {
     category: error.category ?? (security ? "security" : schema ? "schema" : feature ? "usage" : input ? "input" : "runtime"),
     severity: error.severity ?? (security ? "critical" : "error")
   };
+}
+
+function failureClassFor(input: {
+  error?: CliErrorPayload;
+  result?: unknown;
+  readiness?: Envelope["readiness"];
+  partial?: boolean;
+}): NonNullable<Envelope["failureClass"]> {
+  const error = input.error ? normalizeCliError(input.error) : undefined;
+  const code = error?.code ?? "";
+  const record = asRecord(input.result);
+  const readiness = input.readiness ?? readinessFor(record);
+  const partial = input.partial === true || record.partial === true || record.truncated === true || record.status === "truncated";
+
+  if (code.includes("UNSUPPORTED") || code === "FEATURE_NOT_IMPLEMENTED") return "unsupported";
+  if (partial) return "partial";
+  if (isDoctorRuntimeFailure(record, code)) return "runtime";
+  if (!error) return "none";
+  if (error.category === "security") return "security";
+  if (error.category === "schema") return "schema";
+  if (error.category === "input") return "input";
+  if (error.category === "usage") return "usage";
+  if (readiness === "blocked" || code === "VISUAL_DIFF_BLOCKED" || code === "RUN_STEP_FAILED" || code === "TIMEOUT") return "blocked";
+  return "runtime";
+}
+
+function isDoctorRuntimeFailure(record: Record<string, unknown>, code: string): boolean {
+  if (code === "RUNTIME_READINESS_FAILED") return true;
+  if (record.schema !== "officegen.doctor@1.2") return false;
+  return extractArrayField(record, "checks").some((check) => {
+    const item = asRecord(check);
+    return item.id === "node" && item.ok === false;
+  });
 }
 
 export function redactForJson(value: unknown, context: RuntimeContext): unknown {
@@ -194,12 +240,31 @@ function evaluateObjective(context: RuntimeContext, command: string, result: unk
     });
   }
   if (schema === "officegen.edit.result@1.2") {
-    const errors = extractArrayField(record, "errors");
+    const errors = editRequiredFailures(record);
+    const allowPartial = hasFlagArg(context.argv, "--allow-partial") || record.allowPartial === true;
+    const applied = Number(record.applied ?? 0);
+    const hasAppliedOp = applied > 0 || editHasAppliedOperation(record);
     if (errors.length) {
       const code = editErrorCode(errors);
-      return objectiveFailure(defaultState, code, code === "SELECTOR_AMBIGUOUS" ? "Edit selector matched multiple objects." : code === "SELECTOR_NOT_FOUND" ? "Edit selector matched no editable object." : "Edit transaction failed.", { errors });
+      if (allowPartial && hasAppliedOp && !missingArtifact) {
+        return {
+          ok: true,
+          objectiveOk: true,
+          code: "",
+          message: "",
+          ...defaultState,
+          readiness: "partial",
+          partial: true
+        };
+      }
+      return objectiveFailure({
+        ...defaultState,
+        mutationStatus: "failed",
+        artifactStatus: missingArtifact ? "missing" : "not_expected",
+        partial: defaultState.partial || hasAppliedOp
+      }, code, editFailureMessage(code), { errors, allowPartial });
     }
-    if (!dryRun && outArg && (record.changed === false || Number(record.applied ?? 0) <= 0)) {
+    if (!dryRun && outArg && (record.changed === false || applied <= 0)) {
       return objectiveFailure(defaultState, "EDIT_TRANSACTION_FAILED", "Edit requested an output artifact but no operation was applied.", { changed: record.changed, applied: record.applied });
     }
   }
@@ -294,9 +359,46 @@ function ensureRequestedArtifact(artifacts: unknown[], outArg: string | undefine
 
 function editErrorCode(errors: unknown[]): string {
   const reasons = errors.map((error) => String(asRecord(error).reason ?? asRecord(error).message ?? ""));
+  if (reasons.some((reason) => reason.includes("stale-plan") || reason.includes("EDIT_STALE_PLAN"))) return "EDIT_TRANSACTION_FAILED";
   if (reasons.some((reason) => reason.includes("ambiguous"))) return "SELECTOR_AMBIGUOUS";
   if (reasons.some((reason) => reason.includes("not-found") || reason.includes("not found"))) return "SELECTOR_NOT_FOUND";
   return "EDIT_TRANSACTION_FAILED";
+}
+
+function editFailureMessage(code: string): string {
+  if (code === "SELECTOR_AMBIGUOUS") return "Edit selector matched multiple objects.";
+  if (code === "SELECTOR_NOT_FOUND") return "Edit selector matched no editable object.";
+  return "Edit did not apply all required operations.";
+}
+
+function editRequiredFailures(record: Record<string, unknown>): unknown[] {
+  const failures = [...extractArrayField(record, "errors"), ...extractArrayField(record, "opResults").filter(isRequiredEditFailure)];
+  const seen = new Set<string>();
+  return failures.filter((failure) => {
+    const item = asRecord(failure);
+    const key = `${String(item.operationIndex ?? "")}:${String(item.op ?? "")}:${String(item.reason ?? "")}:${String(item.message ?? "")}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function isRequiredEditFailure(value: unknown): boolean {
+  const record = asRecord(value);
+  if (record.applied !== false) return false;
+  const reason = String(record.reason ?? "");
+  return reason === "not-found"
+    || reason === "ambiguous"
+    || reason === "low-confidence"
+    || reason === "unsupported"
+    || reason === "validation-failed"
+    || reason === "skipped-after-error"
+    || reason === "stale-plan"
+    || reason === "unsupported-selector";
+}
+
+function editHasAppliedOperation(record: Record<string, unknown>): boolean {
+  return extractArrayField(record, "opResults").some((result) => asRecord(result).applied === true);
 }
 
 function mutationStatusFor(command: string, record: Record<string, unknown>, dryRun: boolean): NonNullable<Envelope["mutationStatus"]> {
@@ -365,6 +467,7 @@ function applyAgentBudget(context: RuntimeContext, envelope: Envelope): Envelope
     objectiveOk: false,
     readiness: "partial",
     partial: true,
+    failureClass: "partial",
     truncated: true,
     result: {
       schema: "officegen.progressive-disclosure@1.2",
@@ -393,7 +496,8 @@ function applyAgentBudget(context: RuntimeContext, envelope: Envelope): Envelope
       }
     ],
     diagnostics: [],
-    artifacts
+    artifacts,
+    nextActions: recommendedNarrowCommands(envelope.command, context)
   };
 
   return compact;

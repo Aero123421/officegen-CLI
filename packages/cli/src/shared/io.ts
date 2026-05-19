@@ -47,13 +47,13 @@ export async function validatedOutOption(context: RuntimeContext): Promise<strin
 export async function validateOutputPath(
   context: RuntimeContext,
   outputPath: string,
-  options: { directory?: boolean } = {}
+  options: { directory?: boolean; overwrite?: boolean } = {}
 ): Promise<string> {
   try {
     const validated = await validatePath(context.config, {
       kind: "output",
       path: outputPath,
-      overwrite: options.directory ? true : hasFlag(context.argv, "--overwrite")
+      overwrite: options.directory ? true : options.overwrite ?? hasFlag(context.argv, "--overwrite")
     });
     return validated.absolutePath;
   } catch (error) {

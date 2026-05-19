@@ -1,4 +1,5 @@
 import { type InputLike, type OfficegenConfig, type ObjectMapEntry } from "./shared.js";
+import { type SelectorResolutionV2, type SelectorResolutionV2Status, type SelectorSelectionLock } from "./graphs/selectorGraph.js";
 export type EditSelector = {
     stableObjectId?: string;
     slide?: number;
@@ -383,8 +384,11 @@ export interface EditOptions {
     idempotencyKey?: string;
     expectedInputSha256?: string;
     expectedObjectMapHash?: string;
+    expectedObjectGraphHash?: string;
+    selectionLock?: SelectorSelectionLock;
     minSelectorConfidence?: number;
     continueOnError?: boolean;
+    allowPartial?: boolean;
     config?: OfficegenConfig;
 }
 export interface EditSelectorResolution {
@@ -393,8 +397,10 @@ export interface EditSelectorResolution {
     stableObjectId?: string;
     matched: boolean;
     matchCount: number;
+    status?: SelectorResolutionV2Status;
     confidence?: number;
     matches: Array<{
+        nodeId?: string;
         stableObjectId: string;
         kind: string;
         confidence?: number;
@@ -403,6 +409,11 @@ export interface EditSelectorResolution {
         sourcePath?: string;
         xmlPath?: string;
     }>;
+    evidence?: SelectorResolutionV2["evidence"];
+    ambiguityReason?: string;
+    nextActions?: string[];
+    selectionLock?: SelectorSelectionLock;
+    selectorResolution?: SelectorResolutionV2;
     reason?: "not-found" | "ambiguous" | "low-confidence" | "unsupported-selector";
 }
 export interface ResolveEditSelectorsResult {
@@ -410,9 +421,26 @@ export interface ResolveEditSelectorsResult {
     format: string;
     inputSha256: string;
     objectMapHash: string;
+    objectGraphHash: string;
     resolutions: EditSelectorResolution[];
     objectMap: ObjectMapEntry[];
     caveats: string[];
+}
+export interface EditSourceFingerprint {
+    algorithm: "sha256";
+    hash: string;
+    byteLength: number;
+    path?: string;
+}
+export interface EditBlockedEvidence {
+    code: string;
+    field?: string;
+    expected?: string;
+    current?: string;
+    expectedHash?: string;
+    currentHash?: string;
+    operationCount?: number;
+    wouldWrite?: false;
 }
 export interface EditOperationResult {
     operationIndex: number;
@@ -420,6 +448,36 @@ export interface EditOperationResult {
     applied: boolean;
     reason?: "not-found" | "ambiguous" | "low-confidence" | "unsupported" | "validation-failed" | "idempotency-replay" | "skipped-after-error" | "stale-plan";
     message?: string;
+    evidence?: EditBlockedEvidence;
+}
+export interface PatchPlanTouchedPart {
+    path: string;
+    change: "modified" | "created" | "deleted";
+    beforeSha256?: string;
+    afterSha256?: string;
+    sourceFingerprint?: EditSourceFingerprint;
+}
+export interface PatchPlanOperation {
+    operationIndex: number;
+    op: string;
+    wouldApply: boolean;
+    reason?: EditOperationResult["reason"];
+    message?: string;
+    selector?: EditSelector;
+}
+export interface PatchPlan {
+    schema: "officegen.patchPlan@2";
+    format: string;
+    wouldWrite: false;
+    inputSha256: string;
+    objectMapHash?: string;
+    objectGraphHash?: string;
+    sourceFingerprint: EditSourceFingerprint;
+    operations: PatchPlanOperation[];
+    touchedParts: PatchPlanTouchedPart[];
+    expectedChangedParts: string[];
+    sourceFingerprints: EditSourceFingerprint[];
+    blocked: EditOperationResult[];
 }
 export interface EditResult {
     schema: "officegen.edit.result@1.2";
@@ -427,6 +485,8 @@ export interface EditResult {
     dryRun?: boolean;
     inputSha256?: string;
     objectMapHash?: string;
+    objectGraphHash?: string;
+    sourceFingerprint?: EditSourceFingerprint;
     rolledBack?: boolean;
     changed: boolean;
     applied: number;
@@ -436,6 +496,9 @@ export interface EditResult {
     resolvedSelectors?: EditSelectorResolution[];
     opResults?: EditOperationResult[];
     errors?: EditOperationResult[];
+    partial?: boolean;
+    allowPartial?: boolean;
+    patchPlan?: PatchPlan;
     caveats: string[];
 }
 export declare function edit(input: InputLike, operations: EditOperation[], options?: EditOptions): Promise<EditResult>;

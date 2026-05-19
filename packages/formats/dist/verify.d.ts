@@ -22,6 +22,7 @@ export interface VerifyGates {
 }
 export interface VerifyResult {
     schema: "officegen.verify.result@1.2";
+    verificationReport: VerificationReportV2;
     readiness: "pass" | "pass_with_environment_gap" | "warning" | "blocked";
     partial?: boolean;
     phaseTimings?: Array<{
@@ -45,6 +46,22 @@ export interface VerifyResult {
         pagesChecked: number;
         blankPages: number;
     };
+    visualDiff?: {
+        status: "compared" | "skipped" | "blocked";
+        expectedDiffOnly: boolean;
+        fidelity?: "approximate" | "native";
+        pagesCompared?: number;
+        changedPixels?: number;
+        boundingBox?: {
+            x: number;
+            y: number;
+            width: number;
+            height: number;
+        };
+        threshold?: number;
+        message?: string;
+    };
+    expectedDiffOnly?: boolean;
     blockingIssues: string[];
     warnings: string[];
     warningSummary: Array<{
@@ -77,6 +94,39 @@ export interface VerifyResult {
         failed: string[];
         warnings: string[];
     };
+}
+export interface VerificationReportV2 {
+    schema: "officegen.verify@2";
+    version: 2;
+    format: string;
+    readiness: VerifyResult["readiness"];
+    score: number;
+    partial: boolean;
+    gates: Record<VerificationGateName, VerificationGateProjection>;
+    issues: Array<{
+        code: string;
+        severity: "info" | "warning" | "error";
+        category: WarningCategory;
+        message: string;
+        gate?: VerificationGateName;
+    }>;
+    artifacts: Array<{
+        artifactId: string;
+        role: string;
+        path?: string;
+        format?: string;
+        managed: boolean;
+        exists?: boolean;
+        sourceCommand?: string;
+    }>;
+    recommendedRepairs: VerifyResult["recommendedRepairs"];
+}
+type VerificationGateName = "schema" | "package" | "semantic" | "visual" | "native" | "security" | "accessibility" | "goal";
+interface VerificationGateProjection {
+    status: "pass" | "warning" | "fail" | "skipped";
+    score?: number;
+    summary?: Record<string, unknown>;
+    issues: string[];
 }
 export declare function verify(input: InputLike, options?: VerifyOptions): Promise<VerifyResult>;
 type WarningCategory = "quality" | "compatibility" | "security" | "environment";

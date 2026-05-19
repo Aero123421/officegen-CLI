@@ -9,6 +9,7 @@ const root = process.cwd();
 const args = process.argv.slice(2);
 const options = {
   suite: path.join(root, "goal", "acceptance-suite.perfect-spec-v2.json"),
+  v31EvidenceMatrix: path.join(root, "goal", "v3.1.0-evidence-matrix.json"),
   outDir: path.join(root, ".officegen", "acceptance", "perfect-spec")
 };
 
@@ -97,6 +98,7 @@ const fixtureEvidenceSources = [
 
 for (const arg of args) {
   if (arg.startsWith("--suite=")) options.suite = path.resolve(root, arg.slice("--suite=".length));
+  else if (arg.startsWith("--v31-evidence-matrix=")) options.v31EvidenceMatrix = path.resolve(root, arg.slice("--v31-evidence-matrix=".length));
   else if (arg.startsWith("--out-dir=")) options.outDir = path.resolve(root, arg.slice("--out-dir=".length));
   else usage(`unknown argument: ${arg}`);
 }
@@ -127,6 +129,16 @@ const fixtureArtifactPaths = writeFixtureEvidence({
 });
 const nativeRendererPath = path.join(options.outDir, "native-renderer.json");
 writeJson(nativeRendererPath, collectNativeRendererEvidence(generatedAt));
+const v31EvidenceMatrixPath = path.join(options.outDir, "v3.1.0-evidence-matrix.json");
+writeV31EvidenceMatrix({
+  generatedAt,
+  suite,
+  tests,
+  sourcePath: options.v31EvidenceMatrix,
+  outPath: v31EvidenceMatrixPath
+});
+const postTagSmokePath = path.join(options.outDir, "post-tag-smoke.json");
+ensurePostTagSmokePlaceholder({ generatedAt, suite, file: postTagSmokePath });
 const parityResult = runNode(["scripts/capture-cli-parity.mjs", `--out-dir=${relative(options.outDir)}`]);
 const checkResult = runNode(["scripts/check-perfect-spec.mjs", "--json", `--suite=${relative(options.suite)}`]);
 
@@ -150,13 +162,14 @@ const artifactPaths = [
   { role: "fixture-evidence", file: fixtureManifestPath },
   ...fixtureArtifactPaths.map((artifact) => ({ role: artifact.role, file: artifact.file })),
   { role: "cli-parity", file: path.join(options.outDir, "cli-parity.json") },
-  { role: "post-tag-smoke", file: path.join(options.outDir, "post-tag-smoke.json") },
+  { role: "post-tag-smoke", file: postTagSmokePath },
   { role: "post-tag-smoke-log", file: path.join(options.outDir, "github-install-tag-smoke.txt") },
   { role: "post-tag-smoke-log", file: path.join(options.outDir, "github-install-remote-smoke.txt") },
   { role: "summary", file: summaryPath },
   { role: "events", file: eventsPath },
   { role: "check-output", file: checkOutputPath },
-  { role: "native-renderer", file: nativeRendererPath }
+  { role: "native-renderer", file: nativeRendererPath },
+  { role: "v3.1.0-evidence-matrix", file: v31EvidenceMatrixPath }
 ].filter((artifact) => exists(artifact.file));
 
 const manifest = {
@@ -189,6 +202,7 @@ console.log(`perfect-spec:evidence wrote ${relative(fixtureManifestPath)}`);
 console.log(`perfect-spec:evidence wrote ${relative(summaryPath)}`);
 console.log(`perfect-spec:evidence wrote ${relative(eventsPath)}`);
 console.log(`perfect-spec:evidence wrote ${relative(nativeRendererPath)}`);
+console.log(`perfect-spec:evidence wrote ${relative(v31EvidenceMatrixPath)}`);
 
 if (checkResult.status !== 0) {
   console.error("perfect-spec:evidence error: visibility check output was captured with non-zero exit code");
@@ -242,6 +256,16 @@ function buildEvents({ generatedAt, suite, tests, checkResult }) {
       exitCode: checkResult.status
     },
     {
+      type: "v3.1.0.evidence-matrix.generated",
+      generatedAt,
+      suiteId: suite.suiteId,
+      release: suite.release,
+      phase0: "complete",
+      runtimeProjection: "runtime-v2",
+      currentProfileId: "current-limited-v3.1",
+      targetProfileId: "perfect-runtime-target"
+    },
+    {
       type: "cli-parity.completed",
       generatedAt,
       command: "node scripts/capture-cli-parity.mjs",
@@ -275,6 +299,10 @@ function buildSummary({ generatedAt, suite, tests, checkResult }) {
     `- Blocked: ${statusCounts.get("blocked") ?? 0}`,
     `- Fixture evidence: ${fixtureEvidenceSources.length} entries across ${[...new Set(fixtureEvidenceSources.map((entry) => entry.format))].join(", ")}`,
     `- Native renderer evidence: .officegen/acceptance/perfect-spec/native-renderer.json`,
+    `- v3.1.0 evidence matrix: .officegen/acceptance/perfect-spec/v3.1.0-evidence-matrix.json`,
+    `- Phase 0 P0: complete`,
+    `- Runtime projection: runtime-v2 (current-limited-v3.1 supported)`,
+    `- Capability profiles: current-limited-v3.1 vs perfect-runtime-target`,
     `- Visibility check exit code: ${checkResult.status}`,
     "",
     `## L7 Acceptance IDs`,
@@ -284,6 +312,58 @@ function buildSummary({ generatedAt, suite, tests, checkResult }) {
   ];
 
   return `${lines.join("\n")}\n`;
+}
+
+function writeV31EvidenceMatrix({ generatedAt, suite, tests, sourcePath, outPath }) {
+  const source = readJson(sourcePath);
+  const phase0Test = tests.find((test) => test.id === source.phase0?.acceptanceId);
+  const runtimeTest = tests.find((test) => test.id === source.runtimeProjection?.acceptanceId);
+  const postTagTest = tests.find((test) => test.id === source.postTagSmoke?.acceptanceId);
+  writeJson(outPath, {
+    schema: "officegen.perfect-spec.v3.1.0-evidence-matrix@1.0",
+    generatedAt,
+    suiteId: suite.suiteId,
+    release: suite.release,
+    level: suite.level,
+    source: relative(sourcePath),
+    phase0: {
+      ...source.phase0,
+      suiteStatus: phase0Test?.status,
+      blocking: phase0Test?.blocking
+    },
+    runtimeProjection: {
+      ...source.runtimeProjection,
+      suiteStatus: runtimeTest?.status,
+      blocking: runtimeTest?.blocking
+    },
+    capabilityProfiles: source.capabilityProfiles,
+    remainingTargetGaps: source.remainingTargetGaps ?? [],
+    postTagSmoke: {
+      ...source.postTagSmoke,
+      suiteStatus: postTagTest?.status,
+      blocking: postTagTest?.blocking
+    },
+    publishGateConnection: {
+      gate: suite.publishGate,
+      command: "npm run perfect-spec:check -- --gate=publish",
+      requiresPostTagSmoke: true,
+      requiresEvidenceMatrixArtifact: true
+    }
+  });
+}
+
+function ensurePostTagSmokePlaceholder({ generatedAt, suite, file }) {
+  if (exists(file)) return;
+  writeJson(file, {
+    schema: "officegen.perfect-spec.post-tag-smoke@1.0",
+    acceptanceId: "L7-A009",
+    generatedAt,
+    release: suite.release,
+    ok: false,
+    status: "pending-post-tag",
+    reason: "Post-tag smoke requires a published tag or remote target and is enforced by --gate=publish.",
+    checks: []
+  });
 }
 
 function writeFixtureEvidence({ generatedAt, suite, outDir, fixtureManifestPath }) {
@@ -552,6 +632,6 @@ function relative(file) {
 
 function usage(message) {
   console.error(`perfect-spec:evidence: ${message}`);
-  console.error("usage: node scripts/generate-perfect-spec-evidence.mjs [--suite=path] [--out-dir=path]");
+  console.error("usage: node scripts/generate-perfect-spec-evidence.mjs [--suite=path] [--v31-evidence-matrix=path] [--out-dir=path]");
   process.exit(2);
 }

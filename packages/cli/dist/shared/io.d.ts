@@ -7,6 +7,7 @@ export declare function validateInputPath(context: RuntimeContext, inputPath: st
 export declare function validatedOutOption(context: RuntimeContext): Promise<string | undefined>;
 export declare function validateOutputPath(context: RuntimeContext, outputPath: string, options?: {
     directory?: boolean;
+    overwrite?: boolean;
 }): Promise<string>;
 export declare function readInputFile(context: RuntimeContext, inputPath: string): Promise<Buffer>;
 export declare function readInputText(context: RuntimeContext, inputPath: string): Promise<string>;

@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import JSZip from "jszip";
 import { PDFDocument } from "pdf-lib";
-import { getBuiltinConfig } from "@officegen/core";
-import { DEFAULT_NATIVE_RENDERER_TIMEOUT_MS, MIN_NATIVE_RENDERER_TIMEOUT_MS, diffDocuments, diagnose, edit, exportDocument, extractAssets, inspect, inspectEmbeddedAssets, inspectInputZipSafety, render, renderChart, renderDiagram, replaceAsset, resolveEditSelectors, resolveNativeRendererTimeoutMs, validateOoxml, verify, view } from "../src/index.js";
+import { getBuiltinConfig, validateSchema } from "@officegen/core";
+import { DEFAULT_NATIVE_RENDERER_TIMEOUT_MS, MIN_NATIVE_RENDERER_TIMEOUT_MS, diffDocuments, diagnose, edit, exportDocument, extractAssets, inspect, inspectEmbeddedAssets, inspectInputZipSafety, render, renderChart, renderDiagram, repair, replaceAsset, resolveEditSelectors, resolveNativeRendererTimeoutMs, validateOoxml, verify, view } from "../src/index.js";
 
 describe("@officegen/formats MVP", () => {
   it("renders and inspects a basic PPTX with untrusted text separation", async () => {
@@ -147,6 +147,29 @@ describe("@officegen/formats MVP", () => {
     expect(viewed.fidelity).toBe("approximate");
     expect(viewed.pages[0]?.content).toContain("<svg");
     expect(viewed.caveats.length).toBeGreaterThan(0);
+  });
+
+  it("creates object crop metadata and progressive view cursors", async () => {
+    const rendered = await render(
+      {
+        title: "Crop Deck",
+        targets: ["pptx"],
+        sections: [{ title: "Crop Deck", blocks: [{ type: "paragraph", text: "First" }, { type: "paragraph", text: "Second" }] }]
+      },
+      { target: "pptx" }
+    );
+    const inspected = await inspect({ data: rendered.bytes, format: "pptx" });
+    const objectId = inspected.objectMap[0]?.stableObjectId ?? "";
+
+    const viewed = await view(inspected, { objectId, crop: true, objectMapLimit: 1 });
+
+    expect(viewed.renderer).toMatchObject({ id: "officegen-approximate-svg-html", mode: "approximate", fidelity: "approximate" });
+    expect(viewed.crop).toMatchObject({ requested: true, status: "created", objectId, source: "objectMap" });
+    expect(viewed.crops[0]?.content).toContain("data-crop-object-id");
+    expect(viewed.crops[0]?.metadata.bbox?.length).toBe(4);
+    expect(viewed.objectMap).toHaveLength(1);
+    expect(viewed.cursor).toMatchObject({ objectMapLimit: 1, objectMapReturned: 1, hasMore: true });
+    expect(viewed.nextActions.some((action) => action.includes("--object <stableObjectId> --crop"))).toBe(false);
   });
 
   it("rejects unsupported render target inference instead of falling back to PDF", async () => {
@@ -306,7 +329,32 @@ describe("@officegen/formats MVP", () => {
     expect(valuesByRef.get("B3")).toBe("20");
     expect(resolved.inputSha256).toMatch(/^sha256:/);
     expect(resolved.objectMapHash).toMatch(/^sha256:/);
+    expect(resolved.objectGraphHash).toMatch(/^sha256:/);
     expect(resolved.resolutions[0]?.matched).toBe(true);
+    expect(resolved.resolutions[0]?.selectorResolution).toMatchObject({
+      schema: "officegen.selectorResolution@2",
+      status: "matched",
+      selectionLock: {
+        objectGraphHash: resolved.objectGraphHash,
+        nodeId: expect.any(String),
+        sourceFingerprint: expect.stringMatching(/^sha256:/)
+      }
+    });
+    expect(validateSchema("officegen.selectorResolution@2", resolved.resolutions[0]?.selectorResolution).ok).toBe(true);
+
+    const stale = await edit(
+      { data: edited.bytes, format: "xlsx" },
+      [{ op: "setText", selector: { sheetName: "Sheet1", cell: "B3" }, text: "21" }],
+      {
+        dryRun: true,
+        selectionLock: {
+          ...(resolved.resolutions[0]?.selectionLock as { objectGraphHash: string; nodeId?: string; sourceFingerprint?: string }),
+          objectGraphHash: "sha256:stale"
+        }
+      }
+    );
+    expect(stale.changed).toBe(false);
+    expect(stale.errors?.[0]?.message).toContain("EDIT_STALE_SELECTION_LOCK");
   });
 
   it("preserves XLSX styled cell attributes when setting a scalar value", async () => {
@@ -748,6 +796,35 @@ describe("@officegen/formats MVP", () => {
     expect(result.issues.map((issue) => issue.code)).toContain("OFFICE_REPAIR_RISK_BROKEN_RELATIONSHIP");
   });
 
+  it("returns repair taxonomy and a v2 repair plan with post-repair verify evidence", async () => {
+    const rendered = await render({
+      title: "Repair Plan",
+      slides: [{ title: "Repair Plan", body: "Long ".repeat(80) }]
+    }, { target: "pptx" });
+    const result = await repair({ data: rendered.bytes, format: "pptx" }, { dryRun: true });
+
+    expect(result.failureTaxonomy).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: "TEXT_OVERFLOW_RISK",
+        category: "quality",
+        autoRepairable: true,
+        nextCommand: expect.stringContaining("officegen repair")
+      })
+    ]));
+    expect(result.repairPlan).toMatchObject({
+      schema: "officegen.repairPlan@2",
+      version: 2,
+      target: "pptx",
+      wouldWrite: false,
+      verify: {
+        status: "not_run",
+        requiredAfterRepair: true,
+        command: expect.stringContaining("officegen verify")
+      }
+    });
+    expect(validateSchema("officegen.repairPlan@2", result.repairPlan).ok).toBe(true);
+  });
+
   it("keeps XLSX summary inspect compact while full inspect keeps cells", async () => {
     const zip = new JSZip();
     const cells = Array.from({ length: 150 }, (_item, index) => `<c r="A${index + 1}" t="inlineStr"><is><t>${"Value ".repeat(index === 0 ? 1000 : 1)}${index + 1}</t></is></c>`).join("");
@@ -895,6 +972,18 @@ describe("@officegen/formats MVP", () => {
     expect(result.noRepairDialogExpected).toBe(true);
     expect(result.visual?.pagesChecked).toBeGreaterThan(0);
     expect(result.readiness).not.toBe("blocked");
+    expect(result.verificationReport).toMatchObject({
+      schema: "officegen.verify@2",
+      version: 2,
+      format: "pptx",
+      gates: {
+        schema: { status: "pass" },
+        visual: expect.objectContaining({ status: expect.stringMatching(/pass|warning/) }),
+        native: { status: "skipped" },
+        goal: { status: "skipped" }
+      }
+    });
+    expect(validateSchema("officegen.verify@2", result.verificationReport).ok).toBe(true);
   });
 
   it("applies explicit verification gates for AI and CI workflows", async () => {
@@ -1277,7 +1366,7 @@ describe("@officegen/formats MVP", () => {
     );
     const edited = await edit(
       { data: pptx.bytes, format: "pptx" },
-      [{ op: "setText", selector: { slide: 2, contains: "Target", nearestTo: { x: 90, y: 120 } }, text: "Changed on slide 2" }],
+      [{ op: "setText", selector: { slide: 2, contains: "Target" }, text: "Changed on slide 2" }],
       { resolveSelectors: true }
     );
     const inspected = await inspect({ data: edited.bytes, format: "pptx" });

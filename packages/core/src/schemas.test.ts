@@ -48,6 +48,14 @@ describe("schema registry", () => {
     expect(validateSchema("officegen.edit.ops@1.2", {
       schema: "officegen.edit.ops@1.2",
       target: "pptx",
+      options: {
+        expectedObjectGraphHash: "sha256:abc",
+        selectionLock: {
+          objectGraphHash: "sha256:abc",
+          nodeId: "node:0001",
+          sourceFingerprint: "sha256:def"
+        }
+      },
       ops: [{ op: "pptx.duplicateSlide", slide: 1 }]
     }).ok).toBe(true);
     expect(validateSchema("officegen.edit.ops@1.2", {
@@ -221,12 +229,17 @@ describe("schema registry", () => {
     expect(ids).toEqual(
       expect.arrayContaining([
         "officegen.envelope@1.2",
+        "officegen.envelope@2",
         "officegen.edit.ops@1.2",
         "officegen.ir.document@1.2",
         "officegen.asset.spec@1.2",
         "officegen.design.pack@1.2",
         "officegen.template.map@1.2",
         "officegen.view.objectMap@1.2",
+        "officegen.selectorResolution@2",
+        "officegen.objectGraph@2",
+        "officegen.verify@2",
+        "officegen.repairPlan@2",
         "officegen.xlsx.formulaGraph@1.0",
         "officegen.diagnostics@1.2"
       ])
@@ -235,14 +248,156 @@ describe("schema registry", () => {
     expect(agentIds).toContain("officegen.template.map@1.2");
   });
 
+  it("validates v2 edit and patch plan contracts", () => {
+    expect(validateSchema("officegen.editPlan@2", {
+      schema: "officegen.editPlan@2",
+      target: "pptx",
+      inputSha256: "sha256:abc",
+      objectGraphHash: "sha256:def",
+      wouldWrite: false,
+      operations: [{ op: "replaceText", from: "A", to: "B" }],
+      selectorResolution: {
+        schema: "officegen.selectorResolution@2",
+        status: "matched",
+        candidates: [],
+        evidence: [],
+        nextActions: [],
+        selectionLock: { objectGraphHash: "sha256:def" }
+      },
+      selectorResolutions: {
+        schema: "officegen.edit.selectors@1.2",
+        resolutions: []
+      }
+    }).ok).toBe(true);
+
+    expect(validateSchema("officegen.editPlan@2", {
+      schema: "officegen.editPlan@2",
+      target: "pptx",
+      wouldWrite: false,
+      operations: [],
+      selectorResolution: {
+        schema: "officegen.edit.selectors@1.2",
+        resolutions: []
+      }
+    }).ok).toBe(false);
+
+    expect(validateSchema("officegen.patchPlan@2", {
+      schema: "officegen.patchPlan@2",
+      format: "pptx",
+      wouldWrite: false,
+      inputSha256: `sha256:${"a".repeat(64)}`,
+      sourceFingerprint: { algorithm: "sha256", hash: "b".repeat(64), byteLength: 10 },
+      operations: [{ operationIndex: 0, op: "replaceText", wouldApply: true }],
+      touchedParts: [{
+        path: "ppt/slides/slide1.xml",
+        change: "modified",
+        beforeSha256: `sha256:${"c".repeat(64)}`,
+        afterSha256: `sha256:${"d".repeat(64)}`,
+        sourceFingerprint: { algorithm: "sha256", hash: "e".repeat(64), byteLength: 20, path: "ppt/slides/slide1.xml" }
+      }],
+      expectedChangedParts: ["ppt/slides/slide1.xml"],
+      sourceFingerprints: [{ algorithm: "sha256", hash: "e".repeat(64), byteLength: 20, path: "ppt/slides/slide1.xml" }],
+      blocked: []
+    }).ok).toBe(true);
+
+    expect(validateSchema("officegen.patchPlan@2", {
+      schema: "officegen.patchPlan@2",
+      format: "pptx",
+      wouldWrite: true
+    }).ok).toBe(false);
+  });
+
+  it("validates office-agent v3.1 runtime skeleton contracts", () => {
+    const phase = (index: number) => ({
+      id: `phase-${String(index).padStart(2, "0")}-test`,
+      standardName: index === 9 ? "verify" : `phase-${index}`,
+      manifestRole: `role-${index}`,
+      commandTemplate: "officegen help --json",
+      mutatesOffice: false,
+      status: "skeleton",
+      execution: "skeleton"
+    });
+    const phases = Array.from({ length: 13 }, (_, index) => phase(index + 1));
+    expect(validateSchema("officegen.office-agent.manifest@3.1", {
+      schema: "officegen.office-agent.manifest@3.1",
+      release: "3.1.0",
+      runtimeProjection: "runtime-v2",
+      mode: "skeleton-evidence",
+      status: "skeleton",
+      phaseCount: 13,
+      phases,
+      limitations: ["skeleton only"],
+      requiredPhaseNames: ["inspect", "select", "plan", "dry-run", "edit", "verify", "diff", "repair", "report"]
+    }).ok).toBe(true);
+
+    expect(validateSchema("officegen.office-agent.workflow@3.1", {
+      schema: "officegen.office-agent.workflow@3.1",
+      release: "3.1.0",
+      runtimeProjection: "runtime-v2",
+      phaseCount: 13,
+      skeletonOnly: false,
+      steps: phases
+    }).ok).toBe(false);
+  });
+
+  it("validates v2 repair plan taxonomy and post-repair verify notes", () => {
+    const plan = {
+      schema: "officegen.repairPlan@2",
+      version: 2,
+      target: "pptx",
+      inputSha256: "sha256:abc",
+      wouldWrite: false,
+      operations: [{ op: "setText", selector: { stableObjectId: "pptx:s001:shape:0001" }, text: "Short" }],
+      failureTaxonomy: [{
+        code: "TEXT_OVERFLOW_RISK",
+        category: "quality",
+        severity: "warning",
+        autoRepairable: true,
+        evidence: [{ kind: "diagnose-issue", message: "Text object is long enough to risk overflow.", issueCode: "TEXT_OVERFLOW_RISK" }],
+        nextCommand: "officegen repair input.pptx --dry-run --json"
+      }],
+      steps: [{ id: "post-repair-verify", command: "officegen verify repaired.pptx --visual --json", dryRun: true, reason: "Run after writing." }],
+      verify: {
+        status: "not_run",
+        requiredAfterRepair: true,
+        command: "officegen verify repaired.pptx --visual --json",
+        readinessNote: "Post-repair verify has not been run."
+      }
+    };
+
+    expect(validateSchema("officegen.repairPlan@2", plan).ok).toBe(true);
+    expect(validateSchema("officegen.repairPlan@2", { ...plan, wouldWrite: true }).ok).toBe(false);
+  });
+
   it("validates capability contracts that disclose unsupported and limited editing surfaces", () => {
     const capabilities = getCapabilities(getBuiltinConfig("substrate"), { agent: true });
     const pdfCapabilities = capabilities.formatCapabilities.pdf as Record<string, unknown>;
     const pptxCapabilities = capabilities.formatCapabilities.pptx as Record<string, unknown>;
+    const runtimeProfiles = capabilities.runtimeProfiles as Record<string, { capabilities: Array<Record<string, unknown>> }>;
+    const currentProfile = runtimeProfiles["current-limited-v3.1"];
+    const targetProfile = runtimeProfiles["perfect-runtime-target"];
 
     expect(validateSchema("officegen.capabilities@1.2", capabilities).ok).toBe(true);
     expect(pdfCapabilities.redaction).toBe("unsupported; overlays do not physically remove underlying content");
     expect(pptxCapabilities.smartArt).toBe("unsupported");
+    expect(capabilities.specProfile).toMatchObject({
+      currentProfileId: "current-limited-v3.1",
+      targetProfileId: "perfect-runtime-target",
+      runtimeProjection: "runtime-v2"
+    });
+    expect(currentProfile.capabilities).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "runtime-v2-projections", support: "supported" }),
+        expect.objectContaining({ id: "smartart-editing", support: "unsupported" }),
+        expect.objectContaining({ id: "pdf-true-redaction", support: "unsupported" })
+      ])
+    );
+    expect(targetProfile.capabilities).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "smartart-editing", support: "target-only" }),
+        expect.objectContaining({ id: "pdf-true-redaction", support: "target-only" })
+      ])
+    );
     expect(capabilities.featureContracts).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ area: "PDF editing and redaction", support: "overlay-only" }),
@@ -252,7 +407,28 @@ describe("schema registry", () => {
     expect(capabilities.unsupportedNow.join("\n")).toContain("Multi-series");
   });
 
-  it("validates document IR and view object maps", () => {
+  it("validates VerificationReportV2 projection schema", () => {
+    const report = {
+      schema: "officegen.verify@2",
+      version: 2,
+      format: "pptx",
+      readiness: "pass",
+      score: 1,
+      partial: false,
+      gates: Object.fromEntries(["schema", "package", "semantic", "visual", "native", "security", "accessibility", "goal"].map((name) => [
+        name,
+        { status: name === "native" ? "skipped" : "pass", issues: [] }
+      ])),
+      issues: [],
+      artifacts: [{ artifactId: "verify-native-pdf", role: "native-render", managed: true, format: "pdf" }],
+      recommendedRepairs: []
+    };
+
+    expect(validateSchema("officegen.verify@2", report).ok).toBe(true);
+    expect(validateSchema("officegen.verify@2", { ...report, schema: "officegen.verify.result@1.2" }).ok).toBe(false);
+  });
+
+  it("validates document IR, view object maps, and object graphs", () => {
     expect(
       validateSchema("officegen.ir.document@1.2", {
         schema: "officegen.ir.document@1.2",
@@ -278,6 +454,68 @@ describe("schema registry", () => {
         ]
       }).ok
     ).toBe(true);
+
+    expect(
+      validateSchema("officegen.objectGraph@2", {
+        schema: "officegen.objectGraph@2",
+        version: 2,
+        graphVersion: "officegen.objectGraph@2",
+        source: { objectMapCount: 1, builder: "inspect.objectMap" },
+        provenance: { generatedFrom: "officegen.inspect.result@1.2", sourceField: "objectMap" },
+        confidence: 1,
+        riskFlags: [],
+        pagination: {
+          nodeOffset: 0,
+          nodeLimit: 1,
+          nodeCount: 1,
+          totalNodes: 1,
+          edgeOffset: 0,
+          edgeLimit: 0,
+          edgeCount: 0,
+          totalEdges: 0,
+          truncated: false
+        },
+        index: {
+          nodesByStableId: { "pptx:s001:shape:0007": "node:0001" },
+          nodesByType: { shape: ["node:0001"] },
+          edgesByRelation: { contains: [], rightOf: [], below: [] }
+        },
+        nodes: [{
+          schema: "officegen.objectGraph@2",
+          version: 2,
+          graphVersion: "officegen.objectGraph@2",
+          index: 0,
+          nodeId: "node:0001",
+          stableId: "pptx:s001:shape:0007",
+          type: "shape",
+          source: { slide: 1 },
+          provenance: {
+            schema: "officegen.objectGraph@2",
+            source: "inspect.objectMap",
+            objectMapIndex: 0,
+            stableObjectId: "pptx:s001:shape:0007"
+          },
+          confidence: 1,
+          riskFlags: [],
+          evidence: [{ kind: "object-map", confidence: 1, message: "test" }]
+        }],
+        edges: []
+      }).ok
+    ).toBe(true);
+
+    expect(validateSchema("officegen.selectorResolution@2", {
+      schema: "officegen.selectorResolution@2",
+      status: "matched",
+      confidence: 0.91,
+      candidates: [{ nodeId: "node:0001", stableObjectId: "pptx:s001:shape:0007", type: "shape", confidence: 0.91 }],
+      evidence: [{ kind: "object-map", confidence: 1, message: "Matched stable object id." }],
+      nextActions: ["Use selectionLock with edit options to block stale mutations."],
+      selectionLock: {
+        objectGraphHash: "sha256:abc",
+        nodeId: "node:0001",
+        sourceFingerprint: "sha256:def"
+      }
+    }).ok).toBe(true);
   });
 
   it("captures scaffold-compatible document IR requirements", () => {
