@@ -57,7 +57,7 @@ export function createProgram(context, stdout, _stderr, now) {
         .option("--agent", "filter output for agents")
         .option("--strict-json", "force JSON-only stdout for agent execution")
         .option("--capabilities-hash <hash>", "expected active capabilities hash")
-        .option("--json-budget-bytes <bytes>", "agent JSON output budget")
+        .option("--json-budget-bytes <bytes>", "progressive-disclosure threshold for agent JSON output")
         .exitOverride();
     registerConfig(program, context, stdout, now);
     registerSchema(program, context, stdout, now);
@@ -94,7 +94,7 @@ export function writeNativeHelp(context, stdout) {
         "  --agent                        filter output for agents",
         "  --strict-json                  force JSON-only stdout for agent execution",
         "  --capabilities-hash <hash>     warn if adapter capabilities are stale",
-        "  --json-budget-bytes <bytes>    cap agent JSON output",
+        "  --json-budget-bytes <bytes>    progressive-disclosure threshold for agent JSON",
         "  -V, --version",
         "  -h, --help",
         "",
@@ -159,7 +159,7 @@ export function writeCommandHelp(context, commandGroup, subcommand, stdout) {
         "  --agent                        filter output for agents",
         "  --strict-json                  force JSON-only stdout",
         "  --capabilities-hash <hash>     warn if adapter capabilities are stale",
-        "  --json-budget-bytes <bytes>    cap agent JSON output",
+        "  --json-budget-bytes <bytes>    progressive-disclosure threshold for agent JSON",
         ...commandSpecificHelpOptions(commandGroup, subcommand),
         "  -h, --help",
         "",

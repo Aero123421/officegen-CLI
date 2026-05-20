@@ -452,10 +452,10 @@ function applyAgentBudget(context, envelope) {
     const counts = result && typeof result === "object" ? summarizeCounts(result) : {};
     const compact = {
         ...envelope,
-        objectiveOk: false,
-        readiness: "partial",
-        partial: true,
-        failureClass: "partial",
+        objectiveOk: envelope.objectiveOk,
+        readiness: envelope.readiness,
+        partial: envelope.partial,
+        failureClass: envelope.failureClass,
         truncated: true,
         result: {
             schema: "officegen.progressive-disclosure@1.2",
@@ -466,6 +466,11 @@ function applyAgentBudget(context, envelope) {
                 resultSchema,
                 counts,
                 artifactCount: artifacts.length,
+                objectiveOk: envelope.objectiveOk,
+                readiness: envelope.readiness,
+                partial: envelope.partial,
+                responseTruncated: true,
+                responsePartialReason: "json_budget_truncated",
                 originalBytes: bytes
             },
             budgetBytes: context.jsonBudgetBytes,
@@ -585,7 +590,7 @@ function recommendedNarrowCommands(command, context) {
     if (command.startsWith("view")) {
         return [
             `officegen view <input> --max-pages 3 --object-map-limit 50 --out .officegen/runs/view${agent} --json`,
-            `officegen view <pdf> --pages 1-3 --out .officegen/runs/pdf-view${agent} --json`
+            `officegen view <pdf> --max-pages 3 --out .officegen/runs/pdf-view${agent} --json`
         ];
     }
     if (command.startsWith("verify")) {

@@ -3,7 +3,7 @@ export const GLOBAL_OPTION_SPECS = [
     option("--agent", undefined, "filter output for agents"),
     option("--strict-json", undefined, "force JSON-only stdout for agent execution"),
     option("--capabilities-hash", "<hash>", "expected active capabilities hash"),
-    option("--json-budget-bytes", "<bytes>", "agent JSON output budget")
+    option("--json-budget-bytes", "<bytes>", "progressive-disclosure threshold for agent JSON output")
 ];
 const OPTION_SPECS = {
     asset: option("--asset", "<path>", "asset zip path"),

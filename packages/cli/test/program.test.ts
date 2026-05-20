@@ -654,8 +654,11 @@ describe("officegen CLI command surface", () => {
     expect(envelope.ok).toBe(true);
     expect(envelope.result.schema).toBe("officegen.progressive-disclosure@1.2");
     expect(envelope.truncated).toBe(true);
-    expect(envelope.partial).toBe(true);
-    expect(envelope.readiness).toBe("partial");
+    expect(envelope.partial).toBe(false);
+    expect(envelope.objectiveOk).toBe(true);
+    expect(envelope.readiness).toBe("pass");
+    expect(envelope.failureClass).toBe("none");
+    expect(envelope.result.partialSummary).toMatchObject({ responseTruncated: true, responsePartialReason: "json_budget_truncated" });
     expect(validateSchema("officegen.envelope@1.2", envelope).ok).toBe(true);
     expect(envelope.warnings).toEqual(expect.arrayContaining([
       expect.objectContaining({ code: "AGENT_JSON_BUDGET_EXCEEDED" })
@@ -1138,6 +1141,33 @@ describe("officegen CLI command surface", () => {
     expect(envelope.result.fidelity).toBe("internal");
     expect(manifest.pages[0].format).toBe("png");
     expect([...page.subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
+  });
+
+  it("keeps view objective success when agent JSON budget truncates only the response", async () => {
+    const cwd = await tempWorkspace();
+    await writeFile(path.join(cwd, "deck.pptx"), await minimalPptxWithImage(false));
+
+    const captured = await run(["view", "deck.pptx", "--format", "png", "--out", ".officegen/view", "--agent", "--json", "--json-budget-bytes", "900"], cwd);
+    const envelope = parseEnvelope(captured);
+    const page = await readFile(path.join(cwd, ".officegen", "view", "page-001.png"));
+
+    expect(envelope.ok).toBe(true);
+    expect(envelope.objectiveOk).toBe(true);
+    expect(envelope.readiness).toBe("warning");
+    expect(envelope.partial).toBe(false);
+    expect(envelope.failureClass).toBe("none");
+    expect(envelope.result.schema).toBe("officegen.progressive-disclosure@1.2");
+    expect(envelope.result.partialSummary).toMatchObject({
+      objectiveOk: true,
+      readiness: "warning",
+      partial: false,
+      responseTruncated: true,
+      responsePartialReason: "json_budget_truncated"
+    });
+    expect(envelope.nextActions.join("\n")).not.toContain("--pages");
+    expect(envelope.nextActions.join("\n")).toContain("--max-pages 3");
+    expect([...page.subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
+    expect(validateSchema("officegen.envelope@1.2", envelope).ok).toBe(true);
   });
 
   it("routes proof mode view through native renderer policy instead of fast fallback", async () => {
