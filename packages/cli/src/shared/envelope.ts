@@ -268,6 +268,21 @@ function evaluateObjective(context: RuntimeContext, command: string, result: unk
       return objectiveFailure(defaultState, "EDIT_TRANSACTION_FAILED", "Edit requested an output artifact but no operation was applied.", { changed: record.changed, applied: record.applied });
     }
   }
+  const nestedEditResult = mutationEvidenceRecord(record);
+  if (nestedEditResult !== record && (nestedEditResult.rolledBack === true || editRequiredFailures(nestedEditResult).length)) {
+    const errors = editRequiredFailures(nestedEditResult);
+    const code = errors.length ? editErrorCode(errors) : "EDIT_TRANSACTION_FAILED";
+    return objectiveFailure({
+      ...defaultState,
+      mutationStatus: "failed",
+      artifactStatus: missingArtifact ? "missing" : "not_expected",
+      partial: defaultState.partial || editHasAppliedOperation(nestedEditResult)
+    }, code, editFailureMessage(code), {
+      rolledBack: nestedEditResult.rolledBack,
+      errors,
+      editResult: nestedEditResult
+    });
+  }
   if (schema === "officegen.repair.result@1.2" && !dryRun && outArg && (record.changed === false || Number(record.applied ?? 0) <= 0)) {
     return objectiveFailure(defaultState, "REPAIR_NO_SAFE_OPS", "No automatically safe repair operations were available.", { changed: record.changed, applied: record.applied });
   }
@@ -408,11 +423,34 @@ function editHasAppliedOperation(record: Record<string, unknown>): boolean {
   return extractArrayField(record, "opResults").some((result) => asRecord(result).applied === true);
 }
 
+function mutationEvidenceRecord(record: Record<string, unknown>): Record<string, unknown> {
+  if (record.changed !== undefined || record.applied !== undefined) return record;
+  const editResult = asRecord(record.editResult);
+  if (!Object.keys(editResult).length) return record;
+  if (
+    editResult.schema === "officegen.edit.result@1.2"
+    || editResult.changed !== undefined
+    || editResult.applied !== undefined
+    || extractArrayField(editResult, "opResults").length
+  ) {
+    return editResult;
+  }
+  return record;
+}
+
+function isStatusOnlyMutationResult(record: Record<string, unknown>): boolean {
+  const schema = typeof record.schema === "string" ? record.schema : "";
+  return schema === "officegen.progressive-disclosure@1.2" || record.truncated === true || record.status === "truncated";
+}
+
 function mutationStatusFor(command: string, record: Record<string, unknown>, dryRun: boolean): NonNullable<Envelope["mutationStatus"]> {
   if (dryRun || record.planOnly === true) return "plan_only";
   if (!isMutationCommand(command)) return "not_applicable";
-  if (record.changed === true || Number(record.applied ?? 0) > 0) return "changed";
-  if (record.changed === false || Number(record.applied ?? 0) === 0) return "noop";
+  if (isStatusOnlyMutationResult(record)) return "not_applicable";
+  const evidence = mutationEvidenceRecord(record);
+  if (evidence.rolledBack === true || editRequiredFailures(evidence).length) return "failed";
+  if (evidence.changed === true || Number(evidence.applied ?? 0) > 0 || editHasAppliedOperation(evidence)) return "changed";
+  if (evidence.changed === false || (evidence.applied !== undefined && Number(evidence.applied) === 0)) return "noop";
   return "not_applicable";
 }
 

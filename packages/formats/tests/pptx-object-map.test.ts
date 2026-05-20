@@ -177,6 +177,70 @@ describe("PPTX object map inspection", () => {
     expect(viewed.pages[0]?.content).toContain("Beta");
   });
 
+  it("extracts PPTX run style semantics and reports run-format diffs for them", async () => {
+    const styledRun =
+      '<a:r><a:rPr sz="2400" i="1" lang="en-US" noProof="1" b="1"><a:latin typeface="Calibri"/><a:ea typeface="MS Gothic"/><a:cs typeface="Arial"/></a:rPr><a:t>Styled</a:t></a:r>';
+    const slideXml = (runXml: string) =>
+      [
+        '<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">',
+        '<p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="8" name="Styled"/></p:nvSpPr>',
+        '<p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="3657600" cy="914400"/></a:xfrm></p:spPr>',
+        `<p:txBody><a:p>${runXml}</a:p></p:txBody>`,
+        "</p:sp></p:spTree></p:cSld></p:sld>"
+      ].join("");
+    const beforeZip = new JSZip();
+    beforeZip.file("ppt/slides/slide1.xml", slideXml(styledRun));
+    const afterZip = new JSZip();
+    afterZip.file("ppt/slides/slide1.xml", slideXml(styledRun.replace('i="1"', 'i="0"')));
+    const beforeBytes = await beforeZip.generateAsync({ type: "uint8array" });
+    const afterBytes = await afterZip.generateAsync({ type: "uint8array" });
+    const inspected = await inspect({ data: beforeBytes, format: "pptx" }, { depth: "full" });
+    const shape = inspected.objectMap.find((entry) => entry.kind === "shape");
+    const semantic = (shape as { semantic?: { paragraphs?: Array<{ runs?: unknown[] }> } })?.semantic;
+
+    expect(semantic?.paragraphs?.[0]?.runs?.[0]).toMatchObject({
+      text: "Styled",
+      bold: true,
+      italic: true,
+      fontSizePt: 24,
+      fontFamilyLatin: "Calibri",
+      fontFamilyEastAsia: "MS Gothic",
+      fontFamilyComplexScript: "Arial",
+      lang: "en-US",
+      noProof: true
+    });
+
+    const diff = await diffDocuments({ data: beforeBytes, format: "pptx" }, { data: afterBytes, format: "pptx" });
+    expect(diff.semantic.changedSemantic[0]?.changes).toEqual(expect.arrayContaining(["run-format"]));
+    expect(diff.semantic.changedSemantic[0]?.changes).not.toContain("paragraph");
+  });
+
+  it("extracts PPTX default run style semantics from paragraph properties", async () => {
+    const zip = new JSZip();
+    zip.file(
+      "ppt/slides/slide1.xml",
+      [
+        '<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">',
+        '<p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="9" name="Default Styled"/></p:nvSpPr>',
+        '<p:txBody><a:p><a:pPr><a:defRPr sz="2800" i="1" lang="ja-JP"><a:latin typeface="Aptos"/><a:ea typeface="Yu Gothic"/></a:defRPr></a:pPr><a:r><a:t>Default style</a:t></a:r></a:p></p:txBody>',
+        "</p:sp></p:spTree></p:cSld></p:sld>"
+      ].join("")
+    );
+
+    const inspected = await inspect({ data: await zip.generateAsync({ type: "uint8array" }), format: "pptx" }, { depth: "full" });
+    const shape = inspected.objectMap.find((entry) => entry.kind === "shape");
+    const semantic = (shape as { semantic?: { paragraphs?: Array<{ runs?: unknown[] }> } })?.semantic;
+
+    expect(semantic?.paragraphs?.[0]?.runs?.[0]).toMatchObject({
+      text: "Default style",
+      italic: true,
+      fontSizePt: 28,
+      fontFamilyLatin: "Aptos",
+      fontFamilyEastAsia: "Yu Gothic",
+      lang: "ja-JP"
+    });
+  });
+
   it("preserves generic setText newlines as semantic line breaks for PPTX compare and view", async () => {
     const zip = new JSZip();
     zip.file(

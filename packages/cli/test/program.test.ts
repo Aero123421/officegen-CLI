@@ -193,6 +193,77 @@ describe("officegen CLI command surface", () => {
     }));
   });
 
+  it("honors nested editResult mutation evidence for wrapper commands", async () => {
+    const context = await createRuntimeContext(["node", "officegen", "template", "fill", "--name", "deck", "--out", "filled.pptx", "--json"], process.cwd(), {});
+    const now = new Date("2026-05-09T00:00:00.000Z");
+    const nestedChanged = makeEnvelope(context, "template fill", {
+      kind: "officegen.template.fill",
+      mutatesOffice: true,
+      artifacts: [{ path: "filled.pptx", exists: true, kind: "output" }],
+      editResult: { schema: "officegen.edit.result@1.2", changed: true, applied: 0 }
+    }, now);
+    const nestedApplied = makeEnvelope(context, "layout apply", {
+      kind: "officegen.layout.apply",
+      mutatesOffice: true,
+      out: "edited.pptx",
+      editResult: { schema: "officegen.edit.result@1.2", applied: 2 }
+    }, now);
+
+    expect(nestedChanged.ok).toBe(true);
+    expect(nestedChanged.mutationStatus).toBe("changed");
+    expect(nestedChanged.objectiveOk).toBe(true);
+    expect(nestedApplied.ok).toBe(true);
+    expect(nestedApplied.mutationStatus).toBe("changed");
+    expect(nestedApplied.artifactStatus).toBe("complete");
+  });
+
+  it("does not treat budget or status-only wrapper results as mutations", async () => {
+    const context = await createRuntimeContext(["node", "officegen", "template", "fill", "--name", "deck", "--json"], process.cwd(), {});
+    const now = new Date("2026-05-09T00:00:00.000Z");
+    const statusOnly = makeEnvelope(context, "template fill", {
+      kind: "officegen.template.fill",
+      mutatesOffice: true,
+      readiness: "pass",
+      status: "pass"
+    }, now);
+    const budgetOnly = makeEnvelope(context, "template fill", {
+      schema: "officegen.progressive-disclosure@1.2",
+      status: "truncated",
+      truncated: true,
+      partialSummary: { objectiveOk: true, readiness: "pass", partial: false, responseTruncated: true }
+    }, now);
+
+    expect(statusOnly.mutationStatus).toBe("not_applicable");
+    expect(statusOnly.objectiveOk).toBe(true);
+    expect(budgetOnly.mutationStatus).toBe("not_applicable");
+    expect(budgetOnly.objectiveOk).toBe(false);
+    expect(budgetOnly.artifactStatus).toBe("not_expected");
+  });
+
+  it("treats rolled-back nested editResult evidence as a failed mutation", async () => {
+    const context = await createRuntimeContext(["node", "officegen", "layout", "apply", "plan.json", "--out", "edited.pptx", "--json"], process.cwd(), {});
+    const envelope = makeEnvelope(context, "layout apply", {
+      kind: "officegen.layout.apply",
+      mutatesOffice: true,
+      out: "edited.pptx",
+      editResult: {
+        schema: "officegen.edit.result@1.2",
+        changed: false,
+        applied: 0,
+        rolledBack: true,
+        opResults: [
+          { operationIndex: 0, op: "pptx.setBounds", applied: true },
+          { operationIndex: 1, op: "pptx.setBounds", applied: false, reason: "not-found" }
+        ]
+      }
+    }, new Date("2026-05-09T00:00:00.000Z"));
+
+    expect(envelope.ok).toBe(false);
+    expect(envelope.objectiveOk).toBe(false);
+    expect(envelope.mutationStatus).toBe("failed");
+    expect(envelope.error?.code).toBe("SELECTOR_NOT_FOUND");
+  });
+
   it("classifies doctor Node runtime failures in the v2 envelope projection", async () => {
     const context = await createRuntimeContext(["node", "officegen", "doctor", "--agent", "--json"], process.cwd(), {});
     const envelope = makeEnvelope(context, "doctor", {
@@ -1153,6 +1224,8 @@ describe("officegen CLI command surface", () => {
 
     expect(envelope.ok).toBe(true);
     expect(envelope.objectiveOk).toBe(true);
+    expect(envelope.mutationStatus).toBe("not_applicable");
+    expect(envelope.artifactStatus).toBe("complete");
     expect(envelope.readiness).toBe("warning");
     expect(envelope.partial).toBe(false);
     expect(envelope.failureClass).toBe("none");

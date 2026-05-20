@@ -800,7 +800,7 @@ function semanticParagraph(xml, index) {
     const pPr = /<a:pPr\b([^>]*)>([\s\S]*?)<\/a:pPr>|<a:pPr\b([^>]*)\/>/.exec(xml);
     const pPrAttrs = pPr?.[1] ?? pPr?.[3] ?? "";
     const pPrBody = pPr?.[2] ?? "";
-    const runs = semanticRuns(xml);
+    const runs = semanticRuns(xml, semanticDefaultRunFormat(pPrBody));
     const text = runs.map((run) => run.text).join("");
     const bullet = semanticBullet(pPrBody);
     const numbering = semanticNumbering(pPrBody);
@@ -814,7 +814,7 @@ function semanticParagraph(xml, index) {
         runs
     };
 }
-function semanticRuns(xml) {
+function semanticRuns(xml, defaultFormat = {}) {
     const runs = [];
     for (const match of xml.matchAll(/<a:(r|fld)\b[\s\S]*?<\/a:\1>|<a:br\b[\s\S]*?\/>/g)) {
         const block = match[0];
@@ -828,7 +828,7 @@ function semanticRuns(xml) {
         runs.push({
             index: runs.length + 1,
             text,
-            bold: semanticBold(block)
+            ...semanticRunFormat(block, defaultFormat)
         });
     }
     return runs;
@@ -854,12 +854,80 @@ function semanticLevel(attrs) {
     const level = Number(xmlAttr(attrs, "lvl"));
     return Number.isFinite(level) ? level : undefined;
 }
-function semanticBold(xml) {
-    const attrs = /<a:rPr\b([^>]*)\/>|<a:rPr\b([^>]*)>/.exec(xml);
-    const value = xmlAttr(attrs?.[1] ?? attrs?.[2] ?? "", "b");
+function runPropertyParts(xml, name) {
+    const selfClosing = new RegExp(`<a:${name}\\b([^>]*)\\/>`).exec(xml);
+    if (selfClosing)
+        return { attrs: selfClosing[1] ?? "", body: "" };
+    const withBody = new RegExp(`<a:${name}\\b([^>]*)>([\\s\\S]*?)<\\/a:${name}>`).exec(xml);
+    if (withBody)
+        return { attrs: withBody[1] ?? "", body: withBody[2] ?? "" };
+    return undefined;
+}
+function rPrParts(xml) {
+    return runPropertyParts(xml, "rPr");
+}
+function semanticBooleanAttr(attrs, name) {
+    const value = xmlAttr(attrs, name);
     if (value === undefined)
         return undefined;
     return value === "1" || value === "true";
+}
+function semanticFontSizePt(attrs) {
+    const sz = xmlAttr(attrs, "sz");
+    if (sz === undefined)
+        return undefined;
+    const value = Number(sz);
+    if (!Number.isFinite(value))
+        return undefined;
+    return value / 100;
+}
+function semanticFontFamily(body, localName) {
+    const match = new RegExp(`<a:${localName}\\b([^>]*)\\/?>`).exec(body);
+    const typeface = xmlAttr(match?.[1] ?? "", "typeface");
+    if (typeface === undefined)
+        return undefined;
+    const decoded = decodePptxXmlValue(typeface);
+    return decoded || undefined;
+}
+function semanticLang(attrs) {
+    const lang = xmlAttr(attrs, "lang");
+    if (lang === undefined)
+        return undefined;
+    const decoded = decodePptxXmlValue(lang);
+    return decoded || undefined;
+}
+function semanticDefaultRunFormat(pPrBody) {
+    const parts = runPropertyParts(pPrBody, "defRPr");
+    return parts ? semanticRunFormatFromParts(parts) : {};
+}
+function semanticRunFormat(xml, defaultFormat) {
+    const parts = rPrParts(xml);
+    if (!parts)
+        return defaultFormat;
+    return mergeRunFormat(defaultFormat, semanticRunFormatFromParts(parts));
+}
+function semanticRunFormatFromParts(parts) {
+    const attrs = parts?.attrs ?? "";
+    const body = parts?.body ?? "";
+    return {
+        bold: semanticBooleanAttr(attrs, "b"),
+        italic: semanticBooleanAttr(attrs, "i"),
+        fontSizePt: semanticFontSizePt(attrs),
+        fontFamilyLatin: semanticFontFamily(body, "latin"),
+        fontFamilyEastAsia: semanticFontFamily(body, "ea"),
+        fontFamilyComplexScript: semanticFontFamily(body, "cs"),
+        lang: semanticLang(attrs),
+        noProof: semanticBooleanAttr(attrs, "noProof")
+    };
+}
+function mergeRunFormat(base, override) {
+    const merged = { ...base };
+    for (const [key, value] of Object.entries(override)) {
+        if (value !== undefined) {
+            merged[key] = value;
+        }
+    }
+    return merged;
 }
 function countLineBreaks(value) {
     return (value.match(/\n/g) ?? []).length;

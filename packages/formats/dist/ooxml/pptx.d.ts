@@ -4,6 +4,13 @@ interface PptxTextSemanticRun {
     index: number;
     text: string;
     bold?: boolean;
+    italic?: boolean;
+    fontSizePt?: number;
+    fontFamilyLatin?: string;
+    fontFamilyEastAsia?: string;
+    fontFamilyComplexScript?: string;
+    lang?: string;
+    noProof?: boolean;
 }
 interface PptxTextSemanticParagraph {
     index: number;

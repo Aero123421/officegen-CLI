@@ -540,9 +540,7 @@ async function inspectWorkbookMap(zip, paths, worksheetXml, definedNames) {
         formulas: worksheetXml.map((xml, index) => ({
             sheetIndex: index + 1,
             count: (xml.match(/<f\b/g) ?? []).length,
-            samples: [...xml.matchAll(/<c\b[^>]*\br="([^"]+)"[\s\S]*?<f\b[^>]*>([\s\S]*?)<\/f>/g)]
-                .slice(0, 12)
-                .map((match) => ({ ref: match[1], formula: decodeXmlEntities(match[2] ?? ""), untrusted: true }))
+            samples: extractWorksheetFormulaSamples(xml)
         })),
         inputCells: worksheetXml.map((xml, index) => ({
             sheetIndex: index + 1,
@@ -562,6 +560,21 @@ async function inspectWorkbookMap(zip, paths, worksheetXml, definedNames) {
         pivotTables: paths.filter((file) => /^xl\/pivotTables\//i.test(file)),
         slicers: paths.filter((file) => /^xl\/slicers\//i.test(file) || /^xl\/slicerCaches\//i.test(file))
     };
+}
+function extractWorksheetFormulaSamples(xml) {
+    const samples = [];
+    for (const match of xml.matchAll(/<c\b([^>]*)>([\s\S]*?)<\/c>/g)) {
+        const attrs = match[1] ?? "";
+        const inner = match[2] ?? "";
+        const ref = /\br="([^"]+)"/.exec(attrs)?.[1];
+        const formulaMatch = /<f\b[^>]*>([\s\S]*?)<\/f>/.exec(inner);
+        if (!ref || !formulaMatch)
+            continue;
+        samples.push({ ref, formula: decodeXmlEntities(formulaMatch[1] ?? ""), untrusted: true });
+        if (samples.length >= 12)
+            break;
+    }
+    return samples;
 }
 async function inspectDocxStructure(zip, paths) {
     const documentXml = (await readZipText(zip, "word/document.xml")) ?? "";

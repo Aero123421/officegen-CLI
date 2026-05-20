@@ -198,8 +198,19 @@ function comparableTextSemantic(entry: ObjectMapEntry): Record<string, unknown> 
         numbering: item.numbering,
         runs: Array.isArray(item.runs)
           ? item.runs.map((run) => {
-              const runItem = run as { index?: unknown; text?: unknown; bold?: unknown };
-              return { index: runItem.index, text: runItem.text, bold: runItem.bold };
+              const runItem = run as { index?: unknown; text?: unknown; bold?: unknown; italic?: unknown; fontSizePt?: unknown; fontFamilyLatin?: unknown; fontFamilyEastAsia?: unknown; fontFamilyComplexScript?: unknown; lang?: unknown; noProof?: unknown };
+              return {
+                index: runItem.index,
+                text: runItem.text,
+                bold: runItem.bold,
+                italic: runItem.italic,
+                fontSizePt: runItem.fontSizePt,
+                fontFamilyLatin: runItem.fontFamilyLatin,
+                fontFamilyEastAsia: runItem.fontFamilyEastAsia,
+                fontFamilyComplexScript: runItem.fontFamilyComplexScript,
+                lang: runItem.lang,
+                noProof: runItem.noProof
+              };
             })
           : []
       };
@@ -227,8 +238,18 @@ function runFormats(paragraph: Record<string, unknown> | undefined): unknown {
   const runs = paragraph?.runs;
   if (!Array.isArray(runs)) return [];
   return runs.map((run) => {
-    const item = run as { index?: unknown; bold?: unknown };
-    return { index: item.index, bold: item.bold };
+    const item = run as { index?: unknown; bold?: unknown; italic?: unknown; fontSizePt?: unknown; fontFamilyLatin?: unknown; fontFamilyEastAsia?: unknown; fontFamilyComplexScript?: unknown; lang?: unknown; noProof?: unknown };
+    return {
+      index: item.index,
+      bold: item.bold,
+      italic: item.italic,
+      fontSizePt: item.fontSizePt,
+      fontFamilyLatin: item.fontFamilyLatin,
+      fontFamilyEastAsia: item.fontFamilyEastAsia,
+      fontFamilyComplexScript: item.fontFamilyComplexScript,
+      lang: item.lang,
+      noProof: item.noProof
+    };
   });
 }
 

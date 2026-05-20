@@ -139,7 +139,18 @@ function comparableTextSemantic(entry) {
                 runs: Array.isArray(item.runs)
                     ? item.runs.map((run) => {
                         const runItem = run;
-                        return { index: runItem.index, text: runItem.text, bold: runItem.bold };
+                        return {
+                            index: runItem.index,
+                            text: runItem.text,
+                            bold: runItem.bold,
+                            italic: runItem.italic,
+                            fontSizePt: runItem.fontSizePt,
+                            fontFamilyLatin: runItem.fontFamilyLatin,
+                            fontFamilyEastAsia: runItem.fontFamilyEastAsia,
+                            fontFamilyComplexScript: runItem.fontFamilyComplexScript,
+                            lang: runItem.lang,
+                            noProof: runItem.noProof
+                        };
                     })
                     : []
             };
@@ -171,7 +182,17 @@ function runFormats(paragraph) {
         return [];
     return runs.map((run) => {
         const item = run;
-        return { index: item.index, bold: item.bold };
+        return {
+            index: item.index,
+            bold: item.bold,
+            italic: item.italic,
+            fontSizePt: item.fontSizePt,
+            fontFamilyLatin: item.fontFamilyLatin,
+            fontFamilyEastAsia: item.fontFamilyEastAsia,
+            fontFamilyComplexScript: item.fontFamilyComplexScript,
+            lang: item.lang,
+            noProof: item.noProof
+        };
     });
 }
 function stableStringify(value) {
