@@ -1403,6 +1403,7 @@ const entries = [
     entry("officegen.progressive-disclosure@1.2", looseSchema("officegen.progressive-disclosure@1.2"), undefined),
     entry("officegen.projected-result@2.3", looseSchema("officegen.projected-result@2.3"), undefined),
     entry("officegen.inspect.result@1.2", looseSchema("officegen.inspect.result@1.2"), "inspect"),
+    entry("officegen.styleInventory@1.0", looseSchema("officegen.styleInventory@1.0"), "inspect"),
     entry("officegen.view.result@1.2", looseSchema("officegen.view.result@1.2"), "view"),
     entry("officegen.view.manifest@1.2", looseSchema("officegen.view.manifest@1.2"), "view"),
     entry("officegen.selectorResolution@2", selectorResolutionV2Schema, "edit"),
