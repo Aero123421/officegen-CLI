@@ -6,12 +6,6 @@
 簡単なタスクはGPT-5.5 low を割り当てる。
 エージェントの最大起動数は15。
 
-## Cursor Fleet 併用
-
-大規模タスクや並列化しやすい調査・実装・レビューでは、Codex subagents の呼び出し手段として `cursor-fleet` を使ってよい。
-`cursor-fleet` は Cursor CLI worker を複数 worktree で走らせ、変更統合と検証を補助するための高速化手段として扱う。
-小さな修正や即座に終わる確認には使わず、複数 worker に分ける価値がある場合に限定する。
-
 ## Version / Release 運用
 
 version は手作業で複数ファイルを直接編集しない。
