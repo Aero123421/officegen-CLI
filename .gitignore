@@ -3,3 +3,9 @@ packages/*/dist/
 packages/*/tsconfig.tsbuildinfo
 .officegen/
 npm-debug.log*
+
+# cursor-fleet runtime data
+.cursor-fleet/runs/
+.cursor-fleet/worktrees/
+.cursor-fleet/tasks/
+.cursor-fleet/tmp/
