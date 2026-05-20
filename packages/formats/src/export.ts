@@ -9,7 +9,7 @@ import path from "node:path";
 import { OfficegenError, type OfficegenConfig } from "@officegen/core";
 import { PDFDocument, rgb } from "pdf-lib";
 
-export type ExportMode = "fast" | "internal" | "native";
+export type ExportMode = "fast" | "internal" | "native" | "proof";
 
 export interface ExportOptions {
   to: "pdf" | "svg" | "html" | "pptx" | "docx" | "xlsx";
@@ -41,6 +41,14 @@ export interface ExportResult {
     repairDialogExpected?: boolean;
     backend?: "office-com" | "libreoffice";
   };
+  nativeProof?: NativeProof;
+}
+
+export interface NativeProof {
+  status: "passed" | "not_run" | "unavailable" | "failed";
+  renderer?: "powerpoint" | "libreoffice" | "office-com";
+  reason?: string;
+  artifact?: string;
 }
 
 export async function exportDocument(input: InputLike | DocumentIR, options: ExportOptions): Promise<ExportResult> {
@@ -68,7 +76,7 @@ export async function exportDocument(input: InputLike | DocumentIR, options: Exp
     return result(normalized.format, options, bytes, ["PDF was normalized through pdf-lib."]);
   }
 
-  if (options.mode === "native" && options.to === "pdf") {
+  if ((options.mode === "native" || options.mode === "proof") && options.to === "pdf") {
     assertNativeExportAllowed(options.config);
     return exportOfficeToPdfNative(normalized, options);
   }
@@ -227,7 +235,7 @@ async function exportOfficeToPdfNative(
       schema: "officegen.export.result@1.2",
       from: input.format,
       to: options.to,
-      mode: "native",
+      mode: options.mode === "proof" ? "proof" : "native",
       out: options.out,
       bytes: options.out ? undefined : bytes,
       fidelity: "native",
@@ -235,7 +243,13 @@ async function exportOfficeToPdfNative(
         "Converted with LibreOffice in headless mode; fidelity depends on installed fonts and LibreOffice filters.",
         ...zipSafetyCaveats(zipSafety)
       ],
-      renderer: { id: "libreoffice", executable, status: "used", backend: "libreoffice", repairDialogExpected: false }
+      renderer: { id: "libreoffice", executable, status: "used", backend: "libreoffice", repairDialogExpected: false },
+      nativeProof: {
+        status: "passed",
+        renderer: "libreoffice",
+        artifact: options.out,
+        reason: "Native proof rendered through LibreOffice headless conversion."
+      }
     };
   } finally {
     if (cleanup) await rm(cleanup, { recursive: true, force: true });
@@ -282,7 +296,7 @@ async function exportOfficeToPdfWithCom(
       schema: "officegen.export.result@1.2",
       from: input.format,
       to: options.to,
-      mode: "native",
+      mode: options.mode === "proof" ? "proof" : "native",
       out: options.out,
       bytes: options.out ? undefined : saved,
       fidelity: "native",
@@ -297,6 +311,12 @@ async function exportOfficeToPdfWithCom(
         status: "used",
         backend: "office-com",
         repairDialogExpected: Boolean((report as Record<string, unknown>).repairDialogExpected)
+      },
+      nativeProof: {
+        status: "passed",
+        renderer: renderer.id === "powerpoint-com" ? "powerpoint" : "office-com",
+        artifact: options.out,
+        reason: `Native proof rendered through ${renderer.id}.`
       }
     };
   } finally {

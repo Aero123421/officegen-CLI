@@ -1,7 +1,9 @@
+import { type ExportMode } from "./export.js";
 import { type InputLike, type OfficegenConfig } from "./shared.js";
 export interface VerifyOptions {
     native?: boolean;
     visual?: boolean;
+    mode?: ExportMode;
     out?: string;
     gates?: VerifyGates;
     formulas?: boolean;
@@ -40,6 +42,13 @@ export interface VerifyResult {
         message?: string;
         artifact?: string;
         repairDialogExpected?: boolean;
+        renderer?: "powerpoint" | "libreoffice" | "office-com";
+    };
+    nativeProof: {
+        status: "passed" | "not_run" | "unavailable" | "failed";
+        renderer?: "powerpoint" | "libreoffice" | "office-com";
+        reason?: string;
+        artifact?: string;
     };
     visual?: {
         fidelity: "approximate" | "native";

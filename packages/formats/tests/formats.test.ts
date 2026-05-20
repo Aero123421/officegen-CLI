@@ -970,10 +970,28 @@ describe("@officegen/formats MVP", () => {
 
     expect(viewed.fidelity).toBe("internal");
     expect(viewed.renderer.id).toBe("officegen-pptx-objectmap-canvas");
+    expect(viewed.nativeProof.status).toBe("not_run");
     expect(viewed.pages).toHaveLength(1);
     expect(viewed.pages[0]?.format).toBe("png");
     expect(viewed.rasterDiagnostics?.blankPages).toEqual([]);
     expect(viewed.rasterDiagnostics?.pixelDensityWarnings).toEqual([]);
+    expect(viewed.pages[0]?.pixelDensity?.nonWhitePixels).toBeGreaterThan(128);
+  });
+
+  it("does not fall back to internal PPTX raster preview when proof mode is requested", async () => {
+    const rendered = await render({ title: "Proof", slides: [{ title: "Native proof", body: "Body" }] }, { target: "pptx" });
+
+    await expect(view({ data: rendered.bytes, format: "pptx" }, { format: "png", mode: "proof" }))
+      .rejects.toThrow(/Native LibreOffice export is disabled|SECURITY_EXTERNAL_PROCESS_DENIED|Native Office-to-PDF export requires/);
+  });
+
+  it("registers a CJK-capable canvas font for Japanese PPTX raster previews", async () => {
+    const rendered = await render({ title: "日本語プレビュー", slides: [{ title: "日本語タイトル", body: "箇条書き\n番号付き\n本文" }] }, { target: "pptx" });
+    const viewed = await view({ data: rendered.bytes, format: "pptx" }, { format: "png", dpi: 72 });
+
+    expect(viewed.renderer.id).toBe("officegen-pptx-objectmap-canvas");
+    expect(viewed.caveats.join("\n")).toContain("Registered CJK canvas font");
+    expect(viewed.rasterDiagnostics?.blankPages).toEqual([]);
     expect(viewed.pages[0]?.pixelDensity?.nonWhitePixels).toBeGreaterThan(128);
   });
 
@@ -1065,6 +1083,7 @@ describe("@officegen/formats MVP", () => {
 
     expect(result.openable).toBe(true);
     expect(result.noRepairDialogExpected).toBe(true);
+    expect(result.nativeProof.status).toBe("not_run");
     expect(result.visual?.pagesChecked).toBeGreaterThan(0);
     expect(result.readiness).not.toBe("blocked");
     expect(result.verificationReport).toMatchObject({
@@ -1079,6 +1098,26 @@ describe("@officegen/formats MVP", () => {
       }
     });
     expect(validateSchema("officegen.verify@2", result.verificationReport).ok).toBe(true);
+  });
+
+  it("reports unavailable native proof when proof verify cannot run a native renderer", async () => {
+    const rendered = await render({ title: "Proof", slides: [{ title: "Native proof", body: "Body" }] }, { target: "pptx" });
+    const result = await verify({ data: rendered.bytes, format: "pptx" }, { mode: "proof" });
+
+    expect(result.readiness).toBe("blocked");
+    expect(result.nativeProof.status).toBe("unavailable");
+    expect(result.blockingIssues.join("\n")).toContain("NATIVE_RENDERER_BLOCKED");
+    expect(result.verificationReport.gates.native.summary?.nativeProof).toMatchObject({ status: "unavailable" });
+  });
+
+  it("does not fall back to approximate SVG visual evidence in proof verify mode", async () => {
+    const rendered = await render({ title: "Proof", slides: [{ title: "Native proof", body: "Body" }] }, { target: "pptx" });
+    const result = await verify({ data: rendered.bytes, format: "pptx" }, { visual: true, mode: "proof" });
+
+    expect(result.readiness).toBe("blocked");
+    expect(result.warnings.join("\n")).toContain("VISUAL_VERIFY_FAILED");
+    expect(result.visual).toBeUndefined();
+    expect(result.nativeProof.status).toBe("unavailable");
   });
 
   it("applies explicit verification gates for AI and CI workflows", async () => {

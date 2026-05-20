@@ -55,8 +55,9 @@ export async function verify(input, options = {}) {
         }
     }
     let noRepairDialogExpected = ![...(diagnosed?.issues ?? [])].some((issue) => issue.code.startsWith("OFFICE_REPAIR_RISK"));
+    const nativeRequested = options.native === true || options.mode === "proof";
     const visual = options.visual && inspected
-        ? await timedPhase("visual", phaseTimings, options.timeoutMs, () => verifyVisual({ data: normalized.bytes, format: normalized.format }, options.config)).catch((error) => {
+        ? await timedPhase("visual", phaseTimings, options.timeoutMs, () => verifyVisual({ data: normalized.bytes, path: normalized.path, format: normalized.format }, options.config, options.mode)).catch((error) => {
             if (isTimeout(error)) {
                 partial = true;
                 warnings.push(`VERIFY_TIMEOUT: visual preview exceeded ${options.timeoutMs}ms.`);
@@ -83,7 +84,7 @@ export async function verify(input, options = {}) {
             message: "Visual preview verification ran without an expected/baseline document, so pixel diff was skipped."
         }
         : undefined;
-    const nativeRenderer = options.native
+    const nativeRenderer = nativeRequested
         ? await timedPhase("native", phaseTimings, options.timeoutMs, () => verifyNative(normalized, options, artifacts)).catch((error) => {
             if (isTimeout(error)) {
                 partial = true;
@@ -95,14 +96,14 @@ export async function verify(input, options = {}) {
         : undefined;
     if (nativeRenderer && !nativeRenderer.ok)
         warnings.push(nativeRenderer.message ?? "Native renderer verification did not complete.");
-    if (options.native && nativeRenderer && !nativeRenderer.ok) {
+    if (nativeRequested && nativeRenderer && !nativeRenderer.ok) {
         blockingIssues.push(`NATIVE_RENDERER_BLOCKED: ${nativeRenderer.message ?? "Native renderer verification did not complete."}`);
     }
     if (nativeRenderer?.repairDialogExpected === true) {
         noRepairDialogExpected = false;
         blockingIssues.push("OFFICE_REPAIR_DIALOG_EXPECTED_NATIVE");
     }
-    if (!options.native && ["pptx", "docx", "xlsx"].includes(normalized.format)) {
+    if (!nativeRequested && ["pptx", "docx", "xlsx"].includes(normalized.format)) {
         warnings.push("NATIVE_RENDERER_NOT_RUN: native repair-dialog/openability verification is optional-gated; use --native under an enabled renderer policy.");
     }
     if (normalized.format === "pdf" && inspected?.trusted.summary && inspected.trusted.summary.textBlocks === 0) {
@@ -163,6 +164,7 @@ export async function verify(input, options = {}) {
     const recommendedRepairs = topRisks
         .filter((risk) => risk.repair)
         .map((risk) => ({ code: risk.code, reason: risk.repair ?? "", command: commandForRisk(risk.code, normalized.format) }));
+    const nativeProof = nativeProofFromRenderer(nativeRenderer, nativeRequested, normalized.format);
     const result = {
         schema: "officegen.verify.result@1.2",
         verificationReport: buildVerificationReport({
@@ -177,6 +179,7 @@ export async function verify(input, options = {}) {
             visual,
             visualDiff,
             nativeRenderer,
+            nativeProof,
             gateResult,
             warnings,
             blockingIssues,
@@ -192,6 +195,7 @@ export async function verify(input, options = {}) {
         openable,
         noRepairDialogExpected,
         nativeRenderer,
+        nativeProof,
         visual,
         visualDiff,
         expectedDiffOnly: visualDiff?.expectedDiffOnly ?? false,
@@ -336,9 +340,9 @@ function evaluateGates(gates, inspected, visual, warningCount, noRepairDialogExp
 function gatesNeedFullText(gates) {
     return Boolean(gates?.requiredText?.length || gates?.forbiddenText?.length);
 }
-async function verifyVisual(input, config) {
+async function verifyVisual(input, config, mode) {
     try {
-        const preview = await view(input, { format: "png", maxPages: 10, config });
+        const preview = await view(input, { format: "png", maxPages: 10, config, mode });
         const raster = preview.rasterDiagnostics;
         if (raster) {
             return {
@@ -352,6 +356,9 @@ async function verifyVisual(input, config) {
         }
     }
     catch (error) {
+        if (mode === "proof") {
+            throw error;
+        }
         const preview = await view(input, { format: "svg", maxPages: 10, config });
         const blankPages = preview.pages.filter((page) => !page.objectMap.some(hasVisiblePreviewObject)).length;
         return {
@@ -389,7 +396,7 @@ async function verifyNative(input, options, artifacts) {
     await mkdir(artifactDir, { recursive: true });
     const pdfPath = path.join(artifactDir, `${path.basename(input.path, path.extname(input.path))}.native.pdf`);
     try {
-        const exported = await exportDocument(input.path, { to: "pdf", mode: "native", out: pdfPath, config: options.config, timeoutMs: options.timeoutMs });
+        const exported = await exportDocument(input.path, { to: "pdf", mode: options.mode === "proof" ? "proof" : "native", out: pdfPath, config: options.config, timeoutMs: options.timeoutMs });
         const pdf = await PDFDocument.load(await import("node:fs/promises").then((fs) => fs.readFile(pdfPath)));
         artifacts.nativePdf = {
             artifactId: "verify-native-pdf",
@@ -405,6 +412,7 @@ async function verifyNative(input, options, artifacts) {
             ok: true,
             artifact: pdfPath,
             repairDialogExpected: exported.renderer?.repairDialogExpected,
+            renderer: exported.nativeProof?.renderer ?? nativeProofRenderer(exported.renderer?.id),
             message: `Native renderer produced ${pdf.getPageCount()} PDF page(s) with ${exported.renderer?.id ?? "renderer"}.`
         };
     }
@@ -418,6 +426,37 @@ function managedVerifyArtifactDir(inputPath, reportOut) {
         return path.join(path.dirname(reportOut), `${path.basename(reportOut, path.extname(reportOut))}-artifacts`);
     }
     return path.join(path.dirname(inputPath), ".officegen", "verify-artifacts");
+}
+function nativeProofFromRenderer(nativeRenderer, requested, format) {
+    if (!requested) {
+        return ["pptx", "docx", "xlsx"].includes(format)
+            ? { status: "not_run", reason: "Native proof was not requested; use --native or --mode proof for final layout evidence." }
+            : { status: "not_run", reason: "Native proof is only relevant for Office inputs." };
+    }
+    if (!nativeRenderer)
+        return { status: "failed", reason: "Native proof was requested but did not produce a renderer result." };
+    if (nativeRenderer.ok) {
+        return {
+            status: "passed",
+            renderer: nativeRenderer.renderer ?? nativeProofRenderer(nativeRenderer.message),
+            artifact: nativeRenderer.artifact,
+            reason: nativeRenderer.message
+        };
+    }
+    const reason = nativeRenderer.message ?? "Native renderer verification did not complete.";
+    return {
+        status: /not found|requires|disabled|denied|unavailable/i.test(reason) ? "unavailable" : "failed",
+        reason
+    };
+}
+function nativeProofRenderer(message) {
+    if (/powerpoint-com/i.test(message ?? ""))
+        return "powerpoint";
+    if (/libreoffice/i.test(message ?? ""))
+        return "libreoffice";
+    if (/word-com|excel-com/i.test(message ?? ""))
+        return "office-com";
+    return undefined;
 }
 function buildVerificationReport(context) {
     const summary = (context.inspected?.trusted.summary ?? {});
@@ -464,9 +503,10 @@ function buildVerificationReport(context) {
                 attempted: context.nativeRenderer.attempted,
                 ok: context.nativeRenderer.ok,
                 repairDialogExpected: context.nativeRenderer.repairDialogExpected,
-                artifact: context.nativeRenderer.artifact
+                artifact: context.nativeRenderer.artifact,
+                nativeProof: context.nativeProof
             }, context.blockingIssues.filter((issue) => /NATIVE|REPAIR_DIALOG/i.test(issue)))
-            : skippedGate("Native renderer verification was not requested."),
+            : skippedGate(context.nativeProof.reason ?? "Native renderer verification was not requested."),
         security: securityIssues.length
             ? { status: "warning", summary: { riskFlagCount: riskFlags?.length ?? 0 }, issues: securityIssues }
             : { status: "pass", summary: { riskFlagCount: riskFlags?.length ?? 0 }, issues: [] },

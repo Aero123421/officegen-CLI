@@ -31,7 +31,7 @@ export async function exportDocument(input, options) {
         await writeOutput(options.out, bytes);
         return result(normalized.format, options, bytes, ["PDF was normalized through pdf-lib."]);
     }
-    if (options.mode === "native" && options.to === "pdf") {
+    if ((options.mode === "native" || options.mode === "proof") && options.to === "pdf") {
         assertNativeExportAllowed(options.config);
         return exportOfficeToPdfNative(normalized, options);
     }
@@ -178,7 +178,7 @@ async function exportOfficeToPdfNative(input, options) {
             schema: "officegen.export.result@1.2",
             from: input.format,
             to: options.to,
-            mode: "native",
+            mode: options.mode === "proof" ? "proof" : "native",
             out: options.out,
             bytes: options.out ? undefined : bytes,
             fidelity: "native",
@@ -186,7 +186,13 @@ async function exportOfficeToPdfNative(input, options) {
                 "Converted with LibreOffice in headless mode; fidelity depends on installed fonts and LibreOffice filters.",
                 ...zipSafetyCaveats(zipSafety)
             ],
-            renderer: { id: "libreoffice", executable, status: "used", backend: "libreoffice", repairDialogExpected: false }
+            renderer: { id: "libreoffice", executable, status: "used", backend: "libreoffice", repairDialogExpected: false },
+            nativeProof: {
+                status: "passed",
+                renderer: "libreoffice",
+                artifact: options.out,
+                reason: "Native proof rendered through LibreOffice headless conversion."
+            }
         };
     }
     finally {
@@ -230,7 +236,7 @@ async function exportOfficeToPdfWithCom(input, options, renderer, caveats) {
             schema: "officegen.export.result@1.2",
             from: input.format,
             to: options.to,
-            mode: "native",
+            mode: options.mode === "proof" ? "proof" : "native",
             out: options.out,
             bytes: options.out ? undefined : saved,
             fidelity: "native",
@@ -245,6 +251,12 @@ async function exportOfficeToPdfWithCom(input, options, renderer, caveats) {
                 status: "used",
                 backend: "office-com",
                 repairDialogExpected: Boolean(report.repairDialogExpected)
+            },
+            nativeProof: {
+                status: "passed",
+                renderer: renderer.id === "powerpoint-com" ? "powerpoint" : "office-com",
+                artifact: options.out,
+                reason: `Native proof rendered through ${renderer.id}.`
             }
         };
     }

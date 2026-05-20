@@ -1,5 +1,5 @@
 import { type InspectResult } from "./inspect.js";
-import { type ExportMode } from "./export.js";
+import { type ExportMode, type NativeProof } from "./export.js";
 import { type InputLike, type OfficegenConfig, type ObjectMapEntry } from "./shared.js";
 export type ViewFormat = "svg" | "html" | "png" | "jpeg" | "jpg";
 export interface ViewOptions {
@@ -99,6 +99,7 @@ export interface ViewResult {
         mode: ExportMode | "approximate";
         fidelity: "approximate" | "internal" | "native";
     };
+    nativeProof: NativeProof;
     caveats: string[];
     pages: ViewPage[];
     crops: ViewCropArtifact[];

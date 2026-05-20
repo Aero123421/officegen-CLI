@@ -35,7 +35,7 @@ const OPTION_SPECS = {
     map: option("--map", "<path>", "template map JSON"),
     matchesOnly: option("--matches-only", undefined, "emit only selector matches for select output"),
     maxPages: option("--max-pages", "<number>", "maximum preview pages"),
-    mode: option("--mode", "<mode>", "export/view mode"),
+    mode: option("--mode", "<fast|internal|native|proof>", "export/view/verify mode"),
     name: option("--name", "<name>", "template, design, plugin, renderer, or lock owner name"),
     namedRanges: option("--named-ranges", undefined, "verify XLSX named ranges"),
     native: option("--native", undefined, "use native renderer when enabled by policy"),
@@ -124,6 +124,7 @@ export const COMMAND_OPTION_SPECS = {
     verify: [
         OPTION_SPECS.visual,
         OPTION_SPECS.native,
+        OPTION_SPECS.mode,
         OPTION_SPECS.timeoutMs,
         OPTION_SPECS.gates,
         OPTION_SPECS.out,

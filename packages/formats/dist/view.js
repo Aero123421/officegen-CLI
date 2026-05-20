@@ -1,8 +1,9 @@
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
-import { createCanvas, Path2D as CanvasPath2D } from "@napi-rs/canvas";
+import { createCanvas, GlobalFonts, Path2D as CanvasPath2D } from "@napi-rs/canvas";
 import * as pdfjs from "pdfjs-dist/legacy/build/pdf.mjs";
 import { inspect } from "./inspect.js";
 import { exportDocument } from "./export.js";
@@ -24,6 +25,7 @@ export async function view(input, options = {}) {
             mode: "approximate",
             fidelity: "approximate"
         },
+        nativeProof: nativeProofNotRun("approximate SVG/HTML view does not run a native renderer."),
         caveats: [
             "Approximate SVG/HTML view only; fonts, wrapping, theme effects, animations, and native layout may differ.",
             ...inspected.trusted.caveats
@@ -80,7 +82,7 @@ async function rasterView(input, inspected, options) {
     const normalized = await normalizeInput(source, inspected.trusted.format);
     const maxPages = options.maxPages ?? 50;
     const dpi = options.dpi ?? 144;
-    if (normalized.format === "pptx" && options.mode !== "native") {
+    if (normalized.format === "pptx" && options.mode !== "native" && options.mode !== "proof") {
         return pptxInternalRasterView(inspected, options, format, [
             "PPTX pages were rasterized with officegen's internal object-map renderer."
         ]);
@@ -89,6 +91,7 @@ async function rasterView(input, inspected, options) {
     let fidelity = "internal";
     let renderer = "officegen-pdfjs-canvas";
     const caveats = [...inspected.trusted.caveats];
+    let nativeProof = nativeProofNotRun("Native proof was not requested.");
     if (normalized.format !== "pdf") {
         const exported = await exportDocument(source, {
             to: "pdf",
@@ -102,6 +105,14 @@ async function rasterView(input, inspected, options) {
         pdfBytes = exported.bytes;
         fidelity = exported.fidelity === "native" ? "native" : "internal";
         renderer = exported.renderer?.id ? `${exported.renderer.id}+pdfjs-canvas` : "officegen-office-pdfjs-canvas";
+        nativeProof = exported.nativeProof ?? (exported.fidelity === "native"
+            ? {
+                status: "passed",
+                renderer: nativeProofRenderer(exported.renderer?.id, exported.renderer?.backend),
+                artifact: exported.out,
+                reason: `Native renderer produced PDF output with ${exported.renderer?.id ?? "renderer"}.`
+            }
+            : nativeProofNotRun("Office export did not use a native renderer."));
         caveats.push(...exported.caveats);
     }
     const rasterPages = await renderPdfToRasterPages(pdfBytes, {
@@ -114,10 +125,18 @@ async function rasterView(input, inspected, options) {
     const pages = rasterPages.map((page) => ({ ...page, renderer }));
     const rasterDiagnostics = diagnoseRasterArtifactQuality(pages);
     if (normalized.format === "pptx" && !rasterDiagnostics.artifactUsable) {
+        if (options.mode === "proof") {
+            throw new Error(`NATIVE_PROOF_FAILED: native PPTX raster output was unusable (${rasterDiagnostics.qualityWarnings.join("; ")}).`);
+        }
         return pptxInternalRasterView(inspected, options, format, [
             "Native PPTX-to-PDF raster output was blank or unusable; fell back to officegen's internal object-map renderer.",
             ...rasterDiagnostics.qualityWarnings
-        ]);
+        ], {
+            status: "failed",
+            renderer: nativeProof.renderer,
+            artifact: nativeProof.artifact,
+            reason: `Native raster output was unusable: ${rasterDiagnostics.qualityWarnings.join("; ")}`
+        });
     }
     const crop = buildObjectCrop(pages, inspected.objectMap, inspected, options, "officegen-internal-object-crop", fidelity);
     return withProgressiveDisclosure({
@@ -132,6 +151,7 @@ async function rasterView(input, inspected, options) {
             mode: options.mode ?? "native",
             fidelity
         },
+        nativeProof,
         caveats: [
             normalized.format === "pdf"
                 ? "PDF pages were rasterized with PDF.js canvas rendering."
@@ -153,18 +173,19 @@ async function rasterView(input, inspected, options) {
         agentInstruction: AGENT_UNTRUSTED_INSTRUCTION
     }, inspected.objectMap, inspected, options);
 }
-async function pptxInternalRasterView(inspected, options, format, caveats) {
+async function pptxInternalRasterView(inspected, options, format, caveats, nativeProof = nativeProofNotRun("PPTX internal raster preview does not run a native renderer.")) {
     const maxPages = options.maxPages ?? 50;
     const dpi = options.dpi ?? 144;
     const scale = Math.max(1, dpi / 72);
     const svgPages = toPages(inspected, { ...options, format: "svg", maxPages });
+    const canvasFont = resolvePptxCanvasFont(svgPages);
     const pages = [];
     for (const page of svgPages) {
         const width = Math.ceil(960 * scale);
         const height = Math.ceil(540 * scale);
         const canvas = createCanvas(width, height);
         const context = canvas.getContext("2d");
-        drawPptxPreviewPage(context, page, scale, width, height);
+        drawPptxPreviewPage(context, page, scale, width, height, canvasFont.family);
         const imageData = context.getImageData(0, 0, width, height);
         const pixelDensity = analyzeRasterPixels(imageData.data, width, height, page.objectMap);
         const bytes = format === "png" ? await canvas.encode("png") : await canvas.encode("jpeg");
@@ -199,9 +220,11 @@ async function pptxInternalRasterView(inspected, options, format, caveats) {
             mode: options.mode ?? "internal",
             fidelity: "internal"
         },
+        nativeProof,
         caveats: [
             ...caveats,
             "Internal PPTX raster preview is approximate; fonts, wrapping, effects, and native layout may differ.",
+            ...canvasFont.caveats,
             ...inspected.trusted.caveats
         ],
         pages,
@@ -219,21 +242,33 @@ async function pptxInternalRasterView(inspected, options, format, caveats) {
         agentInstruction: AGENT_UNTRUSTED_INSTRUCTION
     }, inspected.objectMap, inspected, options);
 }
+function nativeProofNotRun(reason) {
+    return { status: "not_run", reason };
+}
+function nativeProofRenderer(id, backend) {
+    if (id === "powerpoint-com")
+        return "powerpoint";
+    if (backend === "libreoffice" || id === "libreoffice")
+        return "libreoffice";
+    if (backend === "office-com")
+        return "office-com";
+    return undefined;
+}
 function isRasterFormat(format) {
     return format === "png" || format === "jpeg" || format === "jpg";
 }
 function normalizeRasterFormat(format) {
     return format === "jpeg" || format === "jpg" ? "jpeg" : "png";
 }
-function drawPptxPreviewPage(context, page, scale, width, height) {
+function drawPptxPreviewPage(context, page, scale, width, height, fontFamily) {
     context.save();
     context.fillStyle = "#ffffff";
     context.fillRect(0, 0, width, height);
     context.scale(scale, scale);
-    page.objectMap.forEach((object, index) => drawPptxPreviewObject(context, object, index));
+    page.objectMap.forEach((object, index) => drawPptxPreviewObject(context, object, index, fontFamily));
     context.restore();
 }
-function drawPptxPreviewObject(context, object, index) {
+function drawPptxPreviewObject(context, object, index, fontFamily) {
     const bounds = object.bounds ?? fallbackSlideBounds(object, index);
     const isFramed = object.kind !== "shape";
     if (isFramed) {
@@ -248,7 +283,7 @@ function drawPptxPreviewObject(context, object, index) {
     if (!lines.length)
         return;
     context.fillStyle = "#111111";
-    context.font = `${fontSize}px Arial, sans-serif`;
+    context.font = `${fontSize}px ${fontFamily}`;
     const lineHeight = Math.max(12, Math.round(fontSize * 1.25));
     let y = bounds.y + fontSize + 6;
     for (const line of lines) {
@@ -257,6 +292,91 @@ function drawPptxPreviewObject(context, object, index) {
         context.fillText(line, bounds.x + 6, y, Math.max(12, bounds.width - 12));
         y += lineHeight;
     }
+}
+const PptxCanvasFontAlias = "Officegen CJK";
+let pptxCanvasFontState;
+function resolvePptxCanvasFont(pages) {
+    const fallbackFamily = `"${PptxCanvasFontAlias}", "Noto Sans JP", "Yu Gothic", Meiryo, "MS Gothic", Arial, sans-serif`;
+    const containsCjk = pages.some((page) => page.objectMap.some((object) => pptxPreviewTextLines(object).some(needsCjkCanvasFont)));
+    if (!containsCjk)
+        return { family: "Arial, sans-serif", caveats: [] };
+    if (pptxCanvasFontState)
+        return pptxCanvasFontState;
+    const attempts = [];
+    for (const fontPath of canvasCjkFontPaths()) {
+        try {
+            const fontKey = GlobalFonts.registerFromPath(fontPath, PptxCanvasFontAlias);
+            if (!fontKey) {
+                attempts.push(`${fontPath}: registerFromPath returned no font key`);
+                continue;
+            }
+            pptxCanvasFontState = {
+                family: fallbackFamily,
+                caveats: [`Registered CJK canvas font for PPTX raster preview: ${fontPath}.`]
+            };
+            return pptxCanvasFontState;
+        }
+        catch (error) {
+            attempts.push(`${fontPath}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+    }
+    pptxCanvasFontState = {
+        family: fallbackFamily,
+        caveats: [
+            "No CJK canvas font could be registered for PPTX raster preview; Japanese/Chinese/Korean glyphs may render as tofu.",
+            ...attempts.slice(0, 3).map((attempt) => `CJK font registration failed: ${attempt}`)
+        ]
+    };
+    return pptxCanvasFontState;
+}
+function needsCjkCanvasFont(value) {
+    return /\p{Script=Han}|\p{Script=Hiragana}|\p{Script=Katakana}|\p{Script=Hangul}|[\uff00-\uffef]/u.test(value);
+}
+function canvasCjkFontPaths() {
+    const env = process.env.OFFICEGEN_CANVAS_FONT ?? process.env.OFFICEGEN_PDF_FONT;
+    return [...(env ? [env] : []), ...bundledCanvasJapaneseFonts(), ...platformCanvasCjkFonts()]
+        .filter((candidate, index, list) => existsSync(candidate) && list.indexOf(candidate) === index);
+}
+function bundledCanvasJapaneseFonts() {
+    try {
+        const require = createRequire(import.meta.url);
+        const entry = require.resolve("@embedpdf/fonts-jp");
+        const root = path.dirname(path.dirname(entry));
+        return [
+            path.join(root, "fonts", "NotoSansJP-Regular.otf"),
+            path.join(root, "fonts", "NotoSansJP-Bold.otf")
+        ];
+    }
+    catch {
+        return [];
+    }
+}
+function platformCanvasCjkFonts() {
+    if (process.platform === "win32") {
+        const win = process.env.WINDIR ?? "C:\\Windows";
+        return [
+            `${win}\\Fonts\\NotoSansJP-VF.ttf`,
+            `${win}\\Fonts\\YuGothR.ttc`,
+            `${win}\\Fonts\\YuGothM.ttc`,
+            `${win}\\Fonts\\meiryo.ttc`,
+            `${win}\\Fonts\\msgothic.ttc`,
+            `${win}\\Fonts\\msyh.ttc`
+        ];
+    }
+    if (process.platform === "darwin") {
+        return [
+            "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc",
+            "/System/Library/Fonts/ヒラギノ角ゴシック W6.ttc",
+            "/System/Library/Fonts/AppleSDGothicNeo.ttc",
+            "/System/Library/Fonts/PingFang.ttc"
+        ];
+    }
+    return [
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJKjp-Regular.otf",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansJP-Regular.otf"
+    ];
 }
 function pptxPreviewTextLines(object) {
     const paragraphs = slideSemanticParagraphs(object);

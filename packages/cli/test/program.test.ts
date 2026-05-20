@@ -1140,6 +1140,29 @@ describe("officegen CLI command surface", () => {
     expect([...page.subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
   });
 
+  it("routes proof mode view through native renderer policy instead of fast fallback", async () => {
+    const cwd = await tempWorkspace();
+    await writeFile(path.join(cwd, "deck.pptx"), await minimalPptxWithImage(false));
+
+    const captured = await run(["view", "deck.pptx", "--format", "png", "--mode", "proof", "--json"], cwd);
+    const envelope = parseEnvelope(captured);
+
+    expect(envelope.ok).toBe(false);
+    expect(envelope.error.code).toBe("SECURITY_EXTERNAL_PROCESS_DENIED");
+  });
+
+  it("accepts proof mode for verify and reports native proof unavailability", async () => {
+    const cwd = await tempWorkspace();
+    await writeFile(path.join(cwd, "deck.pptx"), await minimalPptxWithImage(false));
+
+    const captured = await run(["verify", "deck.pptx", "--mode", "proof", "--json"], cwd);
+    const envelope = parseEnvelope(captured);
+
+    expect(envelope.ok).toBe(false);
+    expect(envelope.result.nativeProof.status).toBe("unavailable");
+    expect(envelope.result.blockingIssues.join("\n")).toContain("NATIVE_RENDERER_BLOCKED");
+  });
+
   it("resolves selectors through the select command", async () => {
     const cwd = await tempWorkspace();
     await writeFile(path.join(cwd, "deck.pptx"), await minimalPptxWithImage(false));

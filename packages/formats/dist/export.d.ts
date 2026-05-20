@@ -1,7 +1,7 @@
 import { type DocumentIR } from "./render.js";
 import { type InputLike } from "./shared.js";
 import { type OfficegenConfig } from "@officegen/core";
-export type ExportMode = "fast" | "internal" | "native";
+export type ExportMode = "fast" | "internal" | "native" | "proof";
 export interface ExportOptions {
     to: "pdf" | "svg" | "html" | "pptx" | "docx" | "xlsx";
     out?: string;
@@ -30,6 +30,13 @@ export interface ExportResult {
         repairDialogExpected?: boolean;
         backend?: "office-com" | "libreoffice";
     };
+    nativeProof?: NativeProof;
+}
+export interface NativeProof {
+    status: "passed" | "not_run" | "unavailable" | "failed";
+    renderer?: "powerpoint" | "libreoffice" | "office-com";
+    reason?: string;
+    artifact?: string;
 }
 export declare function exportDocument(input: InputLike | DocumentIR, options: ExportOptions): Promise<ExportResult>;
 export declare const exportFile: typeof exportDocument;

@@ -1555,7 +1555,8 @@ export async function verifyPayload(context) {
         namedRanges: hasFlag(context.argv, "--named-ranges"),
         externalLinks: hasFlag(context.argv, "--external-links"),
         protectedSheets: hasFlag(context.argv, "--protected-sheets"),
-        timeoutMs: numberOption(context, "--timeout-ms")
+        timeoutMs: numberOption(context, "--timeout-ms"),
+        mode: optionValue(context.argv, "--mode") ?? "fast"
     }));
     return maybeWriteReport(context, result, "verify");
 }
@@ -3004,6 +3005,7 @@ async function executeRunStep(context, folder, step, stepOutputs, index, outputR
         return verify(requireRunInput(command, input), withFormatConfig(context, {
             native: step.native === true,
             visual: step.visual === true,
+            mode: step.mode ?? "fast",
             out: out ?? path.join(folder.logsDir, `${String(index + 1).padStart(2, "0")}-verify.json`),
             gates: step.gates !== undefined ? verifyGatesFromJson(step.gates) : undefined,
             timeoutMs

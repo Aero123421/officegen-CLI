@@ -1044,7 +1044,7 @@ export async function viewPayload(context: RuntimeContext): Promise<unknown> {
     format,
     maxPages: numberOption(context, "--max-pages"),
     dpi: numberOption(context, "--dpi"),
-    mode: (optionValue(context.argv, "--mode") as "fast" | "internal" | "native" | undefined) ?? "fast",
+    mode: (optionValue(context.argv, "--mode") as "fast" | "internal" | "native" | "proof" | undefined) ?? "fast",
     timeoutMs: numberOption(context, "--timeout-ms"),
     objectId: optionValue(context.argv, "--object") ?? optionValue(context.argv, "--selector"),
     crop: hasFlag(context.argv, "--crop"),
@@ -1649,7 +1649,7 @@ export async function exportPayload(context: RuntimeContext): Promise<unknown> {
   const result = await exportDocument(inputPath, withFormatConfig(context, {
     to,
     out,
-    mode: (optionValue(context.argv, "--mode") as "fast" | "internal" | "native" | undefined) ?? "fast",
+    mode: (optionValue(context.argv, "--mode") as "fast" | "internal" | "native" | "proof" | undefined) ?? "fast",
     timeoutMs: numberOption(context, "--timeout-ms")
   }));
   return withOutputArtifact(result, out, "export", inputPath);
@@ -1674,7 +1674,8 @@ export async function verifyPayload(context: RuntimeContext): Promise<unknown> {
     namedRanges: hasFlag(context.argv, "--named-ranges"),
     externalLinks: hasFlag(context.argv, "--external-links"),
     protectedSheets: hasFlag(context.argv, "--protected-sheets"),
-    timeoutMs: numberOption(context, "--timeout-ms")
+    timeoutMs: numberOption(context, "--timeout-ms"),
+    mode: (optionValue(context.argv, "--mode") as "fast" | "internal" | "native" | "proof" | undefined) ?? "fast"
   }));
   return maybeWriteReport(context, result, "verify");
 }
@@ -3177,6 +3178,7 @@ async function executeRunStep(
   if (command === "verify") return verify(requireRunInput(command, input), withFormatConfig(context, {
     native: step.native === true,
     visual: step.visual === true,
+    mode: (step.mode as "fast" | "internal" | "native" | "proof" | undefined) ?? "fast",
     out: out ?? path.join(folder.logsDir, `${String(index + 1).padStart(2, "0")}-verify.json`),
     gates: step.gates !== undefined ? verifyGatesFromJson(step.gates) : undefined,
     timeoutMs
@@ -3187,7 +3189,7 @@ async function executeRunStep(
       format: stepFormat,
       maxPages: typeof step.maxPages === "number" ? step.maxPages : undefined,
       dpi: typeof step.dpi === "number" ? step.dpi : undefined,
-      mode: (step.mode as "fast" | "internal" | "native" | undefined) ?? "fast",
+      mode: (step.mode as "fast" | "internal" | "native" | "proof" | undefined) ?? "fast",
       timeoutMs
     }));
     const viewDir = out ?? path.join(folder.viewsDir, `${String(index + 1).padStart(2, "0")}-view`);
@@ -3249,7 +3251,7 @@ async function executeRunStep(
   if (command === "export") {
     return exportDocument(requireRunInput(command, input), withFormatConfig(context, {
       to: (step.to as "pdf" | "svg" | "html" | "pptx" | "docx" | "xlsx" | undefined) ?? "pdf",
-      mode: (step.mode as "fast" | "internal" | "native" | undefined) ?? "fast",
+      mode: (step.mode as "fast" | "internal" | "native" | "proof" | undefined) ?? "fast",
       out: out ?? path.join(folder.outputDir, `${String(index + 1).padStart(2, "0")}-export.${String(step.to ?? "pdf")}`),
       timeoutMs
     }));
