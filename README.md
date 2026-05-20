@@ -21,13 +21,13 @@ Requires Node.js 24 or later.
 Recommended install is the checked release tarball:
 
 ```bash
-npm install -g https://github.com/Aero123421/officegen-CLI/releases/download/v3.1.1/officegen-v3.1.1.tgz
+npm install -g https://github.com/Aero123421/officegen-CLI/releases/download/v3.1.2/officegen-v3.1.2.tgz
 ```
 
 GitHub direct install is also smoke-tested, but use the tarball when an agent or CI needs the most deterministic path:
 
 ```bash
-npm install -g github:Aero123421/officegen-CLI#v3.1.1
+npm install -g github:Aero123421/officegen-CLI#v3.1.2
 ```
 
 The `officegen` package name is not published from this project to the public npm registry, because that name is owned separately on npm.
@@ -189,7 +189,7 @@ officegen asset replace deck.pptx --asset ppt/media/image1.png logo.png --out de
 
 ## Current Capability Level
 
-Officegen v3.1.1 is a practical v2 authoring substrate. It is strongest when an agent needs structured, auditable Office automation rather than free-form binary generation.
+Officegen v3.1.2 is a practical v2 authoring substrate. It is strongest when an agent needs structured, auditable Office automation rather than free-form binary generation.
 
 PPTX:
 
@@ -233,7 +233,7 @@ Use `--json` for machine-readable output. Responses use the `officegen.envelope@
   "ok": true,
   "command": "capabilities",
   "runId": "...",
-  "cliVersion": "3.1.1",
+  "cliVersion": "3.1.2",
   "capabilitiesHash": "sha256:...",
   "pathsRedacted": true,
   "result": {},
@@ -356,7 +356,7 @@ npm run perfect-spec:evidence
 npm run perfect-spec:check -- --gate=publish
 npm run github-install:tag-smoke
 npm run github-install:remote-smoke
-OFFICEGEN_RELEASE_TARBALL_SPEC=https://github.com/Aero123421/officegen-CLI/releases/download/v3.1.1/officegen-v3.1.1.tgz npm run release-tarball:smoke
+OFFICEGEN_RELEASE_TARBALL_SPEC=https://github.com/Aero123421/officegen-CLI/releases/download/v3.1.2/officegen-v3.1.2.tgz npm run release-tarball:smoke
 ```
 
 The pre-tag visibility gate may show `L7-A009` as pending because tag and release install checks need a real tag or released asset. The release workflow must collect `.officegen/acceptance/perfect-spec/post-tag-smoke.json` plus the tag/remote smoke logs, regenerate the perfect-spec evidence bundle, and pass `npm run perfect-spec:check -- --gate=publish` before packaging release assets. The workflow uploads `.officegen/acceptance/perfect-spec` as CI evidence.
@@ -368,8 +368,8 @@ Optional public corpus benchmark:
 ```bash
 npm run benchmark:fetch
 npm run benchmark:review
-officegen benchmark run --manifest benchmarks/office-corpus/manifest.json --report-out .officegen/benchmark-results/v3.1.1.json --agent --json
-officegen benchmark compare old.json .officegen/benchmark-results/v3.1.1.json --json
+officegen benchmark run --manifest benchmarks/office-corpus/manifest.json --report-out .officegen/benchmark-results/v3.1.2.json --agent --json
+officegen benchmark compare old.json .officegen/benchmark-results/v3.1.2.json --json
 ```
 
 The benchmark downloads public corpus files into `.officegen/benchmark-corpus/`; Office/PDF binaries are not committed to the repository.
@@ -379,7 +379,7 @@ Version bump:
 ```bash
 npm run version:bump -- patch
 npm run version:bump -- minor
-npm run version:bump -- 3.1.1
+npm run version:bump -- 3.1.2
 npm run version:check
 ```
 

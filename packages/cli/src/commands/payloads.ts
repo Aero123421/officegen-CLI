@@ -1301,12 +1301,13 @@ export async function editPayload(context: RuntimeContext): Promise<unknown> {
     inPlace,
     artifacts: artifacts.length ? [...asArray(resultRecord.artifacts).map(asRecord), ...artifacts] : resultRecord.artifacts
   };
-  return dryRun ? attributedResult : withOutputArtifact(withVerifyPendingWarning(attributedResult, out, "edit"), out, "edit", inputPath, { skipValidation: Boolean(inPlaceBackup) });
+  return dryRun ? attributedResult : withOutputArtifact(withVerifyPendingWarning(attributedResult, "edit"), out, "edit", inputPath, { skipValidation: Boolean(inPlaceBackup) });
 }
 
-function withVerifyPendingWarning(result: unknown, out: string | undefined, command: string): unknown {
-  if (!out) return result;
+function withVerifyPendingWarning(result: unknown, command: string): unknown {
   const record = asRecord(result);
+  const out = typeof record.out === "string" ? record.out : undefined;
+  if (!out) return result;
   const warning = {
     code: "VERIFY_NOT_RUN_AFTER_MUTATION",
     severity: "warning",
@@ -1705,7 +1706,7 @@ export async function repairPayload(context: RuntimeContext): Promise<unknown> {
     issues: issues as never
   }));
   if (planOnly) return result.repairPlan;
-  return withOutputArtifact(withVerifyPendingWarning(result, out, "repair"), out, "repair", inputPath);
+  return withOutputArtifact(withVerifyPendingWarning(result, "repair"), out, "repair", inputPath);
 }
 
 export async function diffPayload(context: RuntimeContext): Promise<unknown> {

@@ -24,6 +24,38 @@ export interface ViewPage {
     height?: number;
     renderer?: string;
     objectMap: ObjectMapEntry[];
+    pageHash?: string;
+    pixelDensity?: RasterPixelDensity;
+    qualityWarnings?: string[];
+    artifactUsable?: boolean;
+}
+export interface RasterPixelDensity {
+    pageHash: string;
+    width: number;
+    height: number;
+    totalPixels: number;
+    whitePixels: number;
+    nonWhitePixels: number;
+    whiteDensity: number;
+    nonWhiteDensity: number;
+    blank: boolean;
+    mostlyWhite: boolean;
+    textObjectCount: number;
+    hasTextObjects: boolean;
+}
+export interface RasterArtifactDiagnostics {
+    pageHashes: Array<{
+        page: number;
+        hash: string;
+    }>;
+    blankPages: number[];
+    mostlyWhitePages: number[];
+    identicalPages: number[];
+    identicalPageGroups: number[][];
+    allPagesIdentical: boolean;
+    pixelDensityWarnings: string[];
+    qualityWarnings: string[];
+    artifactUsable: boolean;
 }
 export interface ViewCropArtifact {
     objectId: string;
@@ -57,6 +89,10 @@ export interface ViewCursor {
 }
 export interface ViewResult {
     schema: "officegen.view.result@1.2";
+    readiness?: "pass" | "warning";
+    artifactUsable?: boolean;
+    warnings?: string[];
+    qualityWarnings?: string[];
     fidelity: "approximate" | "internal" | "native";
     renderer: {
         id: string;
@@ -68,6 +104,7 @@ export interface ViewResult {
     crops: ViewCropArtifact[];
     crop: ViewCropMetadata;
     summary: Record<string, unknown>;
+    rasterDiagnostics?: RasterArtifactDiagnostics;
     cursor?: ViewCursor;
     nextActions: string[];
     objectMap: ObjectMapEntry[];
@@ -80,3 +117,4 @@ export interface ViewResult {
 }
 export declare function view(input: InputLike | InspectResult, options?: ViewOptions): Promise<ViewResult>;
 export declare const viewDocument: typeof view;
+export declare function diagnoseRasterArtifactQuality(pages: ViewPage[]): RasterArtifactDiagnostics;

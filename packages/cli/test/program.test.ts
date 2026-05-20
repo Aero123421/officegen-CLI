@@ -1280,6 +1280,10 @@ describe("officegen CLI command surface", () => {
     expect(blocked.artifactStatus).toBe("missing");
     expect(blocked.result.opResults[0]).toMatchObject({ applied: true });
     expect(blocked.result.errors[0]).toMatchObject({ reason: "not-found" });
+    expect(blocked.result.warnings ?? []).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "VERIFY_NOT_RUN_AFTER_MUTATION" })
+    ]));
+    expect(blocked.result.readinessNotes ?? []).not.toContain("Output artifact has not been verified after mutation.");
     await expect(stat(path.join(cwd, "blocked.pptx"))).rejects.toMatchObject({ code: "ENOENT" });
 
     expect(allowed.ok).toBe(true);
@@ -1475,6 +1479,24 @@ describe("officegen CLI command surface", () => {
     expect(envelope.ok).toBe(false);
     expect(envelope.error.code).toBe("SCHEMA_INVALID");
     expect(process.exitCode).toBe(3);
+  });
+
+  it("fails the verify envelope when --visual produces a failing visual gate", async () => {
+    const cwd = await tempWorkspace();
+    const pdfDoc = await PDFDocument.create();
+    pdfDoc.addPage([200, 100]);
+    await writeFile(path.join(cwd, "blank.pdf"), await pdfDoc.save());
+
+    const captured = await run(["verify", "blank.pdf", "--visual", "--json"], cwd);
+    const envelope = parseEnvelope(captured);
+
+    expect(envelope.ok).toBe(false);
+    expect(envelope.objectiveOk).toBe(false);
+    expect(envelope.readiness).toBe("blocked");
+    expect(envelope.error.code).toBe("RUN_STEP_FAILED");
+    expect(envelope.error.details.failedGates).toContain("visual");
+    expect(envelope.result.verificationReport.gates.visual.status).toBe("fail");
+    expect(envelope.result.blockingIssues.join("\n")).toContain("VISUAL_GATE_FAILED");
   });
 
   it("applies verify gates inside run plan steps", async () => {

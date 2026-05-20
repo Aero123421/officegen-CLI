@@ -964,6 +964,19 @@ describe("@officegen/formats MVP", () => {
     expect([...Buffer.from(viewed.pages[0]?.bytes ?? []).subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
   });
 
+  it("rasterizes PPTX pages to nonblank PNG through the internal object-map renderer", async () => {
+    const rendered = await render({ title: "Raster PPTX", slides: [{ title: "Visible Title", body: "Visible Body" }] }, { target: "pptx" });
+    const viewed = await view({ data: rendered.bytes, format: "pptx" }, { format: "png", dpi: 72 });
+
+    expect(viewed.fidelity).toBe("internal");
+    expect(viewed.renderer.id).toBe("officegen-pptx-objectmap-canvas");
+    expect(viewed.pages).toHaveLength(1);
+    expect(viewed.pages[0]?.format).toBe("png");
+    expect(viewed.rasterDiagnostics?.blankPages).toEqual([]);
+    expect(viewed.rasterDiagnostics?.pixelDensityWarnings).toEqual([]);
+    expect(viewed.pages[0]?.pixelDensity?.nonWhitePixels).toBeGreaterThan(128);
+  });
+
   it("flags blank and identical PNG raster view artifacts as unusable", async () => {
     const pdfDoc = await PDFDocument.create();
     pdfDoc.addPage([200, 100]);
@@ -1115,7 +1128,8 @@ describe("@officegen/formats MVP", () => {
     expect(result.visual?.identicalPages).toEqual([1, 2]);
     expect(result.visual?.pixelDensityWarnings.join("\n")).toContain("RASTER_PAGE_BLANK");
     expect(result.warnings.join("\n")).toContain("VISUAL_PIXEL_DENSITY");
-    expect(result.readiness).toBe("warning");
+    expect(result.readiness).toBe("blocked");
+    expect(result.blockingIssues.join("\n")).toContain("VISUAL_GATE_FAILED");
     expect(result.verificationReport.gates.visual.status).toBe("fail");
   });
 
@@ -1215,6 +1229,78 @@ describe("@officegen/formats MVP", () => {
     expect(xml).toContain('<a:rPr b="1"/>');
   });
 
+  it("treats PPTX setBold as applied when the selector matches text that is already bold", async () => {
+    const zip = new JSZip();
+    zip.file(
+      "ppt/slides/slide1.xml",
+      [
+        "<p:sld><p:sp><p:nvSpPr><p:cNvPr id=\"12\" name=\"Already Bold\"/></p:nvSpPr><p:txBody>",
+        "<a:p><a:r><a:rPr b=\"1\"/><a:t>Already bold</a:t></a:r></a:p>",
+        "</p:txBody></p:sp></p:sld>"
+      ].join("")
+    );
+    const bytes = await zip.generateAsync({ type: "uint8array" });
+    const operations = [{ op: "pptx.setBold" as const, selector: { contains: "Already bold" }, bold: true }];
+    const resolved = await resolveEditSelectors({ data: bytes, format: "pptx" }, operations);
+
+    expect(resolved.resolutions[0]).toMatchObject({ matched: true, matchCount: 1 });
+
+    const edited = await edit({ data: bytes, format: "pptx" }, operations, { resolveSelectors: true });
+    const editedZip = await JSZip.loadAsync(edited.bytes as Uint8Array);
+    const xml = await editedZip.file("ppt/slides/slide1.xml")?.async("string");
+
+    expect(edited.opResults?.[0]).toMatchObject({ applied: true });
+    expect(edited.errors).toBeUndefined();
+    expect(xml).toContain('<a:rPr b="1"/>');
+  });
+
+  it("keeps contains selectors literal while diagnosing whitespace-insensitive PPTX text candidates", async () => {
+    const zip = new JSZip();
+    zip.file(
+      "ppt/slides/slide1.xml",
+      [
+        "<p:sld><p:sp><p:nvSpPr><p:cNvPr id=\"31\" name=\"Policy Text\"/></p:nvSpPr><p:txBody>",
+        "<a:p><a:r><a:t>基本方針</a:t></a:r></a:p>",
+        "<a:p><a:r><a:t>対策基準</a:t></a:r></a:p>",
+        "<a:p><a:r><a:t>実施手順</a:t></a:r></a:p>",
+        "</p:txBody></p:sp></p:sld>"
+      ].join("")
+    );
+    const bytes = await zip.generateAsync({ type: "uint8array" });
+    const operations = [{ op: "pptx.setBold" as const, selector: { contains: "基本方針対策基準" }, bold: true }];
+    const resolved = await resolveEditSelectors({ data: bytes, format: "pptx" }, operations);
+
+    expect(resolved.resolutions[0]).toMatchObject({
+      matched: false,
+      matchCount: 0,
+      reason: "not-found",
+      diagnostics: [expect.objectContaining({
+        code: "SELECTOR_NEAR_WHITESPACE_INSENSITIVE_MATCH",
+        selectorField: "contains",
+        normalizedRequestedText: "基本方針対策基準",
+        candidates: [expect.objectContaining({
+          text: "基本方針\n対策基準\n実施手順",
+          suggestedSelector: { stableObjectId: expect.stringContaining("pptx:slide-") }
+        })]
+      })]
+    });
+    expect(resolved.resolutions[0]?.selectorResolution?.candidates).toEqual([]);
+    expect(resolved.resolutions[0]?.selectorResolution?.nextActions.join("\n")).toContain("Validation was not relaxed");
+
+    const dryRun = await edit({ data: bytes, format: "pptx" }, operations, { dryRun: true, resolveSelectors: true });
+
+    expect(dryRun.changed).toBe(false);
+    expect(dryRun.errors?.[0]).toMatchObject({
+      applied: false,
+      reason: "not-found",
+      diagnostics: [expect.objectContaining({ code: "SELECTOR_NEAR_WHITESPACE_INSENSITIVE_MATCH" })]
+    });
+    expect(dryRun.errors?.[0]?.message).toContain("Near whitespace/newline-insensitive text candidate found");
+    expect(dryRun.patchPlan?.blocked[0]?.diagnostics?.[0]?.candidates[0]?.suggestedSelector).toMatchObject({
+      stableObjectId: expect.stringContaining("pptx:slide-")
+    });
+  });
+
   it("applies PPTX setBold to the same shape selected by selectorResolution hints", async () => {
     const zip = new JSZip();
     zip.file(
@@ -1258,6 +1344,33 @@ describe("@officegen/formats MVP", () => {
     expect(edited.opResults?.[0]).toMatchObject({ applied: true });
     expect(alphaBlock).not.toContain('b="1"');
     expect(betaBlock).toContain('b="1"');
+  });
+
+  it("matches PPTX contains selectors that include semantic line breaks for setBold", async () => {
+    const zip = new JSZip();
+    zip.file(
+      "ppt/slides/slide1.xml",
+      [
+        "<p:sld><p:sp><p:nvSpPr><p:cNvPr id=\"31\" name=\"Policy Stack\"/></p:nvSpPr><p:txBody>",
+        "<a:p><a:r><a:rPr/><a:t>基本方針</a:t></a:r></a:p>",
+        "<a:p><a:r><a:rPr/><a:t>対策基準</a:t></a:r></a:p>",
+        "<a:p><a:r><a:rPr/><a:t>実施手順</a:t></a:r></a:p>",
+        "</p:txBody></p:sp></p:sld>"
+      ].join("")
+    );
+    const bytes = await zip.generateAsync({ type: "uint8array" });
+    const operations = [{ op: "pptx.setBold" as const, selector: { contains: "基本方針\n対策基準" }, bold: true }];
+    const resolved = await resolveEditSelectors({ data: bytes, format: "pptx" }, operations);
+
+    expect(resolved.objectMap[0]?.text).toBe("基本方針\n対策基準\n実施手順");
+    expect(resolved.resolutions[0]).toMatchObject({ matched: true, matchCount: 1 });
+
+    const edited = await edit({ data: bytes, format: "pptx" }, operations, { resolveSelectors: true });
+    const editedZip = await JSZip.loadAsync(edited.bytes as Uint8Array);
+    const xml = String(await editedZip.file("ppt/slides/slide1.xml")?.async("string"));
+
+    expect(edited.opResults?.[0]).toMatchObject({ applied: true });
+    expect(xml.match(/b="1"/g)?.length).toBe(3);
   });
 
   it("replaces all text runs in a selected PPTX shape instead of leaving stale run text behind", async () => {

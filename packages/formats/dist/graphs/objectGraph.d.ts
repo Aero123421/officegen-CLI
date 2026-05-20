@@ -23,6 +23,11 @@ export interface ObjectGraphSource {
     sourcePath?: string;
     xmlPath?: string;
     slide?: number;
+    shapeId?: string;
+    shapeIndex?: number;
+    name?: string;
+    placeholder?: string;
+    placeholderKey?: string;
     page?: number;
     sheet?: number;
     sheetName?: string;

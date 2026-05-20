@@ -156,6 +156,7 @@ export async function verify(input: InputLike, options: VerifyOptions = {}): Pro
   if (visual?.blankPages) warnings.push(`VISUAL_BLANK_PAGE: ${visual.blankPages} blank preview pages detected.`);
   if (visual?.identicalPages.length) warnings.push(`VISUAL_IDENTICAL_PAGES: raster preview pages ${visual.identicalPages.join(", ")} share page hashes.`);
   for (const warning of visual?.pixelDensityWarnings ?? []) warnings.push(`VISUAL_PIXEL_DENSITY: ${warning}`);
+  for (const issue of visualBlockingIssues(visual)) blockingIssues.push(issue);
   const visualDiff: VerifyResult["visualDiff"] | undefined = options.visual
     ? {
         status: "skipped",
@@ -588,8 +589,22 @@ function buildVerificationReport(context: {
 function visualHasQualityFailures(visual: VerifyResult["visual"] | undefined): boolean {
   return Boolean(
     visual
-    && (visual.blankPages > 0 || visual.pixelDensityWarnings.length > 0)
+    && (visual.blankPages > 0 || visualPixelQualityFailures(visual).length > 0)
   );
+}
+
+function visualBlockingIssues(visual: VerifyResult["visual"] | undefined): string[] {
+  if (!visualHasQualityFailures(visual) || !visual) return [];
+  const pixelWarnings = visualPixelQualityFailures(visual);
+  const reasons = [
+    visual.blankPages > 0 ? `${visual.blankPages} blank preview page(s)` : undefined,
+    pixelWarnings.length > 0 ? `${pixelWarnings.length} raster pixel-density warning(s)` : undefined
+  ].filter((reason): reason is string => Boolean(reason));
+  return [`VISUAL_GATE_FAILED: visual verification failed (${reasons.join(", ")}).`];
+}
+
+function visualPixelQualityFailures(visual: NonNullable<VerifyResult["visual"]>): string[] {
+  return visual.pixelDensityWarnings.filter((warning) => !warning.startsWith("VISUAL_RASTER_UNAVAILABLE"));
 }
 
 function gate(ok: boolean, summary: Record<string, unknown>, issues: string[]): VerificationGateProjection {

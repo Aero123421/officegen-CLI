@@ -196,6 +196,30 @@ export interface EditSelectorResolution {
   selectionLock?: SelectorSelectionLock;
   selectorResolution?: SelectorResolutionV2;
   reason?: "not-found" | "ambiguous" | "low-confidence" | "unsupported-selector";
+  diagnostics?: EditSelectorDiagnostic[];
+  suggestions?: string[];
+}
+
+export interface EditSelectorNearCandidate {
+  stableObjectId: string;
+  kind: string;
+  label?: string;
+  text?: string;
+  textPreview?: string;
+  sourcePath?: string;
+  xmlPath?: string;
+  selectorHints?: Record<string, unknown>;
+  suggestedSelector: EditSelector;
+}
+
+export interface EditSelectorDiagnostic {
+  code: "SELECTOR_NEAR_WHITESPACE_INSENSITIVE_MATCH";
+  severity: "info";
+  message: string;
+  selectorField: "contains" | "textMatch";
+  requestedText: string;
+  normalizedRequestedText: string;
+  candidates: EditSelectorNearCandidate[];
 }
 
 export interface ResolveEditSelectorsResult {
@@ -234,6 +258,7 @@ export interface EditOperationResult {
   reason?: "not-found" | "ambiguous" | "low-confidence" | "unsupported" | "validation-failed" | "idempotency-replay" | "skipped-after-error" | "stale-plan";
   message?: string;
   evidence?: EditBlockedEvidence;
+  diagnostics?: EditSelectorDiagnostic[];
 }
 
 export interface PatchPlanTouchedPart {
@@ -350,7 +375,7 @@ async function resolveEditSelectorsForNormalized(
   const resolutions = operations.flatMap((operation, index) => {
     const selector = selectorForOperation(operation);
     if (!selector) return [];
-    return [selectorResolutionForObjectMap(index, selector, inspected.objectMap, objectGraph, currentObjectGraphHash)];
+    return [selectorResolutionForObjectMap(index, selector, inspected.objectMap, objectGraph, currentObjectGraphHash, operationName(operation))];
   });
   return {
     schema: "officegen.edit.selectors@1.2",
@@ -481,7 +506,7 @@ async function editOfficeXml(
       const selector = selectorForOperation(operation);
       if (dynamicPptxSelectors && selector && hasPriorPptxCreator(operations, index)) {
         const currentGraph = buildObjectGraph(objectMap);
-        runtimeResolutions?.push(selectorResolutionForObjectMap(index, selector, objectMap, currentGraph, hashObjectGraph(currentGraph)));
+        runtimeResolutions?.push(selectorResolutionForObjectMap(index, selector, objectMap, currentGraph, hashObjectGraph(currentGraph), operationName(operation)));
       }
       const txResult = await officeContext.transaction.run(index, () =>
         applyOfficeOperation(officeContext, input.format as OfficeXmlFormat, operation, objectMap, index)
@@ -1061,19 +1086,21 @@ async function editPptxTextStyle(
   operation: { selector: EditSelector; fontSize?: number; bold?: boolean; textCase?: "upper" | "lower" | "title" | "sentence" },
   objectMap: ObjectMapEntry[]
 ): Promise<boolean> {
-  const target = singleMatch(objectMap, operation.selector);
+  const target = singleMatch(objectMap, operation.selector, { kinds: ["shape"] });
   if (!target?.sourcePath || target.kind !== "shape") throw new Error("SELECTOR_NOT_FOUND: selected object is not a PPTX text shape.");
   const xml = (await readZipText(zip, target.sourcePath)) ?? "";
-  const next = updateSelectedPptxShape(xml, target, (shape) => {
+  let styleTargetSeen = operation.fontSize === undefined && operation.bold === undefined;
+  const result = updateSelectedPptxShapeWithResult(xml, target, (shape) => {
     let updated = shape;
     if (operation.textCase) updated = applyPptxTextCase(updated, operation.textCase);
     if (operation.fontSize !== undefined || operation.bold !== undefined) {
+      styleTargetSeen = /<a:(r|fld)\b[\s\S]*?<\/a:\1>/.test(updated);
       updated = updateShapeRunProperties(updated, { fontSize: operation.fontSize, bold: operation.bold });
     }
     return updated;
   });
-  if (next !== xml) zip.file(target.sourcePath, next);
-  return next !== xml;
+  if (result.changed) zip.file(target.sourcePath, result.xml);
+  return result.changed || (result.matched && styleTargetSeen);
 }
 
 async function editPptxFormatAllTitles(
@@ -1702,18 +1729,25 @@ function replacePptxObjectBlock(xml: string, kind: string, shapeId: string, upda
 }
 
 function updateSelectedPptxShape(xml: string, target: ObjectMapEntry, updater: (shape: string) => string): string {
+  return updateSelectedPptxShapeWithResult(xml, target, updater).xml;
+}
+
+function updateSelectedPptxShapeWithResult(xml: string, target: ObjectMapEntry, updater: (shape: string) => string): { xml: string; matched: boolean; changed: boolean } {
   const resolved = resolveCurrentPptxShape(xml, target);
   const shapeId = resolved?.shapeId ?? String(target.selectorHints?.shapeId ?? "");
   const ordinal = Number(resolved?.shapeIndex ?? target.selectorHints?.shapeIndex ?? stableOrdinal(target.stableObjectId));
   let index = 0;
-  return xml.replace(/<p:sp\b[\s\S]*?<\/p:sp>/g, (shape) => {
+  let matched = false;
+  const next = xml.replace(/<p:sp\b[\s\S]*?<\/p:sp>/g, (shape) => {
     index += 1;
     const cNvPr = /<p:cNvPr\b([^>]*)\/>/.exec(shape)?.[1] ?? "";
     const candidateId = /\bid="([^"]+)"/.exec(cNvPr)?.[1];
     if (shapeId && candidateId !== shapeId) return shape;
     if (Number.isFinite(ordinal) && index !== ordinal) return shape;
+    matched = true;
     return updater(shape);
   });
+  return { xml: next, matched, changed: next !== xml };
 }
 
 function resolveCurrentPptxShape(xml: string, target: ObjectMapEntry): { shapeId?: string; shapeIndex: number } | undefined {
@@ -2320,9 +2354,21 @@ function validationFailures(selectorResult: ResolveEditSelectorsResult | undefin
       message: resolution.reason === "ambiguous"
         ? `SELECTOR_AMBIGUOUS: selector matched ${resolution.matchCount} objects.`
         : resolution.reason === "not-found"
-          ? "SELECTOR_NOT_FOUND: selector matched no objects."
-          : `SELECTOR_LOW_CONFIDENCE: selector confidence ${resolution.confidence ?? 0} is below required ${minSelectorConfidence}.`
+          ? selectorNotFoundMessage(resolution)
+          : `SELECTOR_LOW_CONFIDENCE: selector confidence ${resolution.confidence ?? 0} is below required ${minSelectorConfidence}.`,
+      diagnostics: resolution.diagnostics
     }));
+}
+
+function selectorNotFoundMessage(resolution: EditSelectorResolution): string {
+  const near = resolution.diagnostics?.find((diagnostic) => diagnostic.code === "SELECTOR_NEAR_WHITESPACE_INSENSITIVE_MATCH");
+  const candidate = near?.candidates[0];
+  if (!near || !candidate) return "SELECTOR_NOT_FOUND: selector matched no objects.";
+  return [
+    "SELECTOR_NOT_FOUND: selector matched no objects.",
+    "Near whitespace/newline-insensitive text candidate found, but atomic validation did not auto-select it.",
+    `Suggested stableObjectId selector: ${candidate.stableObjectId}.`
+  ].join(" ");
 }
 
 function stalePlanFailures(selectorResult: ResolveEditSelectorsResult | undefined, options: EditOptions, operations: EditOperation[]): EditOperationResult[] {
@@ -2706,9 +2752,11 @@ function selectorResolutionForObjectMap(
   selector: EditSelector,
   objectMap: ObjectMapEntry[],
   graph: ObjectGraph,
-  currentObjectGraphHash: string
+  currentObjectGraphHash: string,
+  operation?: string
 ): EditSelectorResolution {
-  const matches = resolveMatches(objectMap, selector);
+  const matches = resolveMatches(objectMap, selector, matchOptionsForOperation(operation));
+  const diagnostics = matches.length ? [] : selectorNearCandidateDiagnostics(objectMap, selector, matchOptionsForOperation(operation));
   const graphNodesByStableId = new Map(graph.nodes.map((node) => [node.stableId, node]));
   const confidence = matches.length === 1 ? selectorConfidence(matches[0] as ObjectMapEntry, selector, matches) : undefined;
   const status = selectorStatus(matches.length, confidence);
@@ -2721,6 +2769,8 @@ function selectorResolutionForObjectMap(
         : undefined;
   const matchedNode = matches.length === 1 ? graphNodesByStableId.get(matches[0]?.stableObjectId ?? "") : undefined;
   const selectorResolution = selectorResolutionV2ForObjectMap(selector, matches, graphNodesByStableId, graph, currentObjectGraphHash, status, confidence);
+  const suggestions = selectorDiagnosticSuggestions(diagnostics);
+  if (suggestions.length) selectorResolution.nextActions = [...selectorResolution.nextActions, ...suggestions];
   return {
     operationIndex,
     selector,
@@ -2735,7 +2785,9 @@ function selectorResolutionForObjectMap(
     nextActions: selectorResolution.nextActions,
     selectionLock: selectionLockForNode(graph, matchedNode),
     selectorResolution,
-    reason
+    reason,
+    diagnostics: diagnostics.length ? diagnostics : undefined,
+    suggestions: suggestions.length ? suggestions : undefined
   };
 }
 
@@ -2786,9 +2838,20 @@ function selectorResolutionV2ForObjectMap(
   };
 }
 
-function resolveMatches(objectMap: ObjectMapEntry[], selector: EditSelector): ObjectMapEntry[] {
-  if (selector.stableObjectId) return objectMap.filter((entry) => entry.stableObjectId === selector.stableObjectId);
+interface ResolveMatchOptions {
+  kinds?: string[];
+}
+
+function matchOptionsForOperation(operation: string | undefined): ResolveMatchOptions | undefined {
+  if (operation === "pptx.setBold" || operation === "pptx.setFontSize" || operation === "pptx.setTextCase") return { kinds: ["shape"] };
+  if (operation === "pptx.setBulletLevel" || operation === "pptx.setNumbering" || operation === "pptx.setLineSpacing" || operation === "pptx.setSpaceBefore") return { kinds: ["shape"] };
+  return undefined;
+}
+
+function resolveMatches(objectMap: ObjectMapEntry[], selector: EditSelector, options: ResolveMatchOptions = {}): ObjectMapEntry[] {
+  if (selector.stableObjectId) return objectMap.filter((entry) => entry.stableObjectId === selector.stableObjectId && matchesResolveOptions(entry, options));
   let candidates = objectMap;
+  if (options.kinds?.length) candidates = candidates.filter((entry) => matchesResolveOptions(entry, options));
   if (selector.slide !== undefined) candidates = candidates.filter((entry) => Number(entry.selectorHints?.slide) === selector.slide);
   if (selector.shapeId) candidates = candidates.filter((entry) => String(entry.selectorHints?.shapeId ?? "") === selector.shapeId);
   if (selector.shapeName) candidates = candidates.filter((entry) => entry.label === selector.shapeName || entry.selectorHints?.shapeName === selector.shapeName || entry.selectorHints?.name === selector.shapeName);
@@ -2829,11 +2892,110 @@ function resolveMatches(objectMap: ObjectMapEntry[], selector: EditSelector): Ob
   return candidates === objectMap ? [] : candidates;
 }
 
-function singleMatch(objectMap: ObjectMapEntry[], selector: EditSelector): ObjectMapEntry {
-  const matches = resolveMatches(objectMap, selector);
+function singleMatch(objectMap: ObjectMapEntry[], selector: EditSelector, options?: ResolveMatchOptions): ObjectMapEntry {
+  const matches = resolveMatches(objectMap, selector, options);
   if (!matches.length) throw new Error("SELECTOR_NOT_FOUND: selector matched no objects.");
   if (matches.length > 1) throw new Error(`SELECTOR_AMBIGUOUS: selector matched ${matches.length} objects.`);
   return matches[0] as ObjectMapEntry;
+}
+
+function matchesResolveOptions(entry: ObjectMapEntry, options: ResolveMatchOptions): boolean {
+  return !options.kinds?.length || options.kinds.includes(entry.kind);
+}
+
+function selectorNearCandidateDiagnostics(objectMap: ObjectMapEntry[], selector: EditSelector, options: ResolveMatchOptions = {}): EditSelectorDiagnostic[] {
+  const requestedText = selector.textMatch?.text ?? selector.contains;
+  if (!requestedText || compactSelectorText(requestedText).length === 0) return [];
+  const selectorField: EditSelectorDiagnostic["selectorField"] = selector.textMatch ? "textMatch" : "contains";
+  const scoped = resolveMatchesWithoutText(objectMap, selector, options);
+  const candidates = scoped
+    .filter((entry) => whitespaceInsensitiveTextMatches(entry.text, requestedText, selector.textMatch?.exact === true))
+    .slice(0, 5)
+    .map((entry) => nearCandidate(entry));
+  if (!candidates.length) return [];
+  return [{
+    code: "SELECTOR_NEAR_WHITESPACE_INSENSITIVE_MATCH",
+    severity: "info",
+    message: "A candidate would match if spaces/newlines were ignored. It was not selected automatically; use stableObjectId or a literal selector that matches the rendered text.",
+    selectorField,
+    requestedText,
+    normalizedRequestedText: compactSelectorText(requestedText),
+    candidates
+  }];
+}
+
+function resolveMatchesWithoutText(objectMap: ObjectMapEntry[], selector: EditSelector, options: ResolveMatchOptions = {}): ObjectMapEntry[] {
+  const matches = resolveMatches(objectMap, { ...selector, contains: undefined, textMatch: undefined }, options);
+  if (matches.length || selectorHasNonTextCriterion(selector)) return matches;
+  return objectMap.filter((entry) => matchesResolveOptions(entry, options));
+}
+
+function selectorHasNonTextCriterion(selector: EditSelector): boolean {
+  return selector.stableObjectId !== undefined ||
+    selector.slide !== undefined ||
+    selector.shapeId !== undefined ||
+    selector.placeholderKey !== undefined ||
+    selector.placeholder !== undefined ||
+    selector.shapeName !== undefined ||
+    selector.contentControlTag !== undefined ||
+    selector.namedRange !== undefined ||
+    selector.sheetName !== undefined ||
+    selector.cell !== undefined ||
+    selector.tableName !== undefined ||
+    selector.chartPath !== undefined ||
+    selector.textHash !== undefined ||
+    selector.positionHash !== undefined ||
+    selector.sourcePath !== undefined ||
+    selector.xmlPath !== undefined ||
+    selector.page !== undefined ||
+    selector.story !== undefined ||
+    selector.paragraph !== undefined ||
+    selector.table !== undefined ||
+    selector.row !== undefined ||
+    selector.column !== undefined ||
+    selector.range !== undefined ||
+    selector.relationshipId !== undefined ||
+    selector.assetPath !== undefined ||
+    selector.commentId !== undefined ||
+    selector.revisionId !== undefined ||
+    selector.nearestTo !== undefined ||
+    selector.rightOf !== undefined ||
+    selector.largestTextOnSlide !== undefined ||
+    selector.nthBodyShape !== undefined;
+}
+
+function whitespaceInsensitiveTextMatches(actual: string | undefined, expected: string, exact: boolean): boolean {
+  const compactActual = compactSelectorText(actual);
+  const compactExpected = compactSelectorText(expected);
+  if (!compactActual || !compactExpected) return false;
+  return exact ? compactActual === compactExpected : compactActual.includes(compactExpected);
+}
+
+function nearCandidate(entry: ObjectMapEntry): EditSelectorNearCandidate {
+  return {
+    stableObjectId: entry.stableObjectId,
+    kind: entry.kind,
+    label: entry.label,
+    text: entry.text,
+    textPreview: entry.textPreview,
+    sourcePath: entry.sourcePath,
+    xmlPath: entry.xmlPath,
+    selectorHints: entry.selectorHints,
+    suggestedSelector: { stableObjectId: entry.stableObjectId }
+  };
+}
+
+function selectorDiagnosticSuggestions(diagnostics: EditSelectorDiagnostic[]): string[] {
+  const near = diagnostics.find((diagnostic) => diagnostic.code === "SELECTOR_NEAR_WHITESPACE_INSENSITIVE_MATCH");
+  const candidate = near?.candidates[0];
+  if (!candidate) return [];
+  return [
+    `Whitespace/newline-insensitive near match found. Validation was not relaxed; retry with selector stableObjectId '${candidate.stableObjectId}' or a literal text selector that includes the newline/space characters.`
+  ];
+}
+
+function compactSelectorText(value: string | undefined): string {
+  return String(value ?? "").replace(/\s+/g, "").toLowerCase();
 }
 
 function selectorMatch(

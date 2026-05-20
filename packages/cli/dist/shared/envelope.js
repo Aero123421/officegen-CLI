@@ -262,8 +262,15 @@ function evaluateObjective(context, command, result, initialArtifacts) {
     if (Array.isArray(record.missingExpectedArtifacts) && record.missingExpectedArtifacts.length) {
         return objectiveFailure(defaultState, "EXPECTED_ARTIFACT_MISSING", "One or more expected artifacts were not created.", { missingExpectedArtifacts: record.missingExpectedArtifacts });
     }
-    if (schema === "officegen.verify.result@1.2" && (record.readiness === "blocked" || record.partial === true)) {
-        return objectiveFailure(defaultState, record.partial === true ? "TIMEOUT" : "RUN_STEP_FAILED", "Verification did not reach a passing readiness state.", { readiness: record.readiness, partial: record.partial });
+    if (schema === "officegen.verify.result@1.2") {
+        const failedGates = verifyFailedGates(record);
+        if (record.readiness === "blocked" || record.partial === true || failedGates.length) {
+            return objectiveFailure(defaultState, record.partial === true ? "TIMEOUT" : "RUN_STEP_FAILED", "Verification did not reach a passing readiness state.", {
+                readiness: record.readiness,
+                partial: record.partial,
+                failedGates
+            });
+        }
     }
     if (schema === "officegen.diff.result@1.2" && visualDiffBlocked(record)) {
         return objectiveFailure(defaultState, "VISUAL_DIFF_BLOCKED", "Visual diff was requested but could not run.", {
@@ -393,6 +400,12 @@ function readinessFor(record) {
 }
 function visualDiffBlocked(record) {
     return asRecord(record.visual).status === "blocked";
+}
+function verifyFailedGates(record) {
+    const gates = asRecord(asRecord(record.verificationReport).gates);
+    return Object.entries(gates)
+        .filter(([, gate]) => asRecord(gate).status === "fail")
+        .map(([name]) => name);
 }
 function isMutationCommand(command) {
     const normalized = command.split(/\s+/).slice(0, 2).join(" ");

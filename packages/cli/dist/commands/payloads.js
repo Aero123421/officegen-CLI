@@ -1219,12 +1219,13 @@ export async function editPayload(context) {
         inPlace,
         artifacts: artifacts.length ? [...asArray(resultRecord.artifacts).map(asRecord), ...artifacts] : resultRecord.artifacts
     };
-    return dryRun ? attributedResult : withOutputArtifact(withVerifyPendingWarning(attributedResult, out, "edit"), out, "edit", inputPath, { skipValidation: Boolean(inPlaceBackup) });
+    return dryRun ? attributedResult : withOutputArtifact(withVerifyPendingWarning(attributedResult, "edit"), out, "edit", inputPath, { skipValidation: Boolean(inPlaceBackup) });
 }
-function withVerifyPendingWarning(result, out, command) {
+function withVerifyPendingWarning(result, command) {
+    const record = asRecord(result);
+    const out = typeof record.out === "string" ? record.out : undefined;
     if (!out)
         return result;
-    const record = asRecord(result);
     const warning = {
         code: "VERIFY_NOT_RUN_AFTER_MUTATION",
         severity: "warning",
@@ -1586,7 +1587,7 @@ export async function repairPayload(context) {
     }));
     if (planOnly)
         return result.repairPlan;
-    return withOutputArtifact(withVerifyPendingWarning(result, out, "repair"), out, "repair", inputPath);
+    return withOutputArtifact(withVerifyPendingWarning(result, "repair"), out, "repair", inputPath);
 }
 export async function diffPayload(context) {
     const args = positionalArgs(context.argv, 3);

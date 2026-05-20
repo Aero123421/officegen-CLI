@@ -408,6 +408,7 @@ export interface EditSelectorResolution {
         text?: string;
         sourcePath?: string;
         xmlPath?: string;
+        selectorHints?: Record<string, unknown>;
     }>;
     evidence?: SelectorResolutionV2["evidence"];
     ambiguityReason?: string;
@@ -415,6 +416,28 @@ export interface EditSelectorResolution {
     selectionLock?: SelectorSelectionLock;
     selectorResolution?: SelectorResolutionV2;
     reason?: "not-found" | "ambiguous" | "low-confidence" | "unsupported-selector";
+    diagnostics?: EditSelectorDiagnostic[];
+    suggestions?: string[];
+}
+export interface EditSelectorNearCandidate {
+    stableObjectId: string;
+    kind: string;
+    label?: string;
+    text?: string;
+    textPreview?: string;
+    sourcePath?: string;
+    xmlPath?: string;
+    selectorHints?: Record<string, unknown>;
+    suggestedSelector: EditSelector;
+}
+export interface EditSelectorDiagnostic {
+    code: "SELECTOR_NEAR_WHITESPACE_INSENSITIVE_MATCH";
+    severity: "info";
+    message: string;
+    selectorField: "contains" | "textMatch";
+    requestedText: string;
+    normalizedRequestedText: string;
+    candidates: EditSelectorNearCandidate[];
 }
 export interface ResolveEditSelectorsResult {
     schema: "officegen.edit.selectors@1.2";
@@ -449,6 +472,7 @@ export interface EditOperationResult {
     reason?: "not-found" | "ambiguous" | "low-confidence" | "unsupported" | "validation-failed" | "idempotency-replay" | "skipped-after-error" | "stale-plan";
     message?: string;
     evidence?: EditBlockedEvidence;
+    diagnostics?: EditSelectorDiagnostic[];
 }
 export interface PatchPlanTouchedPart {
     path: string;

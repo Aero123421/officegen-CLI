@@ -45,6 +45,10 @@ export interface VerifyResult {
         fidelity: "approximate" | "native";
         pagesChecked: number;
         blankPages: number;
+        identicalPages: number[];
+        pixelDensityWarnings: string[];
+        allPagesIdentical?: boolean;
+        rasterDiagnosticsUnavailable?: boolean;
     };
     visualDiff?: {
         status: "compared" | "skipped" | "blocked";

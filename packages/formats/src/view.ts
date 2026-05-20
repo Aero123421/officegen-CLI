@@ -205,11 +205,19 @@ async function rasterView(input: InputLike | InspectResult, inspected: InspectRe
   const format = normalizeRasterFormat(options.format);
   const source = isInspectResult(input) ? inspected.trusted.inputPath : input;
   if (!source) {
+    if (inspected.trusted.format === "pptx") return pptxInternalRasterView(inspected, options, format, [
+      "PPTX pages were rasterized from the inspected object map because no source bytes/path were available."
+    ]);
     throw new Error("VIEW_RASTER_SOURCE_REQUIRED: PNG/JPEG view requires an input file path or bytes, not an inspect-only result without inputPath.");
   }
   const normalized = await normalizeInput(source as InputLike, inspected.trusted.format);
   const maxPages = options.maxPages ?? 50;
   const dpi = options.dpi ?? 144;
+  if (normalized.format === "pptx" && options.mode !== "native") {
+    return pptxInternalRasterView(inspected, options, format, [
+      "PPTX pages were rasterized with officegen's internal object-map renderer."
+    ]);
+  }
   let pdfBytes: Uint8Array = normalized.bytes;
   let fidelity: ViewResult["fidelity"] = "internal";
   let renderer = "officegen-pdfjs-canvas";
@@ -240,6 +248,12 @@ async function rasterView(input: InputLike | InspectResult, inspected: InspectRe
   });
   const pages = rasterPages.map((page) => ({ ...page, renderer }));
   const rasterDiagnostics = diagnoseRasterArtifactQuality(pages);
+  if (normalized.format === "pptx" && !rasterDiagnostics.artifactUsable) {
+    return pptxInternalRasterView(inspected, options, format, [
+      "Native PPTX-to-PDF raster output was blank or unusable; fell back to officegen's internal object-map renderer.",
+      ...rasterDiagnostics.qualityWarnings
+    ]);
+  }
   const crop = buildObjectCrop(pages, inspected.objectMap, inspected, options, "officegen-internal-object-crop", fidelity);
   return withProgressiveDisclosure({
     schema: "officegen.view.result@1.2",
@@ -275,12 +289,146 @@ async function rasterView(input: InputLike | InspectResult, inspected: InspectRe
   }, inspected.objectMap, inspected, options);
 }
 
+async function pptxInternalRasterView(
+  inspected: InspectResult,
+  options: ViewOptions,
+  format: "png" | "jpeg",
+  caveats: string[]
+): Promise<ViewResult> {
+  const maxPages = options.maxPages ?? 50;
+  const dpi = options.dpi ?? 144;
+  const scale = Math.max(1, dpi / 72);
+  const svgPages = toPages(inspected, { ...options, format: "svg", maxPages });
+  const pages: ViewPage[] = [];
+  for (const page of svgPages) {
+    const width = Math.ceil(960 * scale);
+    const height = Math.ceil(540 * scale);
+    const canvas = createCanvas(width, height);
+    const context = canvas.getContext("2d") as unknown as CanvasRenderingContextLike;
+    drawPptxPreviewPage(context, page, scale, width, height);
+    const imageData = context.getImageData(0, 0, width, height);
+    const pixelDensity = analyzeRasterPixels(imageData.data, width, height, page.objectMap);
+    const bytes = format === "png" ? await canvas.encode("png") : await canvas.encode("jpeg");
+    const pageQualityWarnings = pagePixelDensityWarnings(page.page, pixelDensity);
+    pages.push({
+      page: page.page,
+      stableObjectId: page.stableObjectId,
+      format,
+      content: `data:image/${format};base64,${Buffer.from(bytes).toString("base64")}`,
+      bytes: new Uint8Array(bytes),
+      width,
+      height,
+      pageHash: pixelDensity.pageHash,
+      pixelDensity,
+      qualityWarnings: pageQualityWarnings,
+      artifactUsable: pageQualityWarnings.length === 0,
+      renderer: "officegen-pptx-objectmap-canvas",
+      objectMap: page.objectMap
+    });
+  }
+  const rasterDiagnostics = diagnoseRasterArtifactQuality(pages);
+  const crop = buildObjectCrop(pages, inspected.objectMap, inspected, options, "officegen-pptx-objectmap-canvas", "internal");
+  return withProgressiveDisclosure({
+    schema: "officegen.view.result@1.2",
+    readiness: rasterDiagnostics.artifactUsable ? "pass" : "warning",
+    artifactUsable: rasterDiagnostics.artifactUsable,
+    warnings: rasterDiagnostics.qualityWarnings,
+    qualityWarnings: rasterDiagnostics.qualityWarnings,
+    fidelity: "internal",
+    renderer: {
+      id: "officegen-pptx-objectmap-canvas",
+      mode: options.mode ?? "internal",
+      fidelity: "internal"
+    },
+    caveats: [
+      ...caveats,
+      "Internal PPTX raster preview is approximate; fonts, wrapping, effects, and native layout may differ.",
+      ...inspected.trusted.caveats
+    ],
+    pages,
+    crops: crop.artifacts,
+    crop: crop.metadata,
+    summary: buildViewSummary(inspected, pages, inspected.objectMap, crop.artifacts, rasterDiagnostics),
+    rasterDiagnostics,
+    nextActions: viewNextActions(inspected, options, false),
+    objectMap: inspected.objectMap,
+    trusted: {
+      sourceSchema: inspected.schema,
+      sourceFormat: inspected.trusted.format,
+      generatedAt: new Date().toISOString()
+    },
+    agentInstruction: AGENT_UNTRUSTED_INSTRUCTION
+  }, inspected.objectMap, inspected, options);
+}
+
 function isRasterFormat(format?: ViewFormat): boolean {
   return format === "png" || format === "jpeg" || format === "jpg";
 }
 
 function normalizeRasterFormat(format?: ViewFormat): "png" | "jpeg" {
   return format === "jpeg" || format === "jpg" ? "jpeg" : "png";
+}
+
+interface CanvasRenderingContextLike {
+  fillStyle: string;
+  strokeStyle: string;
+  lineWidth: number;
+  font: string;
+  globalAlpha: number;
+  save(): void;
+  restore(): void;
+  scale(x: number, y: number): void;
+  fillRect(x: number, y: number, width: number, height: number): void;
+  strokeRect(x: number, y: number, width: number, height: number): void;
+  fillText(text: string, x: number, y: number, maxWidth?: number): void;
+  getImageData(x: number, y: number, width: number, height: number): { data: Uint8ClampedArray };
+}
+
+function drawPptxPreviewPage(context: CanvasRenderingContextLike, page: ViewPage, scale: number, width: number, height: number): void {
+  context.save();
+  context.fillStyle = "#ffffff";
+  context.fillRect(0, 0, width, height);
+  context.scale(scale, scale);
+  page.objectMap.forEach((object, index) => drawPptxPreviewObject(context, object, index));
+  context.restore();
+}
+
+function drawPptxPreviewObject(context: CanvasRenderingContextLike, object: ObjectMapEntry, index: number): void {
+  const bounds = object.bounds ?? fallbackSlideBounds(object, index);
+  const isFramed = object.kind !== "shape";
+  if (isFramed) {
+    context.fillStyle = object.kind === "chart" ? "#f6f8fa" : "#ffffff";
+    context.fillRect(bounds.x, bounds.y, bounds.width, bounds.height);
+    context.strokeStyle = "#8c959f";
+    context.lineWidth = 1;
+    context.strokeRect(bounds.x, bounds.y, bounds.width, bounds.height);
+  }
+  const fontSize = object.kind === "shape" ? 24 : 12;
+  const lines = pptxPreviewTextLines(object);
+  if (!lines.length) return;
+  context.fillStyle = "#111111";
+  context.font = `${fontSize}px Arial, sans-serif`;
+  const lineHeight = Math.max(12, Math.round(fontSize * 1.25));
+  let y = bounds.y + fontSize + 6;
+  for (const line of lines) {
+    if (y > bounds.y + bounds.height + lineHeight) break;
+    context.fillText(line, bounds.x + 6, y, Math.max(12, bounds.width - 12));
+    y += lineHeight;
+  }
+}
+
+function pptxPreviewTextLines(object: ObjectMapEntry): string[] {
+  const paragraphs = slideSemanticParagraphs(object);
+  if (paragraphs?.length) {
+    return paragraphs.flatMap((paragraph, paragraphIndex) => {
+      const prefix = slideParagraphPrefix(paragraph, paragraphIndex);
+      const text = Array.isArray(paragraph.runs) && paragraph.runs.length
+        ? paragraph.runs.map((run) => String(run.text ?? "")).join("")
+        : String(paragraph.text ?? "");
+      return text.split(/\r?\n/).map((line, lineIndex) => `${lineIndex === 0 ? prefix : ""}${line}`.trimEnd());
+    }).filter((line) => line.trim().length > 0);
+  }
+  return String(object.text ?? object.label ?? object.textPreview ?? "").split(/\r?\n/).filter((line) => line.trim().length > 0);
 }
 
 async function renderPdfToRasterPages(

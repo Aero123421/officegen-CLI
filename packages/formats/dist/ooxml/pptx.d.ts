@@ -1,5 +1,38 @@
 import type JSZip from "jszip";
 import type { ObjectBounds, ObjectMapEntry } from "../shared.js";
+interface PptxTextSemanticRun {
+    index: number;
+    text: string;
+    bold?: boolean;
+}
+interface PptxTextSemanticParagraph {
+    index: number;
+    text: string;
+    textPreview?: string;
+    level?: number;
+    bullet?: {
+        type: "bullet";
+        char?: string;
+    };
+    numbering?: {
+        type: "numbering";
+        style?: string;
+        startAt?: number;
+    };
+    runs: PptxTextSemanticRun[];
+}
+interface PptxTextSemantic extends Record<string, unknown> {
+    kind: "pptxText";
+    text: {
+        plain: string;
+        paragraphSeparated: string;
+        paragraphCount: number;
+        runCount: number;
+        hasExplicitLineBreaks: boolean;
+        explicitLineBreakCount: number;
+    };
+    paragraphs: PptxTextSemanticParagraph[];
+}
 export interface PptxShape {
     stableObjectId: string;
     slideStableObjectId: string;
@@ -10,6 +43,7 @@ export interface PptxShape {
     placeholderType?: string;
     text: string;
     textPreview?: string;
+    semantic?: PptxTextSemantic;
     bounds?: ObjectBounds;
     sourcePath: string;
 }
@@ -51,3 +85,4 @@ export declare function addTextBox(zip: JSZip, slideNumber: number, spec: {
     bold?: boolean;
 }): Promise<void>;
 export declare function reorderSlides(zip: JSZip, order: number[]): Promise<void>;
+export {};

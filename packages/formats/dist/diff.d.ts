@@ -1,9 +1,11 @@
 import { type InputLike, type ObjectMapEntry, type OfficegenConfig } from "./shared.js";
+import { type RasterPixelDiffResult, type VisualDiffStatus } from "./visualDiff.js";
 export interface DiffOptions {
     config?: OfficegenConfig;
     visual?: boolean;
     native?: boolean;
     maxPages?: number;
+    pixelThreshold?: number;
 }
 export interface DiffResult {
     schema: "officegen.diff.result@1.2";
@@ -15,6 +17,7 @@ export interface DiffResult {
         removedObjects: number;
         changedTextObjects: number;
         changedGeometryObjects: number;
+        changedSemanticObjects?: number;
         beforePages: number;
         afterPages: number;
         pageCountChanged: boolean;
@@ -42,6 +45,13 @@ export interface DiffResult {
                 height: number;
             };
         }>;
+        changedSemantic: Array<{
+            stableObjectId: string;
+            kind: string;
+            changes: Array<"paragraph" | "bullet" | "numbering" | "run-format">;
+            before?: Record<string, unknown>;
+            after?: Record<string, unknown>;
+        }>;
         partChanges?: Array<{
             path: string;
             kind: string;
@@ -51,6 +61,8 @@ export interface DiffResult {
         }>;
     };
     visual?: {
+        status?: VisualDiffStatus;
+        kind?: "approximate-string" | "pdf-byte-window" | "raster-pixel";
         fidelity: "approximate" | "native";
         pagesCompared: number;
         beforePages: number;
@@ -61,8 +73,11 @@ export interface DiffResult {
             score: number;
             beforeHash: string;
             afterHash: string;
+            pixelDiff?: RasterPixelDiffResult;
         }>;
         renderer?: string;
+        fallback?: boolean;
+        message?: string;
     };
     caveats: string[];
 }

@@ -72,6 +72,8 @@ export async function verify(input, options = {}) {
         warnings.push(`VISUAL_IDENTICAL_PAGES: raster preview pages ${visual.identicalPages.join(", ")} share page hashes.`);
     for (const warning of visual?.pixelDensityWarnings ?? [])
         warnings.push(`VISUAL_PIXEL_DENSITY: ${warning}`);
+    for (const issue of visualBlockingIssues(visual))
+        blockingIssues.push(issue);
     const visualDiff = options.visual
         ? {
             status: "skipped",
@@ -492,7 +494,20 @@ function buildVerificationReport(context) {
 }
 function visualHasQualityFailures(visual) {
     return Boolean(visual
-        && (visual.blankPages > 0 || visual.pixelDensityWarnings.length > 0));
+        && (visual.blankPages > 0 || visualPixelQualityFailures(visual).length > 0));
+}
+function visualBlockingIssues(visual) {
+    if (!visualHasQualityFailures(visual) || !visual)
+        return [];
+    const pixelWarnings = visualPixelQualityFailures(visual);
+    const reasons = [
+        visual.blankPages > 0 ? `${visual.blankPages} blank preview page(s)` : undefined,
+        pixelWarnings.length > 0 ? `${pixelWarnings.length} raster pixel-density warning(s)` : undefined
+    ].filter((reason) => Boolean(reason));
+    return [`VISUAL_GATE_FAILED: visual verification failed (${reasons.join(", ")}).`];
+}
+function visualPixelQualityFailures(visual) {
+    return visual.pixelDensityWarnings.filter((warning) => !warning.startsWith("VISUAL_RASTER_UNAVAILABLE"));
 }
 function gate(ok, summary, issues) {
     return {

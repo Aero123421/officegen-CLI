@@ -288,8 +288,15 @@ function evaluateObjective(context: RuntimeContext, command: string, result: unk
   if (Array.isArray(record.missingExpectedArtifacts) && record.missingExpectedArtifacts.length) {
     return objectiveFailure(defaultState, "EXPECTED_ARTIFACT_MISSING", "One or more expected artifacts were not created.", { missingExpectedArtifacts: record.missingExpectedArtifacts });
   }
-  if (schema === "officegen.verify.result@1.2" && (record.readiness === "blocked" || record.partial === true)) {
-    return objectiveFailure(defaultState, record.partial === true ? "TIMEOUT" : "RUN_STEP_FAILED", "Verification did not reach a passing readiness state.", { readiness: record.readiness, partial: record.partial });
+  if (schema === "officegen.verify.result@1.2") {
+    const failedGates = verifyFailedGates(record);
+    if (record.readiness === "blocked" || record.partial === true || failedGates.length) {
+      return objectiveFailure(defaultState, record.partial === true ? "TIMEOUT" : "RUN_STEP_FAILED", "Verification did not reach a passing readiness state.", {
+        readiness: record.readiness,
+        partial: record.partial,
+        failedGates
+      });
+    }
   }
   if (schema === "officegen.diff.result@1.2" && visualDiffBlocked(record)) {
     return objectiveFailure(defaultState, "VISUAL_DIFF_BLOCKED", "Visual diff was requested but could not run.", {
@@ -418,6 +425,13 @@ function readinessFor(record: Record<string, unknown>): NonNullable<Envelope["re
 
 function visualDiffBlocked(record: Record<string, unknown>): boolean {
   return asRecord(record.visual).status === "blocked";
+}
+
+function verifyFailedGates(record: Record<string, unknown>): string[] {
+  const gates = asRecord(asRecord(record.verificationReport).gates);
+  return Object.entries(gates)
+    .filter(([, gate]) => asRecord(gate).status === "fail")
+    .map(([name]) => name);
 }
 
 function isMutationCommand(command: string): boolean {
