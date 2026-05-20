@@ -5,7 +5,7 @@ import { embedPdfFonts } from "./pdfFonts.js";
 import { addBlankSlide, addTextBox, applyBoundsToPptxBlock, duplicateSlide, extractShapes, getSlidePaths, reorderSlides, replaceShapeBulletItems } from "./ooxml/pptx.js";
 import { appendRows, insertRows, setCell, sheetPath } from "./ooxml/xlsx.js";
 import { escapeXmlText, replaceAllXmlText, setFirstTextInBlock, xmlAttr } from "./ooxml/xml.js";
-import { nextRelationshipId } from "./ooxml/relationships.js";
+import { nextRelationshipId, parseRelationships, relationshipTarget } from "./ooxml/relationships.js";
 import { PackageGraph } from "./ooxml/packageGraph.js";
 import { applyXmlPatches } from "./ooxml/patchEngine.js";
 import { createSourceFingerprint } from "./ooxml/sourceSpan.js";
@@ -396,7 +396,7 @@ async function applyOfficeOperation(context, format, operation, objectMap, index
     }
     if (format === "xlsx" && op === "xlsx.setFormula") {
         const formulaOp = operation;
-        return editXlsxSetFormula(zip, await resolveXlsxSheet(zip, formulaOp), formulaOp.cell, formulaOp.formula);
+        return editXlsxSetFormulaOperation(zip, formulaOp, objectMap);
     }
     if (format === "xlsx" && op === "xlsx.definedName.set") {
         return editXlsxDefinedName(zip, operation, "set");
@@ -1172,6 +1172,24 @@ async function editXlsxSetCell(zip, sheet, ref, value) {
         zip.file(path, next.xml);
     return next.changed;
 }
+async function editXlsxSetFormulaOperation(zip, operation, objectMap) {
+    if (operation.selector) {
+        const matches = resolveMatches(objectMap, operation.selector, { kinds: ["cell"] });
+        if (matches.length === 1) {
+            const target = matches[0];
+            const ref = normalizeXlsxCellRef(String(target.selectorHints?.cell ?? target.label ?? operation.cell ?? ""));
+            const path = target.sourcePath ?? target.xmlPath;
+            if (!path)
+                throw new Error("SELECTOR_NOT_FOUND: selected XLSX cell has no sourcePath.");
+            return editXlsxSetFormulaAtPath(zip, path, ref, operation.formula);
+        }
+        if (matches.length > 1)
+            throw new Error(`SELECTOR_AMBIGUOUS: selector matched ${matches.length} objects.`);
+        throw new Error("SELECTOR_NOT_FOUND: selector matched no XLSX cells.");
+    }
+    const target = await resolveXlsxSheetTarget(zip, operation);
+    return editXlsxSetFormulaAtPath(zip, target.path, normalizeXlsxCellRef(operation.cell ?? ""), operation.formula);
+}
 async function editXlsxSetRange(zip, sheet, startCell, values) {
     const start = /^([A-Z]+)(\d+)$/i.exec(startCell);
     if (!start || !values.length)
@@ -1187,12 +1205,14 @@ async function editXlsxSetRange(zip, sheet, startCell, values) {
     return changed;
 }
 async function editXlsxSetFormula(zip, sheet, ref, formula) {
+    return editXlsxSetFormulaAtPath(zip, sheetPath(sheet), normalizeXlsxCellRef(ref), formula);
+}
+async function editXlsxSetFormulaAtPath(zip, path, ref, formula) {
     if (!ref)
         throw new Error("SELECTOR_NOT_FOUND: xlsx cell ref is required.");
     assertSafeXlsxFormula(formula);
-    const path = sheetPath(sheet);
     const xml = (await readZipText(zip, path)) ?? "";
-    const pattern = new RegExp(`<c\\b[^>]*\\br=["']${escapeRegExp(ref)}["'][^>]*?(?:\\/>|>[\\s\\S]*?<\\/c>)`);
+    const pattern = new RegExp(`<c\\b[^>]*\\br=["']${escapeRegExp(ref)}["'][^>]*?(?:\\/>|>[\\s\\S]*?<\\/c>)`, "i");
     const rowNo = rowFromRef(ref);
     const rowPattern = new RegExp(`<row\\b([^>]*)\\br=["']${rowNo}["'][^>]*>[\\s\\S]*?<\\/row>`);
     const next = pattern.test(xml)
@@ -1205,6 +1225,49 @@ async function editXlsxSetFormula(zip, sheet, ref, formula) {
         await markXlsxRecalcNeeded(zip);
     }
     return next !== xml;
+}
+async function resolveXlsxSheetTarget(zip, operation) {
+    if (typeof operation.sheet === "number")
+        return { index: operation.sheet, path: sheetPath(operation.sheet) };
+    const requested = typeof operation.sheetName === "string" && operation.sheetName.trim()
+        ? operation.sheetName
+        : typeof operation.sheet === "string"
+            ? operation.sheet
+            : undefined;
+    if (!requested)
+        return { index: 1, path: sheetPath(1) };
+    const workbook = (await readZipText(zip, "xl/workbook.xml")) ?? "";
+    const sheets = readXlsxWorkbookSheets(workbook);
+    const requestedKey = requested.trim().toLowerCase();
+    let index = sheets.findIndex((sheet) => sheet.name.toLowerCase() === requestedKey);
+    if (index < 0) {
+        const numeric = Number(requested);
+        if (Number.isInteger(numeric) && numeric > 0)
+            index = numeric - 1;
+    }
+    if (index < 0)
+        throw new Error(`SELECTOR_NOT_FOUND: XLSX sheet '${requested}' was not found.`);
+    const sheet = sheets[index];
+    const relTarget = sheet?.relationshipId ? await xlsxWorkbookRelationshipTarget(zip, sheet.relationshipId) : undefined;
+    return { index: index + 1, path: relTarget ?? sheetPath(index + 1) };
+}
+function readXlsxWorkbookSheets(workbookXml) {
+    return [...workbookXml.matchAll(/<sheet\b([^>]*)/g)]
+        .map((match, index) => {
+        const attrs = match[1] ?? "";
+        return {
+            name: decodeXmlEntities(xmlAttr(attrs, "name") ?? `Sheet${index + 1}`),
+            relationshipId: xmlAttr(attrs, "r:id") ?? xmlAttr(attrs, "id")
+        };
+    });
+}
+async function xlsxWorkbookRelationshipTarget(zip, relationshipId) {
+    const relsXml = await readZipText(zip, "xl/_rels/workbook.xml.rels");
+    const rel = parseRelationships(relsXml).find((item) => item.id === relationshipId);
+    return rel?.target ? relationshipTarget("xl", rel.target) : undefined;
+}
+function normalizeXlsxCellRef(ref) {
+    return ref.trim().replace(/\$/g, "").toUpperCase();
 }
 function formulaCellXml(ref, formula, existingAttrs = "") {
     const preservedAttrs = preserveXlsxCellAttrs(existingAttrs);
@@ -2351,6 +2414,8 @@ function matchOptionsForOperation(operation) {
         return { kinds: ["shape"] };
     if (operation === "pptx.setBulletLevel" || operation === "pptx.setNumbering" || operation === "pptx.setLineSpacing" || operation === "pptx.setSpaceBefore")
         return { kinds: ["shape"] };
+    if (operation === "xlsx.setFormula")
+        return { kinds: ["cell"] };
     return undefined;
 }
 function resolveMatches(objectMap, selector, options = {}) {

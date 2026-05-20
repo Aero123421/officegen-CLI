@@ -71,7 +71,7 @@ export async function inspectSheets(zip) {
                     formulaRelatedObjects: formulaCell?.relatedObjects,
                     regionRole: formulaCell ? "formula" : undefined
                 },
-                editableOps: ["setText", "xlsx.setCell"],
+                editableOps: ["setText", "xlsx.setCell", "xlsx.setFormula"],
                 trust: { level: "untrusted", reason: "document-content" },
                 untrusted: true
             };

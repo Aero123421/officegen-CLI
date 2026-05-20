@@ -300,11 +300,52 @@ function styleFromEntry(entry: ObjectMapEntry): Record<string, unknown> | undefi
   const hints = entry.selectorHints ?? {};
   const style = hints.style;
   if (style && typeof style === "object" && !Array.isArray(style)) return style as Record<string, unknown>;
+  const semanticStyle = semanticStyleFromEntry(entry);
   const font = hints.font;
   const fontSize = hints.fontSize;
   const bold = hints.bold;
-  if (font === undefined && fontSize === undefined && bold === undefined) return undefined;
-  return { font, fontSize, bold };
+  if (font === undefined && fontSize === undefined && bold === undefined) return semanticStyle;
+  return { ...semanticStyle, font, fontSize, bold };
+}
+
+function semanticStyleFromEntry(entry: ObjectMapEntry): Record<string, unknown> | undefined {
+  const semantic = asPlainRecord((entry as ObjectMapEntry & { semantic?: unknown }).semantic);
+  const paragraphs = Array.isArray(semantic.paragraphs) ? semantic.paragraphs.map(asPlainRecord) : [];
+  if (!paragraphs.length) return undefined;
+  const runs = paragraphs.flatMap((paragraph) => Array.isArray(paragraph.runs) ? paragraph.runs.map(asPlainRecord) : []);
+  const fontsLatin = uniqueStrings(runs.map((run) => run.fontFamilyLatin));
+  const fontsEastAsia = uniqueStrings(runs.map((run) => run.fontFamilyEastAsia));
+  const fontSizesPt = runs.map((run) => Number(run.fontSizePt)).filter((value) => Number.isFinite(value) && value > 0);
+  const style: Record<string, unknown> = {
+    source: "pptx.semantic",
+    paragraphCount: paragraphs.length,
+    runCount: runs.length,
+    bulletCount: paragraphs.filter((paragraph) => paragraph.bullet).length,
+    numberingCount: paragraphs.filter((paragraph) => paragraph.numbering).length
+  };
+  if (fontsLatin.length) style.fontFamilyLatin = fontsLatin;
+  if (fontsEastAsia.length) style.fontFamilyEastAsia = fontsEastAsia;
+  if (fontSizesPt.length) {
+    style.fontSizeRangePt = [Math.min(...fontSizesPt), Math.max(...fontSizesPt)];
+    style.dominantFontSizePt = modeNumber(fontSizesPt);
+  }
+  if (runs.some((run) => run.bold === true)) style.hasBold = true;
+  if (runs.some((run) => run.italic === true)) style.hasItalic = true;
+  return style;
+}
+
+function asPlainRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function uniqueStrings(values: unknown[]): string[] {
+  return [...new Set(values.filter((value): value is string => typeof value === "string" && value.trim().length > 0).map((value) => value.trim()))].sort();
+}
+
+function modeNumber(values: number[]): number {
+  const counts = new Map<number, number>();
+  for (const value of values) counts.set(value, (counts.get(value) ?? 0) + 1);
+  return [...counts.entries()].sort((left, right) => right[1] - left[1] || left[0] - right[0])[0]?.[0] ?? values[0] ?? 0;
 }
 
 function buildGeometryEdges(nodes: ObjectGraphNode[], graphVersion: ObjectGraphVersion): ObjectGraphEdge[] {

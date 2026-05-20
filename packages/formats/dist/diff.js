@@ -259,14 +259,7 @@ function pageLikeCount(inspected) {
 }
 async function packagePartHashes(zip) {
     const map = new Map();
-    const interesting = sortedZipFiles(zip).filter((file) => /\/charts\/chart\d+\.xml$/i.test(file) ||
-        /\/embeddings\//i.test(file) ||
-        /\/theme\/theme\d+\.xml$/i.test(file) ||
-        /\/tables\/table\d+\.xml$/i.test(file) ||
-        /\/media\//i.test(file) ||
-        /\/comments.*\.xml$/i.test(file) ||
-        /\/styles\.xml$/i.test(file));
-    for (const file of interesting) {
+    for (const file of sortedZipFiles(zip).filter(isSemanticPackagePart)) {
         const entry = zip.file(file);
         if (!entry)
             continue;
@@ -275,7 +268,34 @@ async function packagePartHashes(zip) {
     }
     return map;
 }
+function isSemanticPackagePart(file) {
+    return file === "[Content_Types].xml" ||
+        /^ppt\/(slides|slideLayouts|slideMasters|theme|charts|tables|media|embeddings|comments|notesSlides)\//i.test(file) ||
+        /^ppt\/(_rels\/presentation\.xml\.rels|slides\/_rels\/slide\d+\.xml\.rels)$/i.test(file) ||
+        /^word\/(document\.xml|styles\.xml|numbering\.xml|comments.*\.xml|footnotes\.xml|endnotes\.xml)$/i.test(file) ||
+        /^word\/(header|footer)\d+\.xml$/i.test(file) ||
+        /^word\/(media|embeddings|charts|_rels)\//i.test(file) ||
+        /^xl\/(workbook\.xml|sharedStrings\.xml|styles\.xml|calcChain\.xml)$/i.test(file) ||
+        /^xl\/(worksheets|tables|charts|drawings|media|embeddings|comments|pivotTables|slicers|slicerCaches)\//i.test(file) ||
+        /^xl\/(_rels\/workbook\.xml\.rels|worksheets\/_rels\/sheet\d+\.xml\.rels)$/i.test(file);
+}
 function classifyPackagePart(file) {
+    if (/^ppt\/slides\/slide\d+\.xml$/i.test(file))
+        return "slideXml";
+    if (/^ppt\/slideLayouts\/slideLayout\d+\.xml$/i.test(file))
+        return "slideLayout";
+    if (/^ppt\/slideMasters\/slideMaster\d+\.xml$/i.test(file))
+        return "slideMaster";
+    if (/^word\/document\.xml$/i.test(file))
+        return "documentXml";
+    if (/^word\/(header|footer)\d+\.xml$/i.test(file))
+        return "headerFooter";
+    if (/^xl\/worksheets\/sheet\d+\.xml$/i.test(file))
+        return "worksheetXml";
+    if (/\.rels$/i.test(file))
+        return "relationships";
+    if (file === "[Content_Types].xml")
+        return "contentTypes";
     if (/\/charts\//i.test(file))
         return "chartXml";
     if (/\/embeddings\//i.test(file))

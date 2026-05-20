@@ -6,6 +6,7 @@ export interface InspectOptions {
     depth?: InspectDepth;
     include?: Array<"text" | "assets" | "relationships" | "rawPaths">;
     structure?: boolean;
+    slides?: string;
     sheet?: string;
     range?: string;
     config?: OfficegenConfig;
@@ -16,6 +17,7 @@ export interface InspectOptions {
 export interface InspectResult extends AgentSeparatedResult<Record<string, unknown>> {
     schema: "officegen.inspect.result@1.2";
     objectGraph?: ObjectGraph;
+    styleInventory?: Record<string, unknown>;
 }
 export declare function inspect(input: InputLike, options?: InspectOptions): Promise<InspectResult>;
 export declare const inspectDocument: typeof inspect;

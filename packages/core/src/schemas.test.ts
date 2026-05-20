@@ -47,6 +47,11 @@ describe("schema registry", () => {
     }).ok).toBe(true);
     expect(validateSchema("officegen.edit.ops@1.2", {
       schema: "officegen.edit.ops@1.2",
+      target: "xlsx",
+      ops: [{ op: "xlsx.setFormula", selector: { sheetName: "Data", cell: "D2" }, formula: "=SUM(A2:B2)" }]
+    }).ok).toBe(true);
+    expect(validateSchema("officegen.edit.ops@1.2", {
+      schema: "officegen.edit.ops@1.2",
       target: "pptx",
       options: {
         expectedObjectGraphHash: "sha256:abc",

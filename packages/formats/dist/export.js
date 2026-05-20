@@ -156,7 +156,7 @@ async function exportOfficeToPdfNative(input, options) {
     }
     const executable = await findLibreOfficeExecutable();
     if (!executable) {
-        throw new OfficegenError("EXPORT_UNSUPPORTED", "LibreOffice/soffice was not found. Install LibreOffice or use --mode fast for approximate PDF export.");
+        throw new OfficegenError("EXPORT_UNSUPPORTED", `No Office COM renderer was available for ${input.format}, and LibreOffice/soffice was not found. Install Microsoft Office with COM automation, install LibreOffice, or use --mode fast for approximate PDF export.`);
     }
     const outDir = options.out ? path.dirname(options.out) : await mkdtemp(path.join(os.tmpdir(), "officegen-pdf-"));
     const cleanup = options.out ? undefined : outDir;
@@ -503,7 +503,7 @@ function isByteInput(value) {
 function assertNativeExportAllowed(config) {
     if (config?.security.externalProcess === "allow" && config.security.renderers === "enabled")
         return;
-    throw new OfficegenError("SECURITY_EXTERNAL_PROCESS_DENIED", "Native LibreOffice export is disabled by the active configuration. Set security.externalProcess to allow and security.renderers to enabled to use native export.", {
+    throw new OfficegenError("SECURITY_EXTERNAL_PROCESS_DENIED", "Native renderer export is disabled by the active configuration. This blocks PowerPoint/Word/Excel COM and LibreOffice renderers; set security.externalProcess to allow and security.renderers to enabled to use native export.", {
         externalProcess: config?.security.externalProcess ?? "deny",
         renderers: config?.security.renderers ?? "disabled"
     }, { feature: "renderer" });

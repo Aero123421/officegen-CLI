@@ -7,18 +7,28 @@ import { helpPayload } from "./commands/payloads.js";
 import { CliFailure } from "./shared/types.js";
 export async function runCli(argv, options = {}) {
     const cwd = options.cwd ?? process.cwd();
-    const stdout = options.stdout ?? ((text) => console.log(text));
-    const stderr = options.stderr ?? ((text) => console.error(text));
+    const originalStdoutWrite = process.stdout.write.bind(process.stdout);
+    const originalStderrWrite = process.stderr.write.bind(process.stderr);
+    const stdout = options.stdout ?? ((text) => originalStdoutWrite(`${text}\n`));
+    const stderr = options.stderr ?? ((text) => originalStderrWrite(`${text}\n`));
     const env = options.env ?? process.env;
     const now = options.now ?? new Date();
     const context = await createRuntimeContext(argv, cwd, env);
     const topCommand = getTopCommand(argv);
     const commandText = commandFromArgv(argv);
     if (!topCommand && (hasFlag(argv, "--version") || hasFlag(argv, "-V"))) {
+        if (context.json) {
+            writeResult(context, makeEnvelope(context, commandText || "version", { schema: "officegen.version.result@1.2", version: OFFICEGEN_CLI_VERSION }, now), stdout);
+            return;
+        }
         stdout(OFFICEGEN_CLI_VERSION);
         return;
     }
     if (!topCommand && (hasFlag(argv, "--help") || hasFlag(argv, "-h"))) {
+        if (context.json) {
+            writeResult(context, makeEnvelope(context, commandText || "help", helpPayload(context, []), now), stdout);
+            return;
+        }
         writeNativeHelp(context, stdout);
         return;
     }

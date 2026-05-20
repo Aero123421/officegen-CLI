@@ -109,6 +109,8 @@ export async function verify(input, options = {}) {
     if (normalized.format === "pdf" && inspected?.trusted.summary && inspected.trusted.summary.textBlocks === 0) {
         warnings.push("PDF_TEXT_BLOCKS_ZERO: no extractable text blocks; page preview artifacts or native PDF tooling recommended.");
     }
+    for (const warning of packageRiskWarningsFromCaveats(inspected?.trusted.caveats ?? []))
+        warnings.push(warning);
     if (normalized.format === "xlsx") {
         const workbookMap = inspected?.untrusted?.workbookMap;
         if (options.formulas && !workbookMap?.formulas?.some((entry) => entry.count > 0))
@@ -219,7 +221,7 @@ function aggregateWarnings(warnings, blockingIssues) {
         ...blockingIssues.map((message) => ({ message, severity: "error" }))
     ];
     for (const entry of entries) {
-        const code = entry.message.split(":")[0]?.trim() || entry.message;
+        const code = warningCodeFromMessage(entry.message);
         const current = map.get(code) ?? { code, count: 0, severity: entry.severity, category: warningCategory(code), examples: [] };
         current.count += 1;
         current.severity = current.severity === "error" || entry.severity === "error" ? "error" : "warning";
@@ -229,9 +231,22 @@ function aggregateWarnings(warnings, blockingIssues) {
     }
     return [...map.values()].sort((left, right) => severityRank(right.severity) - severityRank(left.severity) || right.count - left.count || left.code.localeCompare(right.code));
 }
+function packageRiskWarningsFromCaveats(caveats) {
+    return caveats.filter((caveat) => /^Zip safety (warning|error|critical): /i.test(caveat));
+}
+function warningCodeFromMessage(message) {
+    const zipSafety = /^Zip safety (?:warning|error|critical): ([A-Z0-9_]+)/i.exec(message);
+    if (zipSafety?.[1])
+        return zipSafety[1];
+    return message.split(":")[0]?.trim() || message;
+}
 function warningCategory(code) {
     if (code.startsWith("SECURITY_") || code.includes("MACRO") || code.includes("EXTERNAL_LINK"))
         return "security";
+    if (code === "ZIP_EMBEDDED_OBJECT" || code === "ZIP_EXTERNAL_RELATIONSHIP")
+        return "security";
+    if (code.startsWith("ZIP_"))
+        return "compatibility";
     if (code === "NATIVE_RENDERER_NOT_RUN" || code === "VERIFY_TIMEOUT" || code.includes("RENDERER"))
         return "environment";
     if (code.includes("REPAIR") || code.includes("OPENABLE") || code.includes("UNSUPPORTED"))
@@ -562,8 +577,10 @@ function skippedGate(reason) {
 function reportIssues(warningSummary, blockingIssues, gates) {
     const gateByIssue = new Map();
     for (const [gateName, projection] of Object.entries(gates)) {
-        for (const issue of projection.issues)
-            gateByIssue.set(issue, gateName);
+        for (const issue of projection.issues) {
+            if (!gateByIssue.has(issue))
+                gateByIssue.set(issue, gateName);
+        }
     }
     const warnings = warningSummary.flatMap((item) => item.examples.map((message) => ({
         code: item.code,

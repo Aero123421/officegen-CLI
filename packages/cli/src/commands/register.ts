@@ -396,8 +396,10 @@ function registerLeaf(
         writeNativeHelp(context, stdout);
         return;
       }
-      const payload = await withJsonStdoutDiagnosticsRedirect(context, stderr, () => Promise.resolve(payloadFactory(context)));
-      writeResult(context, makeEnvelope(context, commandFromArgv(context.argv), payload, now), stdout);
+      await withJsonStdoutDiagnosticsRedirect(context, stderr, async () => {
+        const payload = await Promise.resolve(payloadFactory(context));
+        writeResult(context, makeEnvelope(context, commandFromArgv(context.argv), payload, now), stdout);
+      });
     })
   );
 }
@@ -415,15 +417,19 @@ function registerGroup(
   if (!metadata || !isCommandVisibleInNativeHelp(context, feature)) return;
   const subcommands = metadata.commands.map((command) => command.split(" ")[1]).filter((value): value is string => Boolean(value));
   const group = baseCommand(metadata.commandGroup, metadata.description, metadata.commandGroup).action(async () => {
-    const payload = await withJsonStdoutDiagnosticsRedirect(context, stderr, () => Promise.resolve(payloadFactory(context)));
-    writeResult(context, makeEnvelope(context, commandFromArgv(context.argv), payload, now), stdout);
+    await withJsonStdoutDiagnosticsRedirect(context, stderr, async () => {
+      const payload = await Promise.resolve(payloadFactory(context));
+      writeResult(context, makeEnvelope(context, commandFromArgv(context.argv), payload, now), stdout);
+    });
   });
 
   for (const subcommand of subcommands) {
     group.addCommand(
       baseCommand(subcommand, `${metadata.commandGroup} ${subcommand}`, metadata.commandGroup, subcommand).action(async () => {
-        const payload = await withJsonStdoutDiagnosticsRedirect(context, stderr, () => Promise.resolve(payloadFactory(context, subcommand)));
-        writeResult(context, makeEnvelope(context, commandFromArgv(context.argv), payload, now), stdout);
+        await withJsonStdoutDiagnosticsRedirect(context, stderr, async () => {
+          const payload = await Promise.resolve(payloadFactory(context, subcommand));
+          writeResult(context, makeEnvelope(context, commandFromArgv(context.argv), payload, now), stdout);
+        });
       })
     );
   }

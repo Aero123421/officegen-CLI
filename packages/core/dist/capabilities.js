@@ -324,8 +324,8 @@ export function getCapabilities(config, options = {}) {
             "Complete DOCX, XLSX, PPTX, and PDF application-level editing engines are outside the portable CLI contract."
         ],
         nextSuggestedCommands: visibleCommands.some((command) => command === "schema" || command.startsWith("schema "))
-            ? ["officegen help workflow edit-existing --agent --json", "officegen schema list --agent --json"]
-            : ["officegen capabilities --agent --json"]
+            ? ["officegen help workflow edit-existing --agent --strict-json", "officegen schema list --agent --strict-json"]
+            : ["officegen capabilities --agent --strict-json"]
     };
 }
 export function isFeatureAvailable(config, feature, agent = false) {

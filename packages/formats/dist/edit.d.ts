@@ -316,7 +316,7 @@ export type EditOperation = {
     op: "xlsx.setFormula";
     sheet?: XlsxSheetRef;
     sheetName?: string;
-    cell: string;
+    cell?: string;
     formula: string;
     selector?: EditSelector;
 } | {

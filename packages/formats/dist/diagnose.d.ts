@@ -6,6 +6,12 @@ export interface DiagnoseIssue {
     severity: IssueSeverity;
     message: string;
     stableObjectId?: string;
+    location?: {
+        slide?: number;
+        page?: number;
+        stableObjectId?: string;
+    };
+    metrics?: Record<string, unknown>;
     suggestedOps?: unknown[];
 }
 export interface DiagnoseOptions {

@@ -387,6 +387,56 @@ describe("@officegen/formats MVP", () => {
     expect(sheetXml?.match(/<row\b[^>]*\br="2"/g)).toHaveLength(1);
   });
 
+  it("sets XLSX formulas through inspected cell selectors and workbook relationships", async () => {
+    const zip = new JSZip();
+    zip.file("xl/workbook.xml", [
+      '<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">',
+      '<sheets><sheet name="Data" sheetId="9" r:id="rId7"/></sheets>',
+      "</workbook>"
+    ].join(""));
+    zip.file("xl/_rels/workbook.xml.rels", [
+      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">',
+      '<Relationship Id="rId7" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet3.xml"/>',
+      "</Relationships>"
+    ].join(""));
+    zip.file("xl/worksheets/sheet3.xml", [
+      '<worksheet><sheetData>',
+      '<row r="2"><c r="A2"><v>2</v></c><c r="B2"><v>3</v></c><c r="D2"><f>SUM(A2:A2)</f></c></row>',
+      '</sheetData></worksheet>'
+    ].join(""));
+    const bytes = await zip.generateAsync({ type: "uint8array" });
+    const inspected = await inspect({ data: bytes, format: "xlsx" });
+    const formulaCell = inspected.objectMap.find((entry) => entry.kind === "cell" && entry.label === "D2");
+
+    const edited = await edit(
+      { data: bytes, format: "xlsx" },
+      [{ op: "xlsx.setFormula", selector: { sheetName: "Data", cell: "D2" }, formula: "=SUM(A2:B2)" }]
+    );
+    const editedZip = await JSZip.loadAsync(edited.bytes as Uint8Array);
+    const sheet1Xml = await editedZip.file("xl/worksheets/sheet1.xml")?.async("string");
+    const sheet3Xml = await editedZip.file("xl/worksheets/sheet3.xml")?.async("string");
+
+    expect(formulaCell?.selectorHints?.formula).toBe("SUM(A2:A2)");
+    expect(formulaCell?.editableOps).toContain("xlsx.setFormula");
+    expect(edited.changed).toBe(true);
+    expect(edited.errors).toBeUndefined();
+    expect(sheet1Xml).toBeUndefined();
+    expect(sheet3Xml).toContain('<c r="D2"><f>SUM(A2:B2)</f></c>');
+  });
+
+  it("does not let XLSX formula selector cell fallback bypass failed selector guards", async () => {
+    const rendered = await render({ title: "Guarded Formula", sheets: [{ name: "Data", rows: [["Name", "Value", "Len"], ["Alpha", 42, 5]] }] }, { target: "xlsx" });
+    const guarded = await edit(
+      { data: rendered.bytes, format: "xlsx" },
+      [{ op: "xlsx.setFormula", selector: { sheetName: "Data", cell: "C2", contains: "definitely missing" }, formula: "=SUM(A2:B2)" }],
+      { validateFirst: false }
+    );
+
+    expect(guarded.changed).toBe(false);
+    expect(guarded.applied).toBe(0);
+    expect(guarded.errors?.[0]).toMatchObject({ reason: "not-found" });
+  });
+
   it("keeps workbook calcPr valid when XLSX setCell and setFormula run together", async () => {
     const zip = new JSZip();
     zip.file("[Content_Types].xml", [
@@ -726,6 +776,10 @@ describe("@officegen/formats MVP", () => {
 
     expect(diff.changed).toBe(true);
     expect(diff.summary.changedTextObjects).toBe(1);
+    expect(diff.summary.changedParts).toBeGreaterThan(0);
+    expect(diff.semantic.partChanges).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: "ppt/slides/slide1.xml", kind: "slideXml", status: "changed" })
+    ]));
     expect(diff.summary.visualRegressionScore).toBeGreaterThan(0);
   });
 
@@ -746,8 +800,52 @@ describe("@officegen/formats MVP", () => {
     expect(diff.summary.beforePages).toBe(1);
     expect(diff.summary.afterPages).toBe(1);
     expect(diff.summary.changedGeometryObjects).toBe(1);
+    expect(diff.summary.changedParts).toBeGreaterThan(0);
+    expect(diff.semantic.partChanges).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: "ppt/slides/slide1.xml", kind: "slideXml", status: "changed" })
+    ]));
     expect(diff.semantic.changedGeometry[0]?.stableObjectId).toBe(shapeId);
     expect(diff.semantic.changedGeometry[0]?.afterBbox?.[0]).toBe(120);
+  });
+
+  it("reports OOXML package part changes for DOCX and XLSX semantic diffs", async () => {
+    const docxBefore = await render({ title: "Doc", sections: [{ title: "Body", body: "Alpha" }] }, { target: "docx" });
+    const docxAfter = await edit(
+      { data: docxBefore.bytes, format: "docx" },
+      [{ op: "setText", selector: { contains: "Alpha" }, text: "Beta" }]
+    );
+    const docxDiff = await diffDocuments({ data: docxBefore.bytes, format: "docx" }, { data: docxAfter.bytes, format: "docx" });
+
+    const xlsxBefore = await render({ title: "Book", sheets: [{ rows: [["Alpha"]] }] }, { target: "xlsx" });
+    const xlsxAfter = await edit(
+      { data: xlsxBefore.bytes, format: "xlsx" },
+      [{ op: "xlsx.setCell", sheet: 1, cell: "A1", value: "Beta" }]
+    );
+    const xlsxDiff = await diffDocuments({ data: xlsxBefore.bytes, format: "xlsx" }, { data: xlsxAfter.bytes, format: "xlsx" });
+
+    expect(docxDiff.changed).toBe(true);
+    expect(docxDiff.summary.changedParts).toBeGreaterThan(0);
+    expect(docxDiff.semantic.partChanges).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: "word/document.xml", kind: "documentXml", status: "changed" })
+    ]));
+    expect(xlsxDiff.changed).toBe(true);
+    expect(xlsxDiff.summary.changedParts).toBeGreaterThan(0);
+    expect(xlsxDiff.semantic.partChanges).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: "xl/worksheets/sheet1.xml", kind: "worksheetXml", status: "changed" })
+    ]));
+  });
+
+  it("ignores volatile package metadata when reporting OOXML package part changes", async () => {
+    const before = await render({ title: "Doc", sections: [{ title: "Body", body: "Same content" }] }, { target: "docx" });
+    const afterZip = await JSZip.loadAsync(before.bytes as Uint8Array);
+    afterZip.file("docProps/core.xml", '<cp:coreProperties><dc:title>Different metadata</dc:title></cp:coreProperties>');
+    const afterBytes = await afterZip.generateAsync({ type: "uint8array" });
+
+    const diff = await diffDocuments({ data: before.bytes, format: "docx" }, { data: afterBytes, format: "docx" });
+
+    expect(diff.changed).toBe(false);
+    expect(diff.summary.changedParts).toBe(0);
+    expect(diff.semantic.partChanges).toEqual([]);
   });
 
   it("detects layout-style bounds edits when the active transform is not the first a:off in the block", async () => {
@@ -1042,11 +1140,47 @@ describe("@officegen/formats MVP", () => {
     expect(viewed.pages[0]?.pixelDensity?.nonWhitePixels).toBeGreaterThan(128);
   });
 
+  it("rasterizes DOCX pages to nonblank PNG through the internal object-map renderer", async () => {
+    const rendered = await render({ title: "Raster DOCX", sections: [{ title: "Visible Heading", body: "Visible paragraph" }] }, { target: "docx" });
+    const viewed = await view({ data: rendered.bytes, format: "docx" }, { format: "png", dpi: 72 });
+
+    expect(viewed.fidelity).toBe("internal");
+    expect(viewed.renderer.id).toBe("officegen-docx-objectmap-canvas");
+    expect(viewed.nativeProof.status).toBe("not_run");
+    expect(viewed.rasterDiagnostics?.blankPages).toEqual([]);
+    expect(viewed.rasterDiagnostics?.pixelDensityWarnings).toEqual([]);
+    expect(viewed.pages[0]?.pixelDensity?.nonWhitePixels).toBeGreaterThan(128);
+  });
+
+  it("rasterizes XLSX sheets to nonblank PNG through the internal object-map renderer", async () => {
+    const rendered = await render({ title: "Raster XLSX", sheets: [{ rows: [["Name", "Value"], ["Alpha", 42]] }] }, { target: "xlsx" });
+    const viewed = await view({ data: rendered.bytes, format: "xlsx" }, { format: "png", dpi: 72 });
+
+    expect(viewed.fidelity).toBe("internal");
+    expect(viewed.renderer.id).toBe("officegen-xlsx-objectmap-canvas");
+    expect(viewed.nativeProof.status).toBe("not_run");
+    expect(viewed.rasterDiagnostics?.blankPages).toEqual([]);
+    expect(viewed.rasterDiagnostics?.pixelDensityWarnings).toEqual([]);
+    expect(viewed.pages[0]?.pixelDensity?.nonWhitePixels).toBeGreaterThan(128);
+  });
+
+  it("keeps DOCX and XLSX visual verify usable with the internal object-map renderer", async () => {
+    const docx = await render({ title: "Verify DOCX", sections: [{ title: "Visible Heading", body: "Visible paragraph" }] }, { target: "docx" });
+    const xlsx = await render({ title: "Verify XLSX", sheets: [{ rows: [["Name", "Value"], ["Alpha", 42]] }] }, { target: "xlsx" });
+
+    for (const input of [{ data: docx.bytes, format: "docx" as const }, { data: xlsx.bytes, format: "xlsx" as const }]) {
+      const result = await verify(input, { visual: true });
+      expect(result.visual?.status).not.toBe("fail");
+      expect(result.visual?.blankPages).toBe(0);
+      expect(result.blockingIssues.join("\n")).not.toContain("VISUAL_GATE_FAILED");
+    }
+  });
+
   it("does not fall back to internal PPTX raster preview when proof mode is requested", async () => {
     const rendered = await render({ title: "Proof", slides: [{ title: "Native proof", body: "Body" }] }, { target: "pptx" });
 
     await expect(view({ data: rendered.bytes, format: "pptx" }, { format: "png", mode: "proof" }))
-      .rejects.toThrow(/Native LibreOffice export is disabled|SECURITY_EXTERNAL_PROCESS_DENIED|Native Office-to-PDF export requires/);
+      .rejects.toThrow(/Native renderer export is disabled|SECURITY_EXTERNAL_PROCESS_DENIED|Native Office-to-PDF export requires/);
   });
 
   it("registers a CJK-capable canvas font for Japanese PPTX raster previews", async () => {
@@ -1162,6 +1296,27 @@ describe("@officegen/formats MVP", () => {
       }
     });
     expect(validateSchema("officegen.verify@2", result.verificationReport).ok).toBe(true);
+  });
+
+  it("promotes embedded-object package risks into verify issues and top risks", async () => {
+    const rendered = await render({ title: "Package Risk", slides: [{ title: "Embedded", body: "Body" }] }, { target: "pptx" });
+    const zip = await JSZip.loadAsync(rendered.bytes as Uint8Array);
+    zip.file("ppt/embeddings/oleObject1.bin", new Uint8Array([1, 2, 3, 4]));
+    const bytes = await zip.generateAsync({ type: "uint8array" });
+
+    const result = await verify({ data: bytes, format: "pptx" });
+
+    expect(result.readiness).toBe("warning");
+    expect(result.warningSummary).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "ZIP_EMBEDDED_OBJECT", category: "security" })
+    ]));
+    expect(result.topRisks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "ZIP_EMBEDDED_OBJECT", severity: "warning" })
+    ]));
+    expect(result.verificationReport.gates.package.issues.join("\n")).toContain("ZIP_EMBEDDED_OBJECT");
+    expect(result.verificationReport.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "ZIP_EMBEDDED_OBJECT", gate: "package" })
+    ]));
   });
 
   it("reports unavailable native proof when proof verify cannot run a native renderer", async () => {

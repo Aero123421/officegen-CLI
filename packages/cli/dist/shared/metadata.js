@@ -59,6 +59,7 @@ const OPTION_SPECS = {
     selector: option("--selector", "<selector>", "asset or object selector"),
     sha256: option("--sha256", "<hash>", "expected sha256"),
     sheet: option("--sheet", "<name>", "limit XLSX inspect to a sheet"),
+    slides: option("--slides", "<range>", "limit PPTX inspect to slide numbers or ranges"),
     strategy: option("--strategy", "<strategy>", "design apply strategy: theme-only, inspired, or faithful"),
     structure: option("--structure", undefined, "include DOCX structure map"),
     summary: option("--summary", "<path>", "write run Markdown summary"),
@@ -83,6 +84,7 @@ export const COMMAND_OPTION_SPECS = {
     inspect: [
         OPTION_SPECS.depth,
         OPTION_SPECS.structure,
+        OPTION_SPECS.slides,
         OPTION_SPECS.sheet,
         OPTION_SPECS.range,
         OPTION_SPECS.fields,

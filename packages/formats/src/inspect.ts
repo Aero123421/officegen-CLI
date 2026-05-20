@@ -13,7 +13,7 @@ import {
   zipSafetyCaveats
 } from "./shared.js";
 import { inspectParagraphs } from "./ooxml/docx.js";
-import { inspectSlides } from "./ooxml/pptx.js";
+import { inspectSlides, type PptxSlide } from "./ooxml/pptx.js";
 import { inspectSheets } from "./ooxml/xlsx.js";
 import { buildObjectGraph, type BuildObjectGraphOptions, type ObjectGraph, type ObjectGraphRiskFlag } from "./graphs/objectGraph.js";
 import { inspectPdfObjectGraph } from "./pdf/objectGraph.js";
@@ -26,6 +26,7 @@ export interface InspectOptions {
   depth?: InspectDepth;
   include?: Array<"text" | "assets" | "relationships" | "rawPaths">;
   structure?: boolean;
+  slides?: string;
   sheet?: string;
   range?: string;
   config?: OfficegenConfig;
@@ -37,6 +38,7 @@ export interface InspectOptions {
 export interface InspectResult extends AgentSeparatedResult<Record<string, unknown>> {
   schema: "officegen.inspect.result@1.2";
   objectGraph?: ObjectGraph;
+  styleInventory?: Record<string, unknown>;
 }
 
 export async function inspect(input: InputLike, options: InspectOptions = {}): Promise<InspectResult> {
@@ -56,13 +58,17 @@ async function inspectPptx(input: Awaited<ReturnType<typeof normalizeInput>>, op
   const paths = sortedZipFiles(zip);
   const mediaPaths = paths.filter((path) => /^ppt\/media\//i.test(path));
   const { slides, objectMap } = await inspectSlides(zip);
+  const scopedSlides = scopePptxSlides(slides, options.slides);
+  const scopedObjectMap = scopePptxObjectMap(objectMap, options.slides);
   const summaryDepth = options.depth === "summary";
   const themePaths = paths.filter((path) => /^ppt\/theme\/theme\d+\.xml$/i.test(path));
   const masterPaths = paths.filter((path) => /^ppt\/slideMasters\/slideMaster\d+\.xml$/i.test(path));
   const layoutPaths = paths.filter((path) => /^ppt\/slideLayouts\/slideLayout\d+\.xml$/i.test(path));
   const chartPaths = paths.filter((path) => /^ppt\/charts\/chart\d+\.xml$/i.test(path));
+  const styleInventory = pptxStyleInventory(scopedObjectMap);
+  const layoutIssues = pptxLayoutIssues(scopedObjectMap, scopedSlides.length || slides.length);
   const slidePayload = summaryDepth
-    ? slides.map((slide) => ({
+    ? scopedSlides.map((slide) => ({
         stableObjectId: slide.stableObjectId,
         index: slide.index,
         sourcePath: slide.sourcePath,
@@ -73,7 +79,7 @@ async function inspectPptx(input: Awaited<ReturnType<typeof normalizeInput>>, op
         chartCount: slide.chartCount,
         untrusted: true
       }))
-    : slides;
+    : scopedSlides;
 
   const macros = paths.filter((path) => /vbaProject\.bin$/i.test(path));
   return withObjectGraph({
@@ -83,8 +89,9 @@ async function inspectPptx(input: Awaited<ReturnType<typeof normalizeInput>>, op
       input,
       {
         slides: slides.length,
-        textObjects: objectMap.length,
-        semanticTextObjects: objectMap.filter((entry) => (entry as { semantic?: unknown }).semantic).length,
+        scopedSlides: scopedSlides.length,
+        textObjects: scopedObjectMap.length,
+        semanticTextObjects: scopedObjectMap.filter((entry) => (entry as { semantic?: unknown }).semantic).length,
         assets: mediaPaths.length,
         charts: chartPaths.length,
         masters: masterPaths.length,
@@ -108,8 +115,11 @@ async function inspectPptx(input: Awaited<ReturnType<typeof normalizeInput>>, op
         masters: masterPaths,
         layouts: layoutPaths,
         charts: chartPaths,
+        styleInventory,
+        layoutIssues: summaryDepth ? layoutIssues.slice(0, 40) : layoutIssues,
         placeholders: objectMap
           .filter((entry) => entry.selectorHints?.placeholder)
+          .filter((entry) => scopedObjectMap.includes(entry))
           .slice(0, summaryDepth ? 40 : undefined)
           .map((entry) => ({
             stableObjectId: entry.stableObjectId,
@@ -119,11 +129,244 @@ async function inspectPptx(input: Awaited<ReturnType<typeof normalizeInput>>, op
             untrusted: true
           }))
       },
+      filters: {
+        slides: options.slides,
+        scoped: Boolean(options.slides)
+      },
       ...(options.depth === "full" || options.include?.includes("rawPaths") ? { rawPaths: paths } : {})
     },
-    objectMap: summaryDepth ? compactObjectMap(objectMap, 25) : objectMap,
+    objectMap: summaryDepth ? compactObjectMap(scopedObjectMap, 25) : scopedObjectMap,
+    styleInventory,
     agentInstruction: AGENT_UNTRUSTED_INSTRUCTION
-  }, objectMap, input, options, riskFlagsFromMacros(macros, "PPTX_MACROS_PRESENT"));
+  }, scopedObjectMap, input, options, riskFlagsFromMacros(macros, "PPTX_MACROS_PRESENT"));
+}
+
+function pptxStyleInventory(objectMap: InspectResult["objectMap"]): Record<string, unknown> {
+  const fontsLatin = new Set<string>();
+  const fontsEastAsia = new Set<string>();
+  const fontsComplexScript = new Set<string>();
+  const fontSizes = new Map<number, number>();
+  const languages = new Set<string>();
+  let semanticObjects = 0;
+  let runCount = 0;
+  let boldRuns = 0;
+  let italicRuns = 0;
+  let noProofRuns = 0;
+  let bulletObjects = 0;
+  let numberingObjects = 0;
+  const mixedFontObjects: Array<Record<string, unknown>> = [];
+
+  for (const entry of objectMap) {
+    const semantic = asPlainRecord((entry as { semantic?: unknown }).semantic);
+    const paragraphs = semanticParagraphs(semantic);
+    if (!paragraphs.length) continue;
+    semanticObjects += 1;
+    const objectFonts = new Set<string>();
+    if (paragraphs.some((paragraph) => asPlainRecord(paragraph).bullet)) bulletObjects += 1;
+    if (paragraphs.some((paragraph) => asPlainRecord(paragraph).numbering)) numberingObjects += 1;
+    for (const paragraph of paragraphs) {
+      for (const runValue of semanticRuns(asPlainRecord(paragraph))) {
+        const run = asPlainRecord(runValue);
+        runCount += 1;
+        if (run.bold === true) boldRuns += 1;
+        if (run.italic === true) italicRuns += 1;
+        if (run.noProof === true) noProofRuns += 1;
+        addString(fontsLatin, run.fontFamilyLatin);
+        addString(fontsEastAsia, run.fontFamilyEastAsia);
+        addString(fontsComplexScript, run.fontFamilyComplexScript);
+        addString(languages, run.lang);
+        addString(objectFonts, run.fontFamilyLatin);
+        addString(objectFonts, run.fontFamilyEastAsia);
+        addString(objectFonts, run.fontFamilyComplexScript);
+        const fontSize = Number(run.fontSizePt);
+        if (Number.isFinite(fontSize) && fontSize > 0) fontSizes.set(fontSize, (fontSizes.get(fontSize) ?? 0) + 1);
+      }
+    }
+    if (objectFonts.size > 2) {
+      mixedFontObjects.push({
+        stableObjectId: entry.stableObjectId,
+        slide: entry.selectorHints?.slide,
+        fonts: [...objectFonts].sort().slice(0, 8),
+        untrusted: true
+      });
+    }
+  }
+
+  return {
+    schema: "officegen.styleInventory@1.0",
+    source: "pptx.objectMap.semantic",
+    objectCount: objectMap.length,
+    semanticObjects,
+    runCount,
+    fonts: {
+      latin: [...fontsLatin].sort(),
+      eastAsia: [...fontsEastAsia].sort(),
+      complexScript: [...fontsComplexScript].sort()
+    },
+    fontSizesPt: [...fontSizes.entries()].sort((left, right) => left[0] - right[0]).map(([sizePt, count]) => ({ sizePt, count })),
+    languages: [...languages].sort(),
+    boldRuns,
+    italicRuns,
+    noProofRuns,
+    bulletObjects,
+    numberingObjects,
+    mixedFontObjects: mixedFontObjects.slice(0, 20),
+    untrusted: true
+  };
+}
+
+function pptxLayoutIssues(objectMap: InspectResult["objectMap"], slideCount: number): Array<Record<string, unknown>> {
+  const issues: Array<Record<string, unknown>> = [];
+  const perSlide = new Map<number, { textObjects: number; characters: number }>();
+  for (const entry of objectMap) {
+    const slide = Number(entry.selectorHints?.slide ?? slideIndexFromPath(entry.sourcePath ?? entry.xmlPath) ?? 1);
+    const text = String(entry.text ?? entry.textPreview ?? "");
+    if (text.trim()) {
+      const current = perSlide.get(slide) ?? { textObjects: 0, characters: 0 };
+      current.textObjects += 1;
+      current.characters += text.length;
+      perSlide.set(slide, current);
+    }
+    if (entry.bounds && (entry.bounds.x < -1 || entry.bounds.y < -1 || entry.bounds.x + entry.bounds.width > 961 || entry.bounds.y + entry.bounds.height > 541)) {
+      issues.push(pptxLayoutIssue("PPTX_OBJECT_OFF_SLIDE", "warning", entry, "Object bounds extend beyond the nominal 16:9 slide area.", { bounds: entry.bounds }));
+    }
+    const semantic = asPlainRecord((entry as { semantic?: unknown }).semantic);
+    const paragraphs = semanticParagraphs(semantic);
+    if (!paragraphs.length || !text.trim()) continue;
+    const runFormats = paragraphs.flatMap((paragraph) => semanticRuns(asPlainRecord(paragraph)).map(asPlainRecord));
+    const fontSizes = runFormats.map((run) => Number(run.fontSizePt)).filter((size) => Number.isFinite(size) && size > 0);
+    const medianFontSize = median(fontSizes) ?? (entry.kind === "shape" ? 18 : 12);
+    if (fontSizes.some((size) => size < 9)) {
+      issues.push(pptxLayoutIssue("PPTX_TINY_TEXT", "warning", entry, "Text contains font sizes below 9pt, which is risky for human presentation review.", { fontSizesPt: fontSizes.slice(0, 12) }));
+    }
+    if (runFormats.some((run) => run.italic === true) && text.length > 24) {
+      issues.push(pptxLayoutIssue("PPTX_ITALIC_BODY_TEXT", "info", entry, "Long body text has italic formatting; this often indicates stray run formatting after replacement.", {}));
+    }
+    const fontFamilies = new Set<string>();
+    for (const run of runFormats) {
+      addString(fontFamilies, run.fontFamilyLatin);
+      addString(fontFamilies, run.fontFamilyEastAsia);
+      addString(fontFamilies, run.fontFamilyComplexScript);
+    }
+    if (fontFamilies.size > 2) {
+      issues.push(pptxLayoutIssue("PPTX_MIXED_FONT_FAMILIES", "warning", entry, "A text object mixes several explicit font families; Japanese/Latin fallback may look inconsistent.", { fonts: [...fontFamilies].sort().slice(0, 8) }));
+    }
+    if (entry.bounds && estimatedTextHeight(text, entry.bounds.width, medianFontSize, paragraphs.length) > entry.bounds.height * 1.15) {
+      issues.push(pptxLayoutIssue("PPTX_TEXT_OVERFLOW_ESTIMATE", "warning", entry, "Estimated wrapped text height exceeds the shape bounds; verify in PowerPoint or run fit/repair before final use.", {
+        bounds: entry.bounds,
+        fontSizePt: medianFontSize,
+        textLength: text.length
+      }));
+    }
+  }
+  for (const [slide, density] of perSlide.entries()) {
+    if (density.textObjects > 18 || density.characters > 950) {
+      issues.push({
+        code: "PPTX_SLIDE_DENSITY_HIGH",
+        severity: "warning",
+        slide,
+        message: "Slide has high text density and may be hard to scan.",
+        metrics: density,
+        repairCommand: "officegen improve <input.pptx> --profile business --agent --json",
+        untrusted: true
+      });
+    }
+  }
+  if (slideCount > 1 && perSlide.size < slideCount) {
+    issues.push({
+      code: "PPTX_BLANK_SLIDE_RISK",
+      severity: "warning",
+      message: "One or more slides have no detected text objects.",
+      metrics: { slideCount, slidesWithText: perSlide.size },
+      repairCommand: "officegen inspect <input.pptx> --depth full --agent --json",
+      untrusted: true
+    });
+  }
+  return issues.slice(0, 80);
+}
+
+function pptxLayoutIssue(code: string, severity: "info" | "warning", entry: InspectResult["objectMap"][number], message: string, metrics: Record<string, unknown>): Record<string, unknown> {
+  return {
+    code,
+    severity,
+    stableObjectId: entry.stableObjectId,
+    slide: entry.selectorHints?.slide,
+    message,
+    metrics,
+    repairCommand: "officegen improve <input.pptx> --profile business --agent --json",
+    untrusted: true
+  };
+}
+
+function asPlainRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function semanticParagraphs(semantic: Record<string, unknown>): Array<Record<string, unknown>> {
+  return Array.isArray(semantic.paragraphs) ? semantic.paragraphs.map(asPlainRecord) : [];
+}
+
+function semanticRuns(paragraph: Record<string, unknown>): Array<Record<string, unknown>> {
+  return Array.isArray(paragraph.runs) ? paragraph.runs.map(asPlainRecord) : [];
+}
+
+function addString(target: Set<string>, value: unknown): void {
+  if (typeof value === "string" && value.trim()) target.add(value.trim());
+}
+
+function median(values: number[]): number | undefined {
+  const sorted = values.filter((value) => Number.isFinite(value)).sort((left, right) => left - right);
+  if (!sorted.length) return undefined;
+  return sorted[Math.floor(sorted.length / 2)];
+}
+
+function estimatedTextHeight(text: string, widthPx: number, fontSizePt: number, paragraphCount: number): number {
+  const fontPx = Math.max(8, fontSizePt * 1.333);
+  const charsPerLine = Math.max(8, Math.floor(Math.max(48, widthPx) / Math.max(4.5, fontPx * 0.52)));
+  const explicitLines = text.split(/\r?\n/).reduce((sum, line) => sum + Math.max(1, Math.ceil(line.length / charsPerLine)), 0);
+  const lines = Math.max(explicitLines, paragraphCount);
+  return lines * fontPx * 1.22 + Math.max(0, paragraphCount - 1) * fontPx * 0.28 + 8;
+}
+
+function scopePptxSlides(slides: PptxSlide[], slideRange: string | undefined): PptxSlide[] {
+  const selected = parseNumberSelection(slideRange);
+  if (!selected) return slides;
+  return slides.filter((slide) => selected.has(slide.index));
+}
+
+function scopePptxObjectMap(objectMap: InspectResult["objectMap"], slideRange: string | undefined): InspectResult["objectMap"] {
+  const selected = parseNumberSelection(slideRange);
+  if (!selected) return objectMap;
+  return objectMap.filter((entry) => {
+    const slide = typeof entry.selectorHints?.slide === "number"
+      ? entry.selectorHints.slide
+      : slideIndexFromPath(entry.sourcePath ?? entry.xmlPath);
+    return slide !== undefined && selected.has(slide);
+  });
+}
+
+function parseNumberSelection(value: string | undefined): Set<number> | undefined {
+  if (!value) return undefined;
+  const selected = new Set<number>();
+  for (const part of value.split(",")) {
+    const trimmed = part.trim();
+    if (!trimmed) continue;
+    const range = /^(\d+)\s*-\s*(\d+)$/.exec(trimmed);
+    if (range) {
+      const start = Number(range[1]);
+      const end = Number(range[2]);
+      for (let current = Math.min(start, end); current <= Math.max(start, end); current += 1) selected.add(current);
+      continue;
+    }
+    const single = Number(trimmed);
+    if (Number.isInteger(single) && single > 0) selected.add(single);
+  }
+  return selected.size ? selected : undefined;
+}
+
+function slideIndexFromPath(path: string | undefined): number | undefined {
+  const match = /^ppt\/slides\/slide(\d+)\.xml$/i.exec(path ?? "");
+  return match ? Number(match[1]) : undefined;
 }
 
 function docxStructureObjectMap(structureMap: Record<string, unknown> | undefined): InspectResult["objectMap"] {

@@ -20,11 +20,15 @@ export async function withJsonStdoutDiagnosticsRedirect(context, stderr, action)
         return await action();
     }
     finally {
+        await flushDeferredStdoutDiagnostics();
         console.debug = originalConsole.debug;
         console.info = originalConsole.info;
         console.log = originalConsole.log;
         console.warn = originalConsole.warn;
         process.stdout.write = originalStdoutWrite;
     }
+}
+async function flushDeferredStdoutDiagnostics() {
+    await new Promise((resolve) => setImmediate(resolve));
 }
 //# sourceMappingURL=diagnostics.js.map

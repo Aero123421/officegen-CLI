@@ -73,18 +73,19 @@ async function rasterView(input, inspected, options) {
     const format = normalizeRasterFormat(options.format);
     const source = isInspectResult(input) ? inspected.trusted.inputPath : input;
     if (!source) {
-        if (inspected.trusted.format === "pptx")
-            return pptxInternalRasterView(inspected, options, format, [
-                "PPTX pages were rasterized from the inspected object map because no source bytes/path were available."
+        if (isInternalOfficeRasterFormat(inspected.trusted.format)) {
+            return officeInternalRasterView(inspected, options, format, [
+                `${inspected.trusted.format.toUpperCase()} pages were rasterized from the inspected object map because no source bytes/path were available.`
             ]);
+        }
         throw new Error("VIEW_RASTER_SOURCE_REQUIRED: PNG/JPEG view requires an input file path or bytes, not an inspect-only result without inputPath.");
     }
     const normalized = await normalizeInput(source, inspected.trusted.format);
     const maxPages = options.maxPages ?? 50;
     const dpi = options.dpi ?? 144;
-    if (normalized.format === "pptx" && options.mode !== "native" && options.mode !== "proof") {
-        return pptxInternalRasterView(inspected, options, format, [
-            "PPTX pages were rasterized with officegen's internal object-map renderer."
+    if (isInternalOfficeRasterFormat(normalized.format) && options.mode !== "native" && options.mode !== "proof") {
+        return officeInternalRasterView(inspected, options, format, [
+            `${normalized.format.toUpperCase()} pages were rasterized with officegen's internal object-map renderer.`
         ]);
     }
     let pdfBytes = normalized.bytes;
@@ -124,12 +125,12 @@ async function rasterView(input, inspected, options) {
     });
     const pages = rasterPages.map((page) => ({ ...page, renderer }));
     const rasterDiagnostics = diagnoseRasterArtifactQuality(pages);
-    if (normalized.format === "pptx" && !rasterDiagnostics.artifactUsable) {
+    if (isInternalOfficeRasterFormat(normalized.format) && !rasterDiagnostics.artifactUsable) {
         if (options.mode === "proof") {
-            throw new Error(`NATIVE_PROOF_FAILED: native PPTX raster output was unusable (${rasterDiagnostics.qualityWarnings.join("; ")}).`);
+            throw new Error(`NATIVE_PROOF_FAILED: native ${normalized.format.toUpperCase()} raster output was unusable (${rasterDiagnostics.qualityWarnings.join("; ")}).`);
         }
-        return pptxInternalRasterView(inspected, options, format, [
-            "Native PPTX-to-PDF raster output was blank or unusable; fell back to officegen's internal object-map renderer.",
+        return officeInternalRasterView(inspected, options, format, [
+            `Native ${normalized.format.toUpperCase()}-to-PDF raster output was blank or unusable; fell back to officegen's internal object-map renderer.`,
             ...rasterDiagnostics.qualityWarnings
         ], {
             status: "failed",
@@ -173,7 +174,10 @@ async function rasterView(input, inspected, options) {
         agentInstruction: AGENT_UNTRUSTED_INSTRUCTION
     }, inspected.objectMap, inspected, options);
 }
-async function pptxInternalRasterView(inspected, options, format, caveats, nativeProof = nativeProofNotRun("PPTX internal raster preview does not run a native renderer.")) {
+function isInternalOfficeRasterFormat(format) {
+    return format === "pptx" || format === "docx" || format === "xlsx";
+}
+async function officeInternalRasterView(inspected, options, format, caveats, nativeProof = nativeProofNotRun("Internal Office raster preview does not run a native renderer.")) {
     const maxPages = options.maxPages ?? 50;
     const dpi = options.dpi ?? 144;
     const scale = Math.max(1, dpi / 72);
@@ -181,11 +185,12 @@ async function pptxInternalRasterView(inspected, options, format, caveats, nativ
     const canvasFont = resolvePptxCanvasFont(svgPages);
     const pages = [];
     for (const page of svgPages) {
-        const width = Math.ceil(960 * scale);
-        const height = Math.ceil(540 * scale);
+        const pageSize = internalRasterPageSize(inspected.trusted.format);
+        const width = Math.ceil(pageSize.width * scale);
+        const height = Math.ceil(pageSize.height * scale);
         const canvas = createCanvas(width, height);
         const context = canvas.getContext("2d");
-        drawPptxPreviewPage(context, page, scale, width, height, canvasFont.family);
+        drawOfficePreviewPage(context, page, inspected.trusted.format, scale, width, height, canvasFont.family);
         const imageData = context.getImageData(0, 0, width, height);
         const pixelDensity = analyzeRasterPixels(imageData.data, width, height, page.objectMap);
         const bytes = format === "png" ? await canvas.encode("png") : await canvas.encode("jpeg");
@@ -202,12 +207,13 @@ async function pptxInternalRasterView(inspected, options, format, caveats, nativ
             pixelDensity,
             qualityWarnings: pageQualityWarnings,
             artifactUsable: pageQualityWarnings.length === 0,
-            renderer: "officegen-pptx-objectmap-canvas",
+            renderer: `officegen-${inspected.trusted.format}-objectmap-canvas`,
             objectMap: page.objectMap
         });
     }
     const rasterDiagnostics = diagnoseRasterArtifactQuality(pages);
-    const crop = buildObjectCrop(pages, inspected.objectMap, inspected, options, "officegen-pptx-objectmap-canvas", "internal");
+    const renderer = `officegen-${inspected.trusted.format}-objectmap-canvas`;
+    const crop = buildObjectCrop(pages, inspected.objectMap, inspected, options, renderer, "internal");
     return withProgressiveDisclosure({
         schema: "officegen.view.result@1.2",
         readiness: rasterDiagnostics.artifactUsable ? "pass" : "warning",
@@ -216,14 +222,14 @@ async function pptxInternalRasterView(inspected, options, format, caveats, nativ
         qualityWarnings: rasterDiagnostics.qualityWarnings,
         fidelity: "internal",
         renderer: {
-            id: "officegen-pptx-objectmap-canvas",
+            id: renderer,
             mode: options.mode ?? "internal",
             fidelity: "internal"
         },
         nativeProof,
         caveats: [
             ...caveats,
-            "Internal PPTX raster preview is approximate; fonts, wrapping, effects, and native layout may differ.",
+            `Internal ${inspected.trusted.format.toUpperCase()} raster preview is approximate; fonts, wrapping, effects, and native layout may differ.`,
             ...canvasFont.caveats,
             ...inspected.trusted.caveats
         ],
@@ -260,17 +266,24 @@ function isRasterFormat(format) {
 function normalizeRasterFormat(format) {
     return format === "jpeg" || format === "jpg" ? "jpeg" : "png";
 }
-function drawPptxPreviewPage(context, page, scale, width, height, fontFamily) {
+function internalRasterPageSize(format) {
+    if (format === "pptx")
+        return { width: 960, height: 540 };
+    if (format === "xlsx")
+        return { width: 800, height: 600 };
+    return { width: 612, height: 792 };
+}
+function drawOfficePreviewPage(context, page, sourceFormat, scale, width, height, fontFamily) {
     context.save();
     context.fillStyle = "#ffffff";
     context.fillRect(0, 0, width, height);
     context.scale(scale, scale);
-    page.objectMap.forEach((object, index) => drawPptxPreviewObject(context, object, index, fontFamily));
+    page.objectMap.forEach((object, index) => drawOfficePreviewObject(context, object, index, sourceFormat, fontFamily));
     context.restore();
 }
-function drawPptxPreviewObject(context, object, index, fontFamily) {
-    const bounds = object.bounds ?? fallbackSlideBounds(object, index);
-    const isFramed = object.kind !== "shape";
+function drawOfficePreviewObject(context, object, index, sourceFormat, fontFamily) {
+    const bounds = object.bounds ?? fallbackObjectBounds(object, index, sourceFormat);
+    const isFramed = sourceFormat === "xlsx" || object.kind !== "shape" && object.kind !== "paragraph";
     if (isFramed) {
         context.fillStyle = object.kind === "chart" ? "#f6f8fa" : "#ffffff";
         context.fillRect(bounds.x, bounds.y, bounds.width, bounds.height);
@@ -278,8 +291,8 @@ function drawPptxPreviewObject(context, object, index, fontFamily) {
         context.lineWidth = 1;
         context.strokeRect(bounds.x, bounds.y, bounds.width, bounds.height);
     }
-    const fontSize = object.kind === "shape" ? 24 : 12;
-    const lines = pptxPreviewTextLines(object);
+    const fontSize = sourceFormat === "pptx" && object.kind === "shape" ? 24 : sourceFormat === "docx" ? 14 : 12;
+    const lines = objectPreviewTextLines(object);
     if (!lines.length)
         return;
     context.fillStyle = "#111111";
@@ -297,7 +310,7 @@ const PptxCanvasFontAlias = "Officegen CJK";
 let pptxCanvasFontState;
 function resolvePptxCanvasFont(pages) {
     const fallbackFamily = `"${PptxCanvasFontAlias}", "Noto Sans JP", "Yu Gothic", Meiryo, "MS Gothic", Arial, sans-serif`;
-    const containsCjk = pages.some((page) => page.objectMap.some((object) => pptxPreviewTextLines(object).some(needsCjkCanvasFont)));
+    const containsCjk = pages.some((page) => page.objectMap.some((object) => objectPreviewTextLines(object).some(needsCjkCanvasFont)));
     if (!containsCjk)
         return { family: "Arial, sans-serif", caveats: [] };
     if (pptxCanvasFontState)
@@ -390,6 +403,15 @@ function pptxPreviewTextLines(object) {
         }).filter((line) => line.trim().length > 0);
     }
     return String(object.text ?? object.label ?? object.textPreview ?? "").split(/\r?\n/).filter((line) => line.trim().length > 0);
+}
+function objectPreviewTextLines(object) {
+    const pptxLines = pptxPreviewTextLines(object);
+    if (pptxLines.length)
+        return pptxLines;
+    const text = String(object.text ?? object.textPreview ?? "");
+    const label = String(object.label ?? "");
+    const value = label && text && label !== text ? `${label}: ${text}` : text || label;
+    return value.split(/\r?\n/).filter((line) => line.trim().length > 0);
 }
 async function renderPdfToRasterPages(pdfBytes, options) {
     const require = createRequire(import.meta.url);
@@ -794,6 +816,16 @@ function fallbackSlideBounds(entry, index) {
     if (entry.kind === "tableCell")
         return { x: 72 + (index % 4) * 160, y: 120 + Math.floor(index / 4) * 40, width: 160, height: 40 };
     return { x: 48, y: 48 + index * 48, width: 864, height: 40 };
+}
+function fallbackObjectBounds(entry, index, sourceFormat) {
+    if (sourceFormat === "pptx")
+        return fallbackSlideBounds(entry, index);
+    if (sourceFormat === "xlsx") {
+        return { x: 32 + (index % 6) * 120, y: 48 + Math.floor(index / 6) * 32, width: 120, height: 32 };
+    }
+    if (sourceFormat === "docx")
+        return { x: 72, y: 72 + index * 28, width: 468, height: 24 };
+    return { x: 24, y: 56 + index * 24, width: 540, height: 20 };
 }
 function renderSlideHtmlObject(object) {
     const bounds = object.bounds ?? fallbackSlideBounds(object, 0);

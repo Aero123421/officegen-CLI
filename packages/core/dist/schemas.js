@@ -465,7 +465,7 @@ function editOperationSchemas() {
         op("xlsx.insertRows", ["rowIndex", "rows"], ["sheet", "sheetName", "rowIndex", "rows"]),
         op("xlsx.appendRows", ["rows"], ["sheet", "sheetName", "rows"]),
         op("xlsx.setCell", ["cell", "value"], ["sheet", "sheetName", "cell", "value"]),
-        op("xlsx.setFormula", ["cell", "formula"], ["sheet", "sheetName", "cell", "formula"]),
+        op("xlsx.setFormula", ["formula"], ["selector", "sheet", "sheetName", "cell", "formula"], {}, { anyOf: [{ required: ["cell"] }, { required: ["selector"] }] }),
         op("xlsx.definedName.set", ["name", "ref"], ["name", "ref"]),
         op("xlsx.definedName.delete", ["name"], ["name"]),
         op("xlsx.setRange", ["startCell", "values"], ["sheet", "sheetName", "startCell"], {

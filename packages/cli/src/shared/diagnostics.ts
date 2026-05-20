@@ -26,10 +26,15 @@ export async function withJsonStdoutDiagnosticsRedirect<T>(
   try {
     return await action();
   } finally {
+    await flushDeferredStdoutDiagnostics();
     console.debug = originalConsole.debug;
     console.info = originalConsole.info;
     console.log = originalConsole.log;
     console.warn = originalConsole.warn;
     process.stdout.write = originalStdoutWrite as typeof process.stdout.write;
   }
+}
+
+async function flushDeferredStdoutDiagnostics(): Promise<void> {
+  await new Promise<void>((resolve) => setImmediate(resolve));
 }

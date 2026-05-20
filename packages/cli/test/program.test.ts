@@ -100,11 +100,12 @@ describe("officegen CLI command surface", () => {
     const result = await withJsonStdoutDiagnosticsRedirect({ json: true }, (text) => stderr.push(text), async () => {
       console.log("font parser warning");
       process.stdout.write("raw font warning\n");
+      setImmediate(() => process.stdout.write("deferred font warning\n"));
       return "ok";
     });
 
     expect(result).toBe("ok");
-    expect(stderr).toEqual(["font parser warning", "raw font warning"]);
+    expect(stderr).toEqual(["font parser warning", "raw font warning", "deferred font warning"]);
   });
 
   it("wraps capabilities --agent --json in the v1.2 envelope and exposes authoring commands", async () => {
@@ -139,8 +140,19 @@ describe("officegen CLI command surface", () => {
     ]));
     expect(envelope.availableCommands).toContain("inspect");
     expect(envelope.availableCommands).toContain("template");
-    expect(envelope.nextSuggestedCommands).toContain("officegen capabilities --agent --json");
+    expect(envelope.nextSuggestedCommands).toContain("officegen capabilities --agent --strict-json");
     expect(validateSchema("officegen.envelope@2", envelope).ok).toBe(true);
+  });
+
+  it("keeps top-level help and version JSON-only under strict-json", async () => {
+    const help = parseEnvelope(await run(["--help", "--strict-json"]));
+    const version = parseEnvelope(await run(["--version", "--strict-json"]));
+
+    expect(help.ok).toBe(true);
+    expect(help.result.schema).toBe("officegen.help@1.2");
+    expect(version.ok).toBe(true);
+    expect(version.result.schema).toBe("officegen.version.result@1.2");
+    expect(version.result.version).toMatch(/^\d+\.\d+\.\d+/);
   });
 
   it("allows renderer doctor as a safe discovery command without enabling native conversion", async () => {
@@ -152,6 +164,19 @@ describe("officegen CLI command surface", () => {
     expect(envelope.result.renderers).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: "libreoffice" })
     ]));
+  });
+
+  it("treats successful error inspection lookup as an ok envelope", async () => {
+    const captured = await run(["errors", "inspect", "TEXT_OVERFLOW", "--json"]);
+    const envelope = parseEnvelope(captured);
+
+    expect(envelope.ok).toBe(true);
+    expect(envelope.objectiveOk).toBe(true);
+    expect(envelope.readiness).toBe("pass");
+    expect(envelope.result.error).toMatchObject({
+      code: "TEXT_OVERFLOW",
+      category: "layout"
+    });
   });
 
   it("persists config set project feature visibility with an atomic JSON write", async () => {
@@ -415,7 +440,7 @@ describe("officegen CLI command surface", () => {
     expect(envelope.error.code).toBe("FEATURE_HIDDEN_FROM_AGENT");
     expect(envelope.error.feature).toBe("design");
     expect(envelope.availableCommands).not.toContain("design");
-    expect(envelope.nextSuggestedCommands).toContain("officegen capabilities --agent --json");
+    expect(envelope.nextSuggestedCommands).toContain("officegen capabilities --agent --strict-json");
     expect(process.exitCode).toBe(5);
   });
 
@@ -717,6 +742,7 @@ describe("officegen CLI command surface", () => {
 
     expect(captured.stdout[0]).toContain("officegen inspect");
     expect(captured.stdout[0]).toContain("Usage:");
+    expect(captured.stdout[0]).toContain("--slides <range>");
     expect(captured.stderr).toEqual([]);
     expect(process.exitCode).toBeUndefined();
   });
@@ -751,7 +777,10 @@ describe("officegen CLI command surface", () => {
     expect(helpFlag.result.topic).toBe("inspect");
     expect(helpTopic.ok).toBe(true);
     expect(helpTopic.result.commands).toEqual(expect.arrayContaining([
-      expect.objectContaining({ commandGroup: "inspect" })
+      expect.objectContaining({
+        commandGroup: "inspect",
+        effectiveOptions: expect.arrayContaining(["--slides"])
+      })
     ]));
   });
 
@@ -1246,22 +1275,23 @@ describe("officegen CLI command surface", () => {
     const cwd = await tempWorkspace();
     await writeFile(path.join(cwd, "deck.pptx"), await minimalPptxWithImage(false));
 
-    const captured = await run(["inspect", "deck.pptx", "--fields", "schema,trusted,styleInventory,objectMap", "--json", "--json-budget-bytes", "80000"], cwd);
+    const captured = await run(["inspect", "deck.pptx", "--fields", "schema,trusted,styleInventory,futureField,objectMap", "--json", "--json-budget-bytes", "80000"], cwd);
     const envelope = parseEnvelope(captured);
 
     expect(envelope.ok).toBe(true);
     expect(envelope.result.trusted).toBeDefined();
     expect(envelope.result.objectMap.length).toBeGreaterThan(0);
-    expect(envelope.result.styleInventory).toBeNull();
-    expect(envelope.result.unavailableFields).toEqual(["styleInventory"]);
+    expect(envelope.result.styleInventory).toMatchObject({ schema: "officegen.styleInventory@1.0" });
+    expect(envelope.result.futureField).toBeNull();
+    expect(envelope.result.unavailableFields).toEqual(["futureField"]);
     expect(envelope.result.diagnostics).toContainEqual(expect.objectContaining({
       code: "FIELD_NOT_AVAILABLE",
       severity: "warning",
-      field: "styleInventory"
+      field: "futureField"
     }));
     expect(envelope.diagnostics).toContainEqual(expect.objectContaining({
       code: "FIELD_NOT_AVAILABLE",
-      field: "styleInventory"
+      field: "futureField"
     }));
   });
 
@@ -1281,13 +1311,13 @@ describe("officegen CLI command surface", () => {
     expect(envelope.result.unavailableFields).toBeUndefined();
   });
 
-  it("keeps verify --visual --json stdout parseable for DOCX and XLSX", async () => {
+  it("keeps verify --visual --strict-json stdout parseable for DOCX and XLSX", async () => {
     const cwd = await tempWorkspace();
     await writeFile(path.join(cwd, "doc.docx"), await minimalDocx("Hello"));
     await writeFile(path.join(cwd, "book.xlsx"), await minimalXlsx());
 
     for (const input of ["doc.docx", "book.xlsx"]) {
-      const captured = await run(["verify", input, "--visual", "--json"], cwd);
+      const captured = await run(["verify", input, "--visual", "--strict-json"], cwd);
       expect(captured.stdout).toHaveLength(1);
       expect(() => JSON.parse(captured.stdout[0])).not.toThrow();
       const envelope = parseEnvelope(captured);
@@ -1313,6 +1343,21 @@ describe("officegen CLI command surface", () => {
     expect(compactEnvelope.ok).toBe(true);
     expect(compactEnvelope.result.objectMap).toBeUndefined();
     expect(compactEnvelope.result.objectGraph.schema).toBe("officegen.objectGraph@2");
+  });
+
+  it("accepts recommended inspect --slides narrowing for PPTX", async () => {
+    const cwd = await tempWorkspace();
+    await writeFile(path.join(cwd, "deck.pptx"), await minimalPptxWithImage(false));
+
+    const budgeted = parseEnvelope(await run(["inspect", "deck.pptx", "--agent", "--json", "--json-budget-bytes", "512"], cwd));
+    const captured = await run(["inspect", "deck.pptx", "--slides", "1-5", "--depth", "summary", "--json"], cwd);
+    const envelope = parseEnvelope(captured);
+
+    expect(budgeted.result.recommendedNarrowCommands.join("\n")).toContain("inspect <deck.pptx> --slides 1-5 --depth summary --object-map-limit 50");
+    expect(envelope.ok).toBe(true);
+    expect(envelope.error).toBeUndefined();
+    expect(envelope.result.schema).toBe("officegen.inspect.result@1.2");
+    expect(envelope.result.untrusted.filters).toMatchObject({ slides: "1-5", scoped: true });
   });
 
   it("views an edited PDF as PNG after verify passes", async () => {
@@ -1769,6 +1814,21 @@ describe("officegen CLI command surface", () => {
     expect(envelope.result.blockingIssues.join("\n")).toContain("VISUAL_GATE_FAILED");
   });
 
+  it("explains that native verify policy blocks Office COM and LibreOffice renderers", async () => {
+    const cwd = await tempWorkspace();
+    await writeFile(path.join(cwd, "target.pptx"), await minimalPptxWithImage(false));
+
+    const captured = await run(["verify", "target.pptx", "--native", "--json"], cwd);
+    const envelope = parseEnvelope(captured);
+    const message = envelope.result.nativeRenderer.message;
+
+    expect(envelope.ok).toBe(false);
+    expect(envelope.result.nativeProof.status).toBe("unavailable");
+    expect(message).toContain("Native renderer export is disabled");
+    expect(message).toContain("PowerPoint/Word/Excel COM");
+    expect(message).toContain("LibreOffice");
+  });
+
   it("applies verify gates inside run plan steps", async () => {
     const cwd = await tempWorkspace();
     await writeFile(path.join(cwd, "deck.ir.json"), `${JSON.stringify({
@@ -2020,7 +2080,7 @@ describe("officegen CLI command surface", () => {
     const envelope = parseEnvelope(captured);
 
     expect(envelope.ok).toBe(true);
-    expect(envelope.result.agentGuidance.firstCommand).toBe("officegen capabilities --agent --json");
+    expect(envelope.result.agentGuidance.firstCommand).toBe("officegen capabilities --agent --strict-json");
     expect(envelope.result.examples).toEqual(expect.arrayContaining([
       expect.stringContaining("officegen inspect deck.pptx")
     ]));

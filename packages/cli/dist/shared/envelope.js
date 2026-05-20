@@ -264,7 +264,8 @@ function evaluateObjective(context, command, result, initialArtifacts) {
         return objectiveFailure(defaultState, "EXPECTED_ARTIFACT_MISSING", "Expected output artifact was not created.", { missingArtifact });
     }
     const resultError = asRecord(record.error);
-    if (typeof resultError.code === "string") {
+    const successfulErrorInspection = schema === "officegen.error@1.2" && resultError.exitCode === undefined;
+    if (typeof resultError.code === "string" && !successfulErrorInspection) {
         return objectiveFailure(defaultState, resultError.code, typeof resultError.message === "string" ? resultError.message : "Command objective failed.", { error: resultError });
     }
     if (schema.startsWith("officegen.run.") && Array.isArray(record.steps) && record.steps.some((step) => asRecord(step).ok === false)) {
@@ -639,7 +640,7 @@ function recommendedNarrowCommands(command, context) {
     if (command.startsWith("inspect")) {
         return [
             `officegen inspect <input> --depth summary --object-map-limit 50${agent} --json`,
-            `officegen inspect <deck.pptx> --slides 1-5 --depth summary${agent} --json`,
+            `officegen inspect <deck.pptx> --slides 1-5 --depth summary --object-map-limit 50${agent} --json`,
             `officegen inspect <workbook.xlsx> --sheet Sheet1 --range A1:K40${agent} --json`,
             `officegen inspect <file> --fields "schema,trusted,objectMap"${agent} --json`
         ];

@@ -136,10 +136,11 @@ export function availableCommands(context: RuntimeContext): string[] {
 
 export function nextSuggestedCommands(context: RuntimeContext): string[] {
   const available = new Set(availableCommands(context));
+  const agentSuffix = context.agent ? " --agent --strict-json" : " --json";
   const suggestions = [
-    context.agent ? "officegen capabilities --agent --json" : "officegen capabilities --json",
-    context.agent ? "officegen help --agent --json" : "officegen help --json",
-    context.agent ? "officegen schema list --agent --json" : "officegen schema list --json"
+    `officegen capabilities${agentSuffix}`,
+    `officegen help${agentSuffix}`,
+    `officegen schema list${agentSuffix}`
   ];
   return suggestions.filter((command) => available.has(command.split(" ")[1] ?? ""));
 }
