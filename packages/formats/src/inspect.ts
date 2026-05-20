@@ -84,6 +84,7 @@ async function inspectPptx(input: Awaited<ReturnType<typeof normalizeInput>>, op
       {
         slides: slides.length,
         textObjects: objectMap.length,
+        semanticTextObjects: objectMap.filter((entry) => (entry as { semantic?: unknown }).semantic).length,
         assets: mediaPaths.length,
         charts: chartPaths.length,
         masters: masterPaths.length,

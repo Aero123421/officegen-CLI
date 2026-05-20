@@ -1,4 +1,4 @@
-import { makeStableObjectId, readZipText, sortedZipFiles, stableHashId } from "../shared.js";
+import { decodeXmlEntities, makeStableObjectId, readZipText, sortedZipFiles, stableHashId } from "../shared.js";
 import { bulletParagraphXml, emuToPx, escapeXmlText, exactText, preview, pxToEmu, replaceNthBlock, xmlAttr } from "./xml.js";
 import { nextRelationshipId, parseRelationships, relationshipTarget } from "./relationships.js";
 export async function getSlidePaths(zip) {
@@ -77,6 +77,7 @@ export async function inspectSlides(zip) {
                 trust: { level: "untrusted", reason: "document-content" },
                 untrusted: true
             };
+            attachTextSemantic(entry, shape.semantic);
             objectMap.push(entry);
             return entry;
         })
@@ -158,6 +159,7 @@ export async function inspectSlides(zip) {
                 trust: { level: "untrusted", reason: "document-content" },
                 untrusted: true
             };
+            attachTextSemantic(entry, cell.semantic);
             objectMap.push(entry);
             return entry;
         }))
@@ -698,7 +700,8 @@ function extractTableCells(xml, slideNo, sourcePath) {
                 const attrs = cellMatch[1] ?? "";
                 const body = cellMatch[2] ?? "";
                 const span = Math.max(1, Number(xmlAttr(attrs, "gridSpan") ?? 1));
-                const text = exactText(body, "a:t").join("");
+                const semantic = extractTextSemantic(body);
+                const text = semantic.text.paragraphSeparated;
                 const cellWeight = spanWeights(columnWeights, columnIndex, span);
                 cellIndex += 1;
                 if (text) {
@@ -717,6 +720,7 @@ function extractTableCells(xml, slideNo, sourcePath) {
                         columnIndex: columnIndex + 1,
                         text,
                         textPreview: preview(text),
+                        semantic,
                         bounds
                     });
                 }
@@ -731,12 +735,14 @@ function extractTableCells(xml, slideNo, sourcePath) {
     return [...xml.matchAll(/<a:tc\b[\s\S]*?<\/a:tc>/g)]
         .map((match) => {
         cellIndex += 1;
-        const text = exactText(match[0], "a:t").join("");
+        const semantic = extractTextSemantic(match[0]);
+        const text = semantic.text.paragraphSeparated;
         return {
             stableObjectId: stableHashId("pptx", slideScope(sourcePath), "tableCell", `${sourcePath}#${cellIndex}`),
             cellIndex,
             text,
-            textPreview: preview(text)
+            textPreview: preview(text),
+            semantic
         };
     })
         .filter((cell) => cell.text);
@@ -750,7 +756,8 @@ export function extractShapes(xml, slideNo, slideStableObjectId, sourcePath) {
         const shapeId = xmlAttr(cNvPr, "id");
         const name = xmlAttr(cNvPr, "name");
         const placeholderType = /<p:ph\b([^>]*?)\/>/.exec(block)?.[1];
-        const text = exactText(block, "a:t").join("");
+        const semantic = extractTextSemantic(block);
+        const text = semantic.text.paragraphSeparated;
         const scope = slideScope(sourcePath);
         const stableObjectId = shapeId
             ? stableHashId("pptx", scope, "shape", `${sourcePath}#${shapeId}`)
@@ -765,10 +772,109 @@ export function extractShapes(xml, slideNo, slideStableObjectId, sourcePath) {
             placeholderType: placeholderType ? xmlAttr(placeholderType, "type") ?? "body" : undefined,
             text,
             textPreview: preview(text),
+            semantic,
             bounds: extractBounds(block),
             sourcePath
         };
     });
+}
+function extractTextSemantic(xml) {
+    const paragraphs = [...xml.matchAll(/<a:p\b[^>]*>[\s\S]*?<\/a:p>/g)]
+        .map((match, index) => semanticParagraph(match[0], index + 1))
+        .filter((paragraph) => paragraph.text || paragraph.runs.length || paragraph.bullet || paragraph.numbering);
+    const plain = paragraphs.map((paragraph) => paragraph.text).join("\n");
+    return {
+        kind: "pptxText",
+        text: {
+            plain,
+            paragraphSeparated: plain,
+            paragraphCount: paragraphs.length,
+            runCount: paragraphs.reduce((count, paragraph) => count + paragraph.runs.length, 0),
+            hasExplicitLineBreaks: paragraphs.some((paragraph) => paragraph.runs.some((run) => run.text.includes("\n"))),
+            explicitLineBreakCount: paragraphs.reduce((count, paragraph) => count + paragraph.runs.reduce((runCount, run) => runCount + countLineBreaks(run.text), 0), 0)
+        },
+        paragraphs
+    };
+}
+function semanticParagraph(xml, index) {
+    const pPr = /<a:pPr\b([^>]*)>([\s\S]*?)<\/a:pPr>|<a:pPr\b([^>]*)\/>/.exec(xml);
+    const pPrAttrs = pPr?.[1] ?? pPr?.[3] ?? "";
+    const pPrBody = pPr?.[2] ?? "";
+    const runs = semanticRuns(xml);
+    const text = runs.map((run) => run.text).join("");
+    const bullet = semanticBullet(pPrBody);
+    const numbering = semanticNumbering(pPrBody);
+    return {
+        index,
+        text,
+        textPreview: preview(text),
+        level: semanticLevel(pPrAttrs),
+        bullet,
+        numbering,
+        runs
+    };
+}
+function semanticRuns(xml) {
+    const runs = [];
+    for (const match of xml.matchAll(/<a:(r|fld)\b[\s\S]*?<\/a:\1>|<a:br\b[\s\S]*?\/>/g)) {
+        const block = match[0];
+        if (/^<a:br\b/.test(block)) {
+            runs.push({ index: runs.length + 1, text: "\n" });
+            continue;
+        }
+        const text = [...block.matchAll(/<a:t(?:\s[^>]*)?>([\s\S]*?)<\/a:t>/g)].map((textMatch) => decodePptxXmlValue(textMatch[1] ?? "")).join("");
+        if (!text)
+            continue;
+        runs.push({
+            index: runs.length + 1,
+            text,
+            bold: semanticBold(block)
+        });
+    }
+    return runs;
+}
+function semanticBullet(pPrBody) {
+    const attrs = /<a:buChar\b([^>]*)\/>/.exec(pPrBody)?.[1];
+    if (!attrs)
+        return undefined;
+    return { type: "bullet", char: decodePptxXmlValue(xmlAttr(attrs, "char") ?? "") || undefined };
+}
+function semanticNumbering(pPrBody) {
+    const attrs = /<a:buAutoNum\b([^>]*)\/>/.exec(pPrBody)?.[1];
+    if (!attrs)
+        return undefined;
+    const startAt = Number(xmlAttr(attrs, "startAt"));
+    return {
+        type: "numbering",
+        style: xmlAttr(attrs, "type"),
+        startAt: Number.isFinite(startAt) ? startAt : undefined
+    };
+}
+function semanticLevel(attrs) {
+    const level = Number(xmlAttr(attrs, "lvl"));
+    return Number.isFinite(level) ? level : undefined;
+}
+function semanticBold(xml) {
+    const attrs = /<a:rPr\b([^>]*)\/>|<a:rPr\b([^>]*)>/.exec(xml);
+    const value = xmlAttr(attrs?.[1] ?? attrs?.[2] ?? "", "b");
+    if (value === undefined)
+        return undefined;
+    return value === "1" || value === "true";
+}
+function countLineBreaks(value) {
+    return (value.match(/\n/g) ?? []).length;
+}
+function decodePptxXmlValue(value) {
+    return decodeXmlEntities(value)
+        .replace(/&#x([0-9a-f]+);/gi, (match, hex) => decodeCodePoint(match, Number.parseInt(hex, 16)))
+        .replace(/&#(\d+);/g, (match, decimal) => decodeCodePoint(match, Number.parseInt(decimal, 10)));
+}
+function decodeCodePoint(fallback, codePoint) {
+    return Number.isFinite(codePoint) && codePoint >= 0 && codePoint <= 0x10ffff ? String.fromCodePoint(codePoint) : fallback;
+}
+function attachTextSemantic(entry, semantic) {
+    if (semantic)
+        entry.semantic = semantic;
 }
 function slideScope(sourcePath) {
     return `slide-${stablePathToken(sourcePath)}`;

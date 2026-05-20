@@ -31,6 +31,11 @@ export interface ObjectGraphSource {
   sourcePath?: string;
   xmlPath?: string;
   slide?: number;
+  shapeId?: string;
+  shapeIndex?: number;
+  name?: string;
+  placeholder?: string;
+  placeholderKey?: string;
   page?: number;
   sheet?: number;
   sheetName?: string;
@@ -279,6 +284,11 @@ function sourceFromEntry(entry: ObjectMapEntry, options: BuildObjectGraphOptions
     sourcePath: entry.sourcePath ?? stringHint(hints.sourcePath),
     xmlPath: entry.xmlPath ?? stringHint(hints.xmlPath),
     slide: numberHint(hints.slide),
+    shapeId: stringHint(hints.shapeId),
+    shapeIndex: numberHint(hints.shapeIndex),
+    name: stringHint(hints.name ?? hints.shapeName),
+    placeholder: stringHint(hints.placeholder),
+    placeholderKey: stringHint(hints.placeholderKey),
     page: numberHint(hints.page),
     sheet: numberHint(hints.sheet),
     sheetName: stringHint(hints.sheetName),

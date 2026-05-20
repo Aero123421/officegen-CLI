@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import JSZip from "jszip";
-import { PDFDocument } from "pdf-lib";
+import { PDFDocument, rgb } from "pdf-lib";
 import { getBuiltinConfig, validateSchema } from "@officegen/core";
-import { DEFAULT_NATIVE_RENDERER_TIMEOUT_MS, MIN_NATIVE_RENDERER_TIMEOUT_MS, diffDocuments, diagnose, edit, exportDocument, extractAssets, inspect, inspectEmbeddedAssets, inspectInputZipSafety, render, renderChart, renderDiagram, repair, replaceAsset, resolveEditSelectors, resolveNativeRendererTimeoutMs, validateOoxml, verify, view } from "../src/index.js";
+import { DEFAULT_NATIVE_RENDERER_TIMEOUT_MS, MIN_NATIVE_RENDERER_TIMEOUT_MS, diagnoseRasterArtifactQuality, diffDocuments, diagnose, edit, exportDocument, extractAssets, inspect, inspectEmbeddedAssets, inspectInputZipSafety, render, renderChart, renderDiagram, repair, replaceAsset, resolveEditSelectors, resolveNativeRendererTimeoutMs, validateOoxml, verify, view } from "../src/index.js";
 
 describe("@officegen/formats MVP", () => {
   it("renders and inspects a basic PPTX with untrusted text separation", async () => {
@@ -964,6 +964,88 @@ describe("@officegen/formats MVP", () => {
     expect([...Buffer.from(viewed.pages[0]?.bytes ?? []).subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
   });
 
+  it("flags blank and identical PNG raster view artifacts as unusable", async () => {
+    const pdfDoc = await PDFDocument.create();
+    pdfDoc.addPage([200, 100]);
+    pdfDoc.addPage([200, 100]);
+    const viewed = await view({ data: await pdfDoc.save(), format: "pdf" }, { format: "png", dpi: 72 });
+
+    expect(viewed.readiness).toBe("warning");
+    expect(viewed.artifactUsable).toBe(false);
+    expect(viewed.rasterDiagnostics?.blankPages).toEqual([1, 2]);
+    expect(viewed.rasterDiagnostics?.allPagesIdentical).toBe(true);
+    expect(viewed.rasterDiagnostics?.identicalPages).toEqual([1, 2]);
+    expect(viewed.pages[0]?.pageHash).toMatch(/^sha256:/);
+    expect(viewed.qualityWarnings?.join("\n")).toContain("RASTER_ALL_PAGES_IDENTICAL");
+  });
+
+  it("flags object-map text that is missing from sparse raster pixels", () => {
+    const diagnostics = diagnoseRasterArtifactQuality([{
+      page: 1,
+      stableObjectId: "pdf:page:1",
+      format: "png",
+      content: "",
+      pageHash: "sha256:blank",
+      objectMap: [{
+        stableObjectId: "pdf:text:1",
+        kind: "text",
+        text: "Expected text",
+        untrusted: true,
+        trust: { level: "untrusted", reason: "test" }
+      }],
+      pixelDensity: {
+        pageHash: "sha256:blank",
+        width: 10,
+        height: 10,
+        totalPixels: 100,
+        whitePixels: 100,
+        nonWhitePixels: 0,
+        whiteDensity: 1,
+        nonWhiteDensity: 0,
+        blank: true,
+        mostlyWhite: true,
+        textObjectCount: 1,
+        hasTextObjects: true
+      }
+    }]);
+
+    expect(diagnostics.artifactUsable).toBe(false);
+    expect(diagnostics.pixelDensityWarnings.join("\n")).toContain("RASTER_TEXT_OBJECTS_NOT_VISIBLE");
+  });
+
+  it("treats identical nonblank raster pages as warning-only usable artifacts", () => {
+    const page = {
+      stableObjectId: "pdf:page",
+      format: "png" as const,
+      content: "",
+      pageHash: "sha256:same",
+      objectMap: [],
+      pixelDensity: {
+        pageHash: "sha256:same",
+        width: 10,
+        height: 10,
+        totalPixels: 100,
+        whitePixels: 80,
+        nonWhitePixels: 20,
+        whiteDensity: 0.8,
+        nonWhiteDensity: 0.2,
+        blank: false,
+        mostlyWhite: false,
+        textObjectCount: 0,
+        hasTextObjects: false
+      }
+    };
+    const diagnostics = diagnoseRasterArtifactQuality([
+      { ...page, page: 1 },
+      { ...page, page: 2 }
+    ]);
+
+    expect(diagnostics.allPagesIdentical).toBe(true);
+    expect(diagnostics.identicalPages).toEqual([1, 2]);
+    expect(diagnostics.qualityWarnings.join("\n")).toContain("RASTER_ALL_PAGES_IDENTICAL");
+    expect(diagnostics.artifactUsable).toBe(true);
+  });
+
   it("verifies openability, repair risk, and approximate visual readiness", async () => {
     const rendered = await render({ title: "Verify", slides: [{ title: "Ready", body: "Body" }] }, { target: "pptx" });
     const result = await verify({ data: rendered.bytes, format: "pptx" }, { visual: true });
@@ -978,7 +1060,7 @@ describe("@officegen/formats MVP", () => {
       format: "pptx",
       gates: {
         schema: { status: "pass" },
-        visual: expect.objectContaining({ status: expect.stringMatching(/pass|warning/) }),
+        visual: expect.objectContaining({ status: expect.stringMatching(/pass|warning|fail/) }),
         native: { status: "skipped" },
         goal: { status: "skipped" }
       }
@@ -1021,6 +1103,35 @@ describe("@officegen/formats MVP", () => {
     expect(result.visual?.blankPages).toBe(1);
     expect(result.readiness).toBe("blocked");
     expect(result.blockingIssues.join("\n")).toContain("GATE_MAX_BLANK_PAGES");
+  });
+
+  it("reflects raster blank, identical, and pixel-density diagnostics in verify --visual", async () => {
+    const pdfDoc = await PDFDocument.create();
+    pdfDoc.addPage([200, 100]);
+    pdfDoc.addPage([200, 100]);
+    const result = await verify({ data: await pdfDoc.save(), format: "pdf" }, { visual: true });
+
+    expect(result.visual?.blankPages).toBe(2);
+    expect(result.visual?.identicalPages).toEqual([1, 2]);
+    expect(result.visual?.pixelDensityWarnings.join("\n")).toContain("RASTER_PAGE_BLANK");
+    expect(result.warnings.join("\n")).toContain("VISUAL_PIXEL_DENSITY");
+    expect(result.readiness).toBe("warning");
+    expect(result.verificationReport.gates.visual.status).toBe("fail");
+  });
+
+  it("does not fail verify --visual for intentionally identical nonblank pages", async () => {
+    const pdfDoc = await PDFDocument.create();
+    for (let index = 0; index < 2; index += 1) {
+      const page = pdfDoc.addPage([200, 100]);
+      page.drawRectangle({ x: 20, y: 30, width: 80, height: 20, color: rgb(0, 0, 0) });
+      page.drawText("Same visible page", { x: 20, y: 60, size: 12 });
+    }
+    const result = await verify({ data: await pdfDoc.save(), format: "pdf" }, { visual: true });
+
+    expect(result.visual?.blankPages).toBe(0);
+    expect(result.visual?.identicalPages).toEqual([1, 2]);
+    expect(result.warnings.join("\n")).toContain("VISUAL_IDENTICAL_PAGES");
+    expect(result.verificationReport.gates.visual.status).toBe("warning");
   });
 
   it("renders empty sections with at least one PPTX slide, XLSX sheet, and DOCX document body", async () => {
@@ -1104,6 +1215,51 @@ describe("@officegen/formats MVP", () => {
     expect(xml).toContain('<a:rPr b="1"/>');
   });
 
+  it("applies PPTX setBold to the same shape selected by selectorResolution hints", async () => {
+    const zip = new JSZip();
+    zip.file(
+      "ppt/slides/slide1.xml",
+      [
+        "<p:sld>",
+        "<p:sp><p:nvSpPr><p:cNvPr id=\"21\" name=\"Duplicate Id A\"/></p:nvSpPr><p:txBody>",
+        "<a:p><a:r><a:rPr/><a:t>Alpha title</a:t></a:r></a:p>",
+        "</p:txBody></p:sp>",
+        "<p:sp><p:nvSpPr><p:cNvPr id=\"21\" name=\"Duplicate Id B\"/></p:nvSpPr><p:txBody>",
+        "<a:p><a:r><a:rPr/><a:t>Beta title</a:t></a:r></a:p>",
+        "</p:txBody></p:sp>",
+        "</p:sld>"
+      ].join("")
+    );
+    const bytes = await zip.generateAsync({ type: "uint8array" });
+    const operations = [{ op: "pptx.setBold" as const, selector: { contains: "Beta title" }, bold: true }];
+    const resolved = await resolveEditSelectors({ data: bytes, format: "pptx" }, operations);
+
+    expect(resolved.resolutions[0]).toMatchObject({ matched: true, matchCount: 1 });
+    expect(resolved.resolutions[0]?.matches[0]).toMatchObject({
+      text: "Beta title",
+      sourcePath: "ppt/slides/slide1.xml",
+      xmlPath: "ppt/slides/slide1.xml",
+      selectorHints: { shapeId: "21", shapeIndex: 2, name: "Duplicate Id B" }
+    });
+    expect(resolved.resolutions[0]?.selectorResolution?.candidates[0]?.source).toMatchObject({
+      sourcePath: "ppt/slides/slide1.xml",
+      xmlPath: "ppt/slides/slide1.xml",
+      shapeId: "21",
+      shapeIndex: 2,
+      name: "Duplicate Id B"
+    });
+
+    const edited = await edit({ data: bytes, format: "pptx" }, operations, { resolveSelectors: true });
+    const editedZip = await JSZip.loadAsync(edited.bytes as Uint8Array);
+    const xml = String(await editedZip.file("ppt/slides/slide1.xml")?.async("string"));
+    const alphaBlock = /<p:sp\b[\s\S]*?Alpha title[\s\S]*?<\/p:sp>/.exec(xml)?.[0] ?? "";
+    const betaBlock = /<p:sp\b[\s\S]*?Beta title[\s\S]*?<\/p:sp>/.exec(xml)?.[0] ?? "";
+
+    expect(edited.opResults?.[0]).toMatchObject({ applied: true });
+    expect(alphaBlock).not.toContain('b="1"');
+    expect(betaBlock).toContain('b="1"');
+  });
+
   it("replaces all text runs in a selected PPTX shape instead of leaving stale run text behind", async () => {
     const zip = new JSZip();
     zip.file(
@@ -1163,7 +1319,7 @@ describe("@officegen/formats MVP", () => {
     const inspectedPptx = await inspect({ data: pptxEdited.bytes, format: "pptx" });
     expect(inspectedPptx.trusted.summary.slides).toBe(3);
     expect(String(inspectedPptx.untrusted.slides[0]?.text)).toContain("Second");
-    expect(inspectedPptx.objectMap.map((entry) => entry.text).join("\n")).toContain("AlphaBeta");
+    expect(inspectedPptx.objectMap.map((entry) => entry.text).join("\n")).toContain("Alpha\nBeta");
 
     const docx = await render({ title: "Doc", sections: [{ title: "Section", body: "First para" }] }, { target: "docx" });
     const docxInspected = await inspect({ data: docx.bytes, format: "docx" });
@@ -1296,7 +1452,7 @@ describe("@officegen/formats MVP", () => {
 
     expect(dryRun.resolvedSelectors?.[0]?.confidence).toBeGreaterThan(0.8);
     expect(inspected.objectMap.map((entry) => entry.text)).toContain("MAIN TITLE");
-    expect(inspected.objectMap.map((entry) => entry.text).join("\n")).toContain("HazardMissing security controlsLow user knowledge");
+    expect(inspected.objectMap.map((entry) => entry.text).join("\n")).toContain("Hazard\nMissing security controls\nLow user knowledge");
     expect(xml).toContain('sz="4400"');
     expect(xml).toContain('b="1"');
     expect(xml).toContain('lvl="1"');

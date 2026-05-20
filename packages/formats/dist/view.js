@@ -1,4 +1,5 @@
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import { createCanvas, Path2D as CanvasPath2D } from "@napi-rs/canvas";
@@ -102,9 +103,14 @@ async function rasterView(input, inspected, options) {
         sourceFormat: inspected.trusted.format
     });
     const pages = rasterPages.map((page) => ({ ...page, renderer }));
+    const rasterDiagnostics = diagnoseRasterArtifactQuality(pages);
     const crop = buildObjectCrop(pages, inspected.objectMap, inspected, options, "officegen-internal-object-crop", fidelity);
     return withProgressiveDisclosure({
         schema: "officegen.view.result@1.2",
+        readiness: rasterDiagnostics.artifactUsable ? "pass" : "warning",
+        artifactUsable: rasterDiagnostics.artifactUsable,
+        warnings: rasterDiagnostics.qualityWarnings,
+        qualityWarnings: rasterDiagnostics.qualityWarnings,
         fidelity,
         renderer: {
             id: renderer,
@@ -120,7 +126,8 @@ async function rasterView(input, inspected, options) {
         pages,
         crops: crop.artifacts,
         crop: crop.metadata,
-        summary: buildViewSummary(inspected, pages, inspected.objectMap, crop.artifacts),
+        summary: buildViewSummary(inspected, pages, inspected.objectMap, crop.artifacts, rasterDiagnostics),
+        rasterDiagnostics,
         nextActions: viewNextActions(inspected, options, false),
         objectMap: inspected.objectMap,
         trusted: {
@@ -158,10 +165,14 @@ async function renderPdfToRasterPages(pdfBytes, options) {
         const width = Math.ceil(viewport.width);
         const height = Math.ceil(viewport.height);
         const canvas = createCanvas(width, height);
-        const canvasContext = pdfjsCanvasContext(canvas.getContext("2d"));
+        const context = canvas.getContext("2d");
+        const canvasContext = pdfjsCanvasContext(context);
         await page.render({ canvasContext: canvasContext, viewport }).promise;
-        const bytes = options.format === "png" ? await canvas.encode("png") : await canvas.encode("jpeg");
+        const imageData = context.getImageData(0, 0, width, height);
         const objectMap = pageObjectMap(options.objectMap, options.sourceFormat, pageNumber);
+        const pixelDensity = analyzeRasterPixels(imageData.data, width, height, objectMap);
+        const bytes = options.format === "png" ? await canvas.encode("png") : await canvas.encode("jpeg");
+        const pageQualityWarnings = pagePixelDensityWarnings(pageNumber, pixelDensity);
         pages.push({
             page: pageNumber,
             stableObjectId: makeStableObjectId(String(options.sourceFormat), "document", "page", pageNumber),
@@ -170,12 +181,115 @@ async function renderPdfToRasterPages(pdfBytes, options) {
             bytes: new Uint8Array(bytes),
             width,
             height,
+            pageHash: pixelDensity.pageHash,
+            pixelDensity,
+            qualityWarnings: pageQualityWarnings,
+            artifactUsable: pageQualityWarnings.length === 0,
             renderer: "pdfjs-canvas",
             objectMap
         });
     }
     await document.destroy();
     return pages;
+}
+const WHITE_CHANNEL_THRESHOLD = 250;
+const ALPHA_VISIBLE_THRESHOLD = 8;
+const BLANK_NON_WHITE_DENSITY_THRESHOLD = 0.0001;
+const BLANK_NON_WHITE_PIXEL_THRESHOLD = 16;
+const MOSTLY_WHITE_NON_WHITE_DENSITY_THRESHOLD = 0.001;
+const TEXT_SPARSE_NON_WHITE_DENSITY_THRESHOLD = 0.0005;
+const TEXT_SPARSE_NON_WHITE_PIXEL_THRESHOLD = 128;
+function analyzeRasterPixels(data, width, height, objectMap) {
+    const totalPixels = Math.max(0, Math.floor(width)) * Math.max(0, Math.floor(height));
+    let whitePixels = 0;
+    let nonWhitePixels = 0;
+    for (let offset = 0; offset < data.length; offset += 4) {
+        const alpha = data[offset + 3] ?? 255;
+        const isTransparent = alpha < ALPHA_VISIBLE_THRESHOLD;
+        const isWhite = isTransparent
+            || ((data[offset] ?? 255) >= WHITE_CHANNEL_THRESHOLD
+                && (data[offset + 1] ?? 255) >= WHITE_CHANNEL_THRESHOLD
+                && (data[offset + 2] ?? 255) >= WHITE_CHANNEL_THRESHOLD);
+        if (isWhite)
+            whitePixels += 1;
+        else
+            nonWhitePixels += 1;
+    }
+    const nonWhiteDensity = totalPixels ? Number((nonWhitePixels / totalPixels).toFixed(6)) : 0;
+    const textObjectCount = objectMap.filter(hasTextObjectContent).length;
+    return {
+        pageHash: `sha256:${createHash("sha256").update(data).digest("hex")}`,
+        width,
+        height,
+        totalPixels,
+        whitePixels,
+        nonWhitePixels,
+        whiteDensity: totalPixels ? Number((whitePixels / totalPixels).toFixed(6)) : 0,
+        nonWhiteDensity,
+        blank: nonWhitePixels <= BLANK_NON_WHITE_PIXEL_THRESHOLD || nonWhiteDensity <= BLANK_NON_WHITE_DENSITY_THRESHOLD,
+        mostlyWhite: nonWhiteDensity < MOSTLY_WHITE_NON_WHITE_DENSITY_THRESHOLD,
+        textObjectCount,
+        hasTextObjects: textObjectCount > 0
+    };
+}
+export function diagnoseRasterArtifactQuality(pages) {
+    const pageHashes = pages.flatMap((page) => page.pageHash ? [{ page: page.page, hash: page.pageHash }] : []);
+    const blankPages = [];
+    const mostlyWhitePages = [];
+    const pixelDensityWarnings = [];
+    for (const page of pages) {
+        const density = page.pixelDensity;
+        if (!density)
+            continue;
+        if (density.blank)
+            blankPages.push(page.page);
+        if (density.mostlyWhite)
+            mostlyWhitePages.push(page.page);
+        pixelDensityWarnings.push(...pagePixelDensityWarnings(page.page, density));
+    }
+    const hashGroups = new Map();
+    for (const pageHash of pageHashes) {
+        hashGroups.set(pageHash.hash, [...(hashGroups.get(pageHash.hash) ?? []), pageHash.page]);
+    }
+    const identicalPageGroups = [...hashGroups.values()].filter((group) => group.length > 1);
+    const identicalPages = [...new Set(identicalPageGroups.flat())].sort((left, right) => left - right);
+    const allPagesIdentical = pages.length > 1 && identicalPageGroups.some((group) => group.length === pages.length);
+    const qualityWarnings = [
+        ...pixelDensityWarnings,
+        ...(allPagesIdentical
+            ? [`RASTER_ALL_PAGES_IDENTICAL: all ${pages.length} raster pages share the same page hash.`]
+            : identicalPageGroups.map((group) => `RASTER_IDENTICAL_PAGES: pages ${group.join(", ")} share the same page hash.`))
+    ];
+    const artifactUsable = pixelDensityWarnings.length === 0;
+    return {
+        pageHashes,
+        blankPages,
+        mostlyWhitePages,
+        identicalPages,
+        identicalPageGroups,
+        allPagesIdentical,
+        pixelDensityWarnings,
+        qualityWarnings,
+        artifactUsable
+    };
+}
+function pagePixelDensityWarnings(page, density) {
+    const warnings = [];
+    const densityLabel = density.nonWhiteDensity.toFixed(6);
+    if (density.blank) {
+        warnings.push(`RASTER_PAGE_BLANK: page ${page} has non-white pixel density ${densityLabel} (${density.nonWhitePixels}/${density.totalPixels}).`);
+    }
+    else if (density.mostlyWhite) {
+        warnings.push(`RASTER_PAGE_MOSTLY_WHITE: page ${page} has low non-white pixel density ${densityLabel} (${density.nonWhitePixels}/${density.totalPixels}).`);
+    }
+    if (density.hasTextObjects
+        && (density.nonWhitePixels < TEXT_SPARSE_NON_WHITE_PIXEL_THRESHOLD || density.nonWhiteDensity < TEXT_SPARSE_NON_WHITE_DENSITY_THRESHOLD)) {
+        warnings.push(`RASTER_TEXT_OBJECTS_NOT_VISIBLE: page ${page} has ${density.textObjectCount} text object(s) in objectMap but only ${density.nonWhitePixels} non-white raster pixel(s).`);
+    }
+    return warnings;
+}
+function hasTextObjectContent(entry) {
+    return `${entry.text ?? ""}${entry.textPreview ?? ""}`.trim().length > 0;
 }
 function pdfjsCanvasContext(context) {
     const ctx = context;
@@ -328,14 +442,23 @@ function renderCropHtml(object, cropBox) {
     const text = object.text ?? object.label ?? object.textPreview ?? "";
     return `<section data-crop-object-id="${escapeHtml(object.stableObjectId)}" style="position:relative;width:${Math.ceil(width)}px;height:${Math.ceil(height)}px;background:#fff;color:#111;font-family:Arial,sans-serif;border:1px solid #0969da;box-sizing:border-box;padding:8px;overflow:hidden"><div data-kind="${escapeHtml(object.kind)}">${escapeHtml(text)}</div></section>`;
 }
-function buildViewSummary(inspected, pages, objectMap, crops) {
+function buildViewSummary(inspected, pages, objectMap, crops, rasterDiagnostics) {
     return {
         sourceFormat: inspected.trusted.format,
         sourceSummary: inspected.trusted.summary,
         pageCount: pages.length,
         objectMapEntries: objectMap.length,
         cropArtifacts: crops.length,
-        fidelity: pages[0]?.renderer ? undefined : "approximate"
+        fidelity: pages[0]?.renderer ? undefined : "approximate",
+        ...(rasterDiagnostics
+            ? {
+                artifactUsable: rasterDiagnostics.artifactUsable,
+                blankPages: rasterDiagnostics.blankPages.length,
+                identicalPages: rasterDiagnostics.identicalPages,
+                allPagesIdentical: rasterDiagnostics.allPagesIdentical,
+                pixelDensityWarnings: rasterDiagnostics.pixelDensityWarnings.length
+            }
+            : {})
     };
 }
 function withProgressiveDisclosure(result, fullObjectMap, inspected, options) {
@@ -430,7 +553,8 @@ function renderSlideHtmlObject(object) {
     const text = object.text ?? object.label ?? object.textPreview ?? "";
     const border = object.kind === "shape" ? "none" : "1px solid #8c959f";
     const background = object.kind === "chart" ? "#f6f8fa" : object.kind === "tableCell" ? "#fff" : "transparent";
-    return `<div data-stable-object-id="${escapeHtml(object.stableObjectId)}" data-kind="${escapeHtml(object.kind)}" style="position:absolute;left:${bounds.x}px;top:${bounds.y}px;width:${bounds.width}px;height:${bounds.height}px;box-sizing:border-box;border:${border};background:${background};padding:4px 6px;overflow:hidden">${escapeHtml(text)}</div>`;
+    const body = renderSlideHtmlText(object) ?? escapeHtml(text);
+    return `<div data-stable-object-id="${escapeHtml(object.stableObjectId)}" data-kind="${escapeHtml(object.kind)}" style="position:absolute;left:${bounds.x}px;top:${bounds.y}px;width:${bounds.width}px;height:${bounds.height}px;box-sizing:border-box;border:${border};background:${background};padding:4px 6px;overflow:hidden">${body}</div>`;
 }
 function renderSlideSvgObject(object) {
     const bounds = object.bounds ?? fallbackSlideBounds(object, 0);
@@ -439,7 +563,69 @@ function renderSlideSvgObject(object) {
     const box = object.kind === "shape"
         ? ""
         : `<rect x="${bounds.x}" y="${bounds.y}" width="${bounds.width}" height="${bounds.height}" fill="${object.kind === "chart" ? "#f6f8fa" : "#fff"}" stroke="#8c959f"/>`;
-    return `<g data-stable-object-id="${escapeXml(object.stableObjectId)}" data-kind="${escapeXml(object.kind)}">${box}<text x="${bounds.x + 6}" y="${bounds.y + Math.min(bounds.height - 6, fontSize + 8)}" font-family="Arial, sans-serif" font-size="${fontSize}" fill="#111">${escapeXml(text)}</text></g>`;
+    const body = renderSlideSvgText(object, bounds, fontSize) ?? `<text x="${bounds.x + 6}" y="${bounds.y + Math.min(bounds.height - 6, fontSize + 8)}" font-family="Arial, sans-serif" font-size="${fontSize}" fill="#111">${escapeXml(text)}</text>`;
+    return `<g data-stable-object-id="${escapeXml(object.stableObjectId)}" data-kind="${escapeXml(object.kind)}">${box}${body}</g>`;
+}
+function renderSlideHtmlText(object) {
+    const paragraphs = slideSemanticParagraphs(object);
+    if (!paragraphs?.length)
+        return undefined;
+    return paragraphs.map((paragraph, paragraphIndex) => {
+        const prefix = escapeHtml(slideParagraphPrefix(paragraph, paragraphIndex));
+        const runs = Array.isArray(paragraph.runs) && paragraph.runs.length
+            ? paragraph.runs.map((run) => {
+                const value = escapeHtml(String(run.text ?? ""));
+                return run.bold === true ? `<strong>${value}</strong>` : value;
+            }).join("")
+            : escapeHtml(String(paragraph.text ?? ""));
+        return `<div data-paragraph-index="${paragraphIndex + 1}" style="line-height:1.25;margin:0 0 2px 0">${prefix}${runs}</div>`;
+    }).join("");
+}
+function renderSlideSvgText(object, bounds, fontSize) {
+    const paragraphs = slideSemanticParagraphs(object);
+    if (!paragraphs?.length)
+        return undefined;
+    const lineHeight = Math.max(12, Math.round(fontSize * 1.25));
+    let lineIndex = 0;
+    const lines = [];
+    paragraphs.forEach((paragraph, paragraphIndex) => {
+        const runs = Array.isArray(paragraph.runs) && paragraph.runs.length ? paragraph.runs : [{ text: paragraph.text }];
+        let current = "";
+        const flush = () => {
+            const y = bounds.y + Math.min(bounds.height - 4, fontSize + 6 + lineIndex * lineHeight);
+            lines.push(`<text x="${bounds.x + 6}" y="${y}" font-family="Arial, sans-serif" font-size="${fontSize}" fill="#111" data-paragraph-index="${paragraphIndex + 1}">${current}</text>`);
+            lineIndex += 1;
+            current = "";
+        };
+        current += escapeXml(slideParagraphPrefix(paragraph, paragraphIndex));
+        runs.forEach((run) => {
+            const parts = String(run.text ?? "").split("\n");
+            parts.forEach((part, partIndex) => {
+                if (partIndex > 0)
+                    flush();
+                const value = escapeXml(part);
+                current += run.bold === true ? `<tspan font-weight="700">${value}</tspan>` : value;
+            });
+        });
+        flush();
+    });
+    return lines.join("");
+}
+function slideSemanticParagraphs(object) {
+    const semantic = object.semantic;
+    if (semantic?.kind !== "pptxText" || !Array.isArray(semantic.paragraphs))
+        return undefined;
+    return semantic.paragraphs;
+}
+function slideParagraphPrefix(paragraph, index) {
+    if (paragraph.bullet)
+        return `${String(paragraph.bullet.char ?? "\u2022")} `;
+    if (paragraph.numbering) {
+        const startAt = Number(paragraph.numbering.startAt);
+        const ordinal = Number.isFinite(startAt) ? startAt + index : index + 1;
+        return `${ordinal}. `;
+    }
+    return "";
 }
 function buildDocxPage(paragraphs, format, objectMap = []) {
     const mapped = objectMap.filter((entry) => entry.kind === "paragraph");

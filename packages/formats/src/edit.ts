@@ -188,6 +188,7 @@ export interface EditSelectorResolution {
     text?: string;
     sourcePath?: string;
     xmlPath?: string;
+    selectorHints?: Record<string, unknown>;
   }>;
   evidence?: SelectorResolutionV2["evidence"];
   ambiguityReason?: string;
@@ -1701,16 +1702,58 @@ function replacePptxObjectBlock(xml: string, kind: string, shapeId: string, upda
 }
 
 function updateSelectedPptxShape(xml: string, target: ObjectMapEntry, updater: (shape: string) => string): string {
-  const shapeId = String(target.selectorHints?.shapeId ?? "");
-  const ordinal = Number(target.selectorHints?.shapeIndex ?? stableOrdinal(target.stableObjectId));
+  const resolved = resolveCurrentPptxShape(xml, target);
+  const shapeId = resolved?.shapeId ?? String(target.selectorHints?.shapeId ?? "");
+  const ordinal = Number(resolved?.shapeIndex ?? target.selectorHints?.shapeIndex ?? stableOrdinal(target.stableObjectId));
   let index = 0;
   return xml.replace(/<p:sp\b[\s\S]*?<\/p:sp>/g, (shape) => {
     index += 1;
     const cNvPr = /<p:cNvPr\b([^>]*)\/>/.exec(shape)?.[1] ?? "";
     const candidateId = /\bid="([^"]+)"/.exec(cNvPr)?.[1];
-    if ((shapeId && candidateId !== shapeId) || (!shapeId && index !== ordinal)) return shape;
+    if (shapeId && candidateId !== shapeId) return shape;
+    if (Number.isFinite(ordinal) && index !== ordinal) return shape;
     return updater(shape);
   });
+}
+
+function resolveCurrentPptxShape(xml: string, target: ObjectMapEntry): { shapeId?: string; shapeIndex: number } | undefined {
+  if (!target.sourcePath) return undefined;
+  const slide = Number(target.selectorHints?.slide ?? 1);
+  const shapes = extractShapes(xml, slide, "", target.sourcePath);
+  const byStableIdCandidates = shapes.filter((shape) => shape.stableObjectId === target.stableObjectId);
+  const byStableId = preferPptxShapeCandidate(byStableIdCandidates, target);
+  if (byStableId) return { shapeId: byStableId.shapeId, shapeIndex: byStableId.shapeIndex };
+  const targetShapeId = String(target.selectorHints?.shapeId ?? "");
+  if (targetShapeId) {
+    const byShapeId = preferPptxShapeCandidate(shapes.filter((shape) => shape.shapeId === targetShapeId), target);
+    if (byShapeId) return { shapeId: byShapeId.shapeId, shapeIndex: byShapeId.shapeIndex };
+  }
+  const targetShapeIndex = Number(target.selectorHints?.shapeIndex);
+  if (Number.isFinite(targetShapeIndex)) {
+    const byShapeIndex = shapes.find((shape) => shape.shapeIndex === targetShapeIndex);
+    if (byShapeIndex) return { shapeId: byShapeIndex.shapeId, shapeIndex: byShapeIndex.shapeIndex };
+  }
+  return undefined;
+}
+
+function preferPptxShapeCandidate(
+  candidates: ReturnType<typeof extractShapes>,
+  target: ObjectMapEntry
+): ReturnType<typeof extractShapes>[number] | undefined {
+  if (candidates.length <= 1) return candidates[0];
+  const targetText = target.text ?? target.textPreview;
+  if (targetText) {
+    const byExactText = candidates.find((shape) => shape.text === targetText);
+    if (byExactText) return byExactText;
+    const byContainedText = candidates.find((shape) => shape.text.includes(targetText) || targetText.includes(shape.text));
+    if (byContainedText) return byContainedText;
+  }
+  const targetName = String(target.selectorHints?.name ?? target.selectorHints?.shapeName ?? target.label ?? "");
+  if (targetName) {
+    const byName = candidates.find((shape) => shape.name === targetName);
+    if (byName) return byName;
+  }
+  return candidates[0];
 }
 
 function replaceTextBodyParagraphs(shape: string, items: PptxBulletListItem[], spaceBeforeForLevel1ExceptFirst?: number): string {
@@ -2808,7 +2851,8 @@ function selectorMatch(
     label: entry.label,
     text: entry.text,
     sourcePath: entry.sourcePath,
-    xmlPath: entry.xmlPath
+    xmlPath: entry.xmlPath,
+    selectorHints: entry.selectorHints
   };
 }
 

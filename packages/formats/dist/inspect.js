@@ -48,6 +48,7 @@ async function inspectPptx(input, options) {
         trusted: trustedMeta("officegen.inspect.result@1.2", input, {
             slides: slides.length,
             textObjects: objectMap.length,
+            semanticTextObjects: objectMap.filter((entry) => entry.semantic).length,
             assets: mediaPaths.length,
             charts: chartPaths.length,
             masters: masterPaths.length,

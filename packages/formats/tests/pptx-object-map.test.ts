@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import JSZip from "jszip";
-import { inspect } from "../src/index.js";
+import { diffDocuments, edit, inspect, view } from "../src/index.js";
 
 describe("PPTX object map inspection", () => {
   it("detects groups, connectors, SmartArt relationships, and chart series", async () => {
@@ -130,5 +130,75 @@ describe("PPTX object map inspection", () => {
       categoryRef: "Sheet1!$A$2:$A$3",
       valueRef: "Sheet1!$B$2:$B$3"
     });
+  });
+
+  it("keeps PPTX paragraph, bullet, numbering, and run bold semantics in objectMap, diff, and view", async () => {
+    const beforeZip = new JSZip();
+    beforeZip.file(
+      "ppt/slides/slide1.xml",
+      [
+        '<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">',
+        '<p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="7" name="Agenda"/></p:nvSpPr>',
+        '<p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="3657600" cy="914400"/></a:xfrm></p:spPr>',
+        '<p:txBody><a:p><a:pPr><a:buChar char="&#8226;"/></a:pPr><a:r><a:rPr b="1"/><a:t>Alpha</a:t></a:r><a:br/><a:r><a:t>Beta</a:t></a:r></a:p></p:txBody>',
+        '</p:sp></p:spTree></p:cSld></p:sld>'
+      ].join("")
+    );
+    const afterZip = new JSZip();
+    afterZip.file(
+      "ppt/slides/slide1.xml",
+      [
+        '<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">',
+        '<p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="7" name="Agenda"/></p:nvSpPr>',
+        '<p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="3657600" cy="914400"/></a:xfrm></p:spPr>',
+        '<p:txBody><a:p><a:pPr><a:buAutoNum type="arabicPeriod" startAt="1"/></a:pPr><a:r><a:rPr b="0"/><a:t>Alpha</a:t></a:r></a:p><a:p><a:r><a:t>Beta</a:t></a:r></a:p></p:txBody>',
+        '</p:sp></p:spTree></p:cSld></p:sld>'
+      ].join("")
+    );
+    const beforeBytes = await beforeZip.generateAsync({ type: "uint8array" });
+    const afterBytes = await afterZip.generateAsync({ type: "uint8array" });
+    const inspected = await inspect({ data: beforeBytes, format: "pptx" }, { depth: "full" });
+    const shape = inspected.objectMap.find((entry) => entry.kind === "shape");
+    const semantic = (shape as any)?.semantic;
+
+    expect(shape?.text).toBe("Alpha\nBeta");
+    expect(semantic.text).toMatchObject({ paragraphCount: 1, runCount: 3, hasExplicitLineBreaks: true, explicitLineBreakCount: 1 });
+    expect(semantic.paragraphs[0]).toMatchObject({ bullet: { type: "bullet", char: "\u2022" } });
+    expect(semantic.paragraphs[0].runs[0]).toMatchObject({ text: "Alpha", bold: true });
+
+    const diff = await diffDocuments({ data: beforeBytes, format: "pptx" }, { data: afterBytes, format: "pptx" });
+    expect(diff.summary.changedTextObjects).toBe(0);
+    expect(diff.summary.changedSemanticObjects).toBe(1);
+    expect(diff.semantic.changedSemantic[0]?.changes).toEqual(expect.arrayContaining(["paragraph", "bullet", "numbering", "run-format"]));
+
+    const viewed = await view({ data: afterBytes, format: "pptx" }, { format: "svg" });
+    expect(viewed.pages[0]?.content).toContain('data-paragraph-index="2"');
+    expect(viewed.pages[0]?.content).toContain("1. Alpha");
+    expect(viewed.pages[0]?.content).toContain("Beta");
+  });
+
+  it("preserves generic setText newlines as semantic line breaks for PPTX compare and view", async () => {
+    const zip = new JSZip();
+    zip.file(
+      "ppt/slides/slide1.xml",
+      '<p:sld><p:sp><p:nvSpPr><p:cNvPr id="9" name="Notes"/></p:nvSpPr><p:txBody><a:p><a:r><a:t>Old</a:t></a:r></a:p></p:txBody></p:sp></p:sld>'
+    );
+    const bytes = await zip.generateAsync({ type: "uint8array" });
+    const inspected = await inspect({ data: bytes, format: "pptx" });
+    const edited = await edit(
+      { data: bytes, format: "pptx" },
+      [{ op: "setText", selector: { stableObjectId: inspected.objectMap[0]?.stableObjectId }, text: "Line one\nLine two" }]
+    );
+    const reinspected = await inspect({ data: edited.bytes, format: "pptx" }, { depth: "full" });
+    const semantic = (reinspected.objectMap[0] as any)?.semantic;
+    const diff = await diffDocuments({ data: bytes, format: "pptx" }, { data: edited.bytes, format: "pptx" });
+    const viewed = await view(reinspected, { format: "svg" });
+
+    expect(reinspected.objectMap[0]?.text).toBe("Line one\nLine two");
+    expect(semantic.text).toMatchObject({ hasExplicitLineBreaks: true, explicitLineBreakCount: 1 });
+    expect(diff.semantic.changedText[0]?.after).toBe("Line one\nLine two");
+    expect(diff.semantic.changedSemantic[0]?.changes).toContain("paragraph");
+    expect(viewed.pages[0]?.content).toContain("Line one");
+    expect(viewed.pages[0]?.content).toContain("Line two");
   });
 });

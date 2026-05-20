@@ -20,7 +20,7 @@ export async function diffDocuments(before, after, options = {}) {
     const beforePages = pageLikeCount(beforeInspect);
     const afterPages = pageLikeCount(afterInspect);
     const pageCountChanged = beforePages !== afterPages;
-    const changed = semantic.added.length > 0 || semantic.removed.length > 0 || semantic.changedText.length > 0 || semantic.changedGeometry.length > 0 || (semantic.partChanges?.length ?? 0) > 0 || pageCountChanged || (visualRegressionScore ?? 0) > 0;
+    const changed = semantic.added.length > 0 || semantic.removed.length > 0 || semantic.changedText.length > 0 || semantic.changedGeometry.length > 0 || semantic.changedSemantic.length > 0 || (semantic.partChanges?.length ?? 0) > 0 || pageCountChanged || (visualRegressionScore ?? 0) > 0;
     return {
         schema: "officegen.diff.result@1.2",
         formatBefore: beforeInspect.trusted.format,
@@ -31,6 +31,7 @@ export async function diffDocuments(before, after, options = {}) {
             removedObjects: semantic.removed.length,
             changedTextObjects: semantic.changedText.length,
             changedGeometryObjects: semantic.changedGeometry.length,
+            changedSemanticObjects: semantic.changedSemantic.length,
             beforePages,
             afterPages,
             pageCountChanged,
@@ -95,7 +96,86 @@ function semanticDiff(before, after) {
         };
     })
         .filter((entry) => Boolean(entry));
-    return { added, removed, changedText, changedGeometry };
+    const changedSemantic = [...beforeMap.entries()]
+        .map(([stableObjectId, beforeEntry]) => {
+        const afterEntry = afterMap.get(stableObjectId);
+        if (!afterEntry)
+            return undefined;
+        const beforeSemantic = comparableTextSemantic(beforeEntry);
+        const afterSemantic = comparableTextSemantic(afterEntry);
+        if (!beforeSemantic && !afterSemantic)
+            return undefined;
+        if (stableStringify(beforeSemantic) === stableStringify(afterSemantic))
+            return undefined;
+        return {
+            stableObjectId,
+            kind: beforeEntry.kind,
+            changes: classifyTextSemanticChanges(beforeSemantic, afterSemantic),
+            before: beforeSemantic,
+            after: afterSemantic
+        };
+    })
+        .filter((entry) => Boolean(entry));
+    return { added, removed, changedText, changedGeometry, changedSemantic };
+}
+function comparableTextSemantic(entry) {
+    const semantic = entry.semantic;
+    if (semantic?.kind !== "pptxText" || !Array.isArray(semantic.paragraphs))
+        return undefined;
+    return {
+        text: {
+            paragraphSeparated: typeof semantic.text?.paragraphSeparated === "string" ? semantic.text.paragraphSeparated : entry.text,
+            hasExplicitLineBreaks: Boolean(semantic.text?.hasExplicitLineBreaks),
+            explicitLineBreakCount: Number(semantic.text?.explicitLineBreakCount ?? 0)
+        },
+        paragraphs: semantic.paragraphs.map((paragraph) => {
+            const item = paragraph;
+            return {
+                index: item.index,
+                text: item.text,
+                level: item.level,
+                bullet: item.bullet,
+                numbering: item.numbering,
+                runs: Array.isArray(item.runs)
+                    ? item.runs.map((run) => {
+                        const runItem = run;
+                        return { index: runItem.index, text: runItem.text, bold: runItem.bold };
+                    })
+                    : []
+            };
+        })
+    };
+}
+function classifyTextSemanticChanges(before, after) {
+    const changes = new Set();
+    const beforeParagraphs = Array.isArray(before?.paragraphs) ? before.paragraphs : [];
+    const afterParagraphs = Array.isArray(after?.paragraphs) ? after.paragraphs : [];
+    if (beforeParagraphs.length !== afterParagraphs.length || stableStringify(before?.text) !== stableStringify(after?.text))
+        changes.add("paragraph");
+    const count = Math.max(beforeParagraphs.length, afterParagraphs.length);
+    for (let index = 0; index < count; index += 1) {
+        const beforeParagraph = beforeParagraphs[index];
+        const afterParagraph = afterParagraphs[index];
+        if (stableStringify(beforeParagraph?.bullet) !== stableStringify(afterParagraph?.bullet))
+            changes.add("bullet");
+        if (stableStringify(beforeParagraph?.numbering) !== stableStringify(afterParagraph?.numbering))
+            changes.add("numbering");
+        if (stableStringify(runFormats(beforeParagraph)) !== stableStringify(runFormats(afterParagraph)))
+            changes.add("run-format");
+    }
+    return [...changes];
+}
+function runFormats(paragraph) {
+    const runs = paragraph?.runs;
+    if (!Array.isArray(runs))
+        return [];
+    return runs.map((run) => {
+        const item = run;
+        return { index: item.index, bold: item.bold };
+    });
+}
+function stableStringify(value) {
+    return JSON.stringify(value ?? null);
 }
 async function semanticPartDiff(before, after, formatBefore, formatAfter) {
     if (formatBefore !== formatAfter || !["pptx", "docx", "xlsx"].includes(formatBefore))

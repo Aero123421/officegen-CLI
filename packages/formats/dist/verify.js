@@ -68,6 +68,10 @@ export async function verify(input, options = {}) {
         : undefined;
     if (visual?.blankPages)
         warnings.push(`VISUAL_BLANK_PAGE: ${visual.blankPages} blank preview pages detected.`);
+    if (visual?.identicalPages.length)
+        warnings.push(`VISUAL_IDENTICAL_PAGES: raster preview pages ${visual.identicalPages.join(", ")} share page hashes.`);
+    for (const warning of visual?.pixelDensityWarnings ?? [])
+        warnings.push(`VISUAL_PIXEL_DENSITY: ${warning}`);
     const visualDiff = options.visual
         ? {
             status: "skipped",
@@ -331,9 +335,42 @@ function gatesNeedFullText(gates) {
     return Boolean(gates?.requiredText?.length || gates?.forbiddenText?.length);
 }
 async function verifyVisual(input, config) {
+    try {
+        const preview = await view(input, { format: "png", maxPages: 10, config });
+        const raster = preview.rasterDiagnostics;
+        if (raster) {
+            return {
+                fidelity: preview.fidelity === "native" ? "native" : "approximate",
+                pagesChecked: preview.pages.length,
+                blankPages: raster.blankPages.length,
+                identicalPages: raster.identicalPages,
+                pixelDensityWarnings: raster.pixelDensityWarnings,
+                allPagesIdentical: raster.allPagesIdentical
+            };
+        }
+    }
+    catch (error) {
+        const preview = await view(input, { format: "svg", maxPages: 10, config });
+        const blankPages = preview.pages.filter((page) => !page.objectMap.some(hasVisiblePreviewObject)).length;
+        return {
+            fidelity: "approximate",
+            pagesChecked: preview.pages.length,
+            blankPages,
+            identicalPages: [],
+            pixelDensityWarnings: [`VISUAL_RASTER_UNAVAILABLE: raster pixel diagnostics could not run (${error instanceof Error ? error.message : String(error)}).`],
+            rasterDiagnosticsUnavailable: true
+        };
+    }
     const preview = await view(input, { format: "svg", maxPages: 10, config });
     const blankPages = preview.pages.filter((page) => !page.objectMap.some(hasVisiblePreviewObject)).length;
-    return { fidelity: "approximate", pagesChecked: preview.pages.length, blankPages };
+    return {
+        fidelity: "approximate",
+        pagesChecked: preview.pages.length,
+        blankPages,
+        identicalPages: [],
+        pixelDensityWarnings: ["VISUAL_RASTER_UNAVAILABLE: raster pixel diagnostics did not produce page density metadata."],
+        rasterDiagnosticsUnavailable: true
+    };
 }
 function hasVisiblePreviewObject(entry) {
     const text = `${entry.text ?? ""}${entry.textPreview ?? ""}`.trim();
@@ -409,10 +446,14 @@ function buildVerificationReport(context) {
             textObjects: summary.textObjects
         }, context.blockingIssues.filter((issue) => /TEXT|SEMANTIC|REQUIRED|FORBIDDEN/i.test(issue))),
         visual: context.visual || context.visualDiff
-            ? gate(!(context.visualDiff?.status === "blocked") && !(context.visual?.blankPages && context.visual.blankPages > 0), {
+            ? gate(!(context.visualDiff?.status === "blocked") && !visualHasQualityFailures(context.visual), {
                 fidelity: context.visual?.fidelity ?? context.visualDiff?.fidelity,
                 pagesChecked: context.visual?.pagesChecked,
                 blankPages: context.visual?.blankPages ?? 0,
+                identicalPages: context.visual?.identicalPages ?? [],
+                allPagesIdentical: context.visual?.allPagesIdentical ?? false,
+                pixelDensityWarnings: context.visual?.pixelDensityWarnings?.length ?? 0,
+                rasterDiagnosticsUnavailable: context.visual?.rasterDiagnosticsUnavailable ?? false,
                 diffStatus: context.visualDiff?.status
             }, context.warnings.filter((issue) => /^VISUAL_|GATE_MAX_BLANK_PAGES/.test(issue)))
             : skippedGate("Visual verification was not requested."),
@@ -448,6 +489,10 @@ function buildVerificationReport(context) {
         artifacts: reportArtifacts(context.artifacts),
         recommendedRepairs: context.recommendedRepairs
     };
+}
+function visualHasQualityFailures(visual) {
+    return Boolean(visual
+        && (visual.blankPages > 0 || visual.pixelDensityWarnings.length > 0));
 }
 function gate(ok, summary, issues) {
     return {

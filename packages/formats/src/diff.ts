@@ -27,6 +27,7 @@ export interface DiffResult {
     removedObjects: number;
     changedTextObjects: number;
     changedGeometryObjects: number;
+    changedSemanticObjects?: number;
     beforePages: number;
     afterPages: number;
     pageCountChanged: boolean;
@@ -48,6 +49,13 @@ export interface DiffResult {
       beforeBbox?: [number, number, number, number];
       afterBbox?: [number, number, number, number];
       delta: { x: number; y: number; width: number; height: number };
+    }>;
+    changedSemantic: Array<{
+      stableObjectId: string;
+      kind: string;
+      changes: Array<"paragraph" | "bullet" | "numbering" | "run-format">;
+      before?: Record<string, unknown>;
+      after?: Record<string, unknown>;
     }>;
     partChanges?: Array<{ path: string; kind: string; beforeHash?: string; afterHash?: string; status: "added" | "removed" | "changed" }>;
   };
@@ -79,7 +87,7 @@ export async function diffDocuments(before: InputLike, after: InputLike, options
   const beforePages = pageLikeCount(beforeInspect);
   const afterPages = pageLikeCount(afterInspect);
   const pageCountChanged = beforePages !== afterPages;
-  const changed = semantic.added.length > 0 || semantic.removed.length > 0 || semantic.changedText.length > 0 || semantic.changedGeometry.length > 0 || (semantic.partChanges?.length ?? 0) > 0 || pageCountChanged || (visualRegressionScore ?? 0) > 0;
+  const changed = semantic.added.length > 0 || semantic.removed.length > 0 || semantic.changedText.length > 0 || semantic.changedGeometry.length > 0 || semantic.changedSemantic.length > 0 || (semantic.partChanges?.length ?? 0) > 0 || pageCountChanged || (visualRegressionScore ?? 0) > 0;
   return {
     schema: "officegen.diff.result@1.2",
     formatBefore: beforeInspect.trusted.format,
@@ -90,6 +98,7 @@ export async function diffDocuments(before: InputLike, after: InputLike, options
       removedObjects: semantic.removed.length,
       changedTextObjects: semantic.changedText.length,
       changedGeometryObjects: semantic.changedGeometry.length,
+      changedSemanticObjects: semantic.changedSemantic.length,
       beforePages,
       afterPages,
       pageCountChanged,
@@ -150,7 +159,81 @@ function semanticDiff(before: InspectResult, after: InspectResult): DiffResult["
       };
     })
     .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry));
-  return { added, removed, changedText, changedGeometry };
+  const changedSemantic = [...beforeMap.entries()]
+    .map(([stableObjectId, beforeEntry]) => {
+      const afterEntry = afterMap.get(stableObjectId);
+      if (!afterEntry) return undefined;
+      const beforeSemantic = comparableTextSemantic(beforeEntry);
+      const afterSemantic = comparableTextSemantic(afterEntry);
+      if (!beforeSemantic && !afterSemantic) return undefined;
+      if (stableStringify(beforeSemantic) === stableStringify(afterSemantic)) return undefined;
+      return {
+        stableObjectId,
+        kind: beforeEntry.kind,
+        changes: classifyTextSemanticChanges(beforeSemantic, afterSemantic),
+        before: beforeSemantic,
+        after: afterSemantic
+      };
+    })
+    .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry));
+  return { added, removed, changedText, changedGeometry, changedSemantic };
+}
+
+function comparableTextSemantic(entry: ObjectMapEntry): Record<string, unknown> | undefined {
+  const semantic = (entry as ObjectMapEntry & { semantic?: unknown }).semantic as { kind?: unknown; text?: { paragraphSeparated?: unknown; hasExplicitLineBreaks?: unknown; explicitLineBreakCount?: unknown }; paragraphs?: unknown } | undefined;
+  if (semantic?.kind !== "pptxText" || !Array.isArray(semantic.paragraphs)) return undefined;
+  return {
+    text: {
+      paragraphSeparated: typeof semantic.text?.paragraphSeparated === "string" ? semantic.text.paragraphSeparated : entry.text,
+      hasExplicitLineBreaks: Boolean(semantic.text?.hasExplicitLineBreaks),
+      explicitLineBreakCount: Number(semantic.text?.explicitLineBreakCount ?? 0)
+    },
+    paragraphs: semantic.paragraphs.map((paragraph) => {
+      const item = paragraph as { index?: unknown; text?: unknown; level?: unknown; bullet?: unknown; numbering?: unknown; runs?: unknown };
+      return {
+        index: item.index,
+        text: item.text,
+        level: item.level,
+        bullet: item.bullet,
+        numbering: item.numbering,
+        runs: Array.isArray(item.runs)
+          ? item.runs.map((run) => {
+              const runItem = run as { index?: unknown; text?: unknown; bold?: unknown };
+              return { index: runItem.index, text: runItem.text, bold: runItem.bold };
+            })
+          : []
+      };
+    })
+  };
+}
+
+function classifyTextSemanticChanges(before: Record<string, unknown> | undefined, after: Record<string, unknown> | undefined): Array<"paragraph" | "bullet" | "numbering" | "run-format"> {
+  const changes = new Set<"paragraph" | "bullet" | "numbering" | "run-format">();
+  const beforeParagraphs = Array.isArray(before?.paragraphs) ? before.paragraphs as Array<Record<string, unknown>> : [];
+  const afterParagraphs = Array.isArray(after?.paragraphs) ? after.paragraphs as Array<Record<string, unknown>> : [];
+  if (beforeParagraphs.length !== afterParagraphs.length || stableStringify(before?.text) !== stableStringify(after?.text)) changes.add("paragraph");
+  const count = Math.max(beforeParagraphs.length, afterParagraphs.length);
+  for (let index = 0; index < count; index += 1) {
+    const beforeParagraph = beforeParagraphs[index];
+    const afterParagraph = afterParagraphs[index];
+    if (stableStringify(beforeParagraph?.bullet) !== stableStringify(afterParagraph?.bullet)) changes.add("bullet");
+    if (stableStringify(beforeParagraph?.numbering) !== stableStringify(afterParagraph?.numbering)) changes.add("numbering");
+    if (stableStringify(runFormats(beforeParagraph)) !== stableStringify(runFormats(afterParagraph))) changes.add("run-format");
+  }
+  return [...changes];
+}
+
+function runFormats(paragraph: Record<string, unknown> | undefined): unknown {
+  const runs = paragraph?.runs;
+  if (!Array.isArray(runs)) return [];
+  return runs.map((run) => {
+    const item = run as { index?: unknown; bold?: unknown };
+    return { index: item.index, bold: item.bold };
+  });
+}
+
+function stableStringify(value: unknown): string {
+  return JSON.stringify(value ?? null);
 }
 
 async function semanticPartDiff(before: InputLike, after: InputLike, formatBefore: string, formatAfter: string): Promise<NonNullable<DiffResult["semantic"]["partChanges"]>> {
