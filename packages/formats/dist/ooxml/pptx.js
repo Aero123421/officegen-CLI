@@ -1023,9 +1023,19 @@ export async function reorderSlides(zip, order) {
     const reordered = order.map((slideNo) => sldIdTags[slideNo - 1]).join("");
     zip.file("ppt/presentation.xml", presentationXml.replace(/(<p:sldIdLst\b[^>]*>)[\s\S]*?(<\/p:sldIdLst>)/, `$1${reordered}$2`));
 }
-function extractBounds(block) {
-    const off = /<a:off\b([^>]*)\/>/.exec(block)?.[1];
-    const ext = /<a:ext\b([^>]*)\/>/.exec(block)?.[1];
+/** Matches the transform block that {@link applyBoundsToPptxBlock} updates. */
+export function readPptxBlockTransformContent(block) {
+    const pXfrm = /<p:xfrm\b[^>]*>([\s\S]*?)<\/p:xfrm>/i.exec(block);
+    if (pXfrm)
+        return pXfrm[1];
+    const aXfrm = /<a:xfrm\b[^>]*>([\s\S]*?)<\/a:xfrm>/i.exec(block);
+    if (aXfrm)
+        return aXfrm[1];
+    return undefined;
+}
+function extractBoundsFromTransformContent(content) {
+    const off = /<a:off\b([^>]*)\/>/i.exec(content)?.[1];
+    const ext = /<a:ext\b([^>]*)\/>/i.exec(content)?.[1];
     if (!off || !ext)
         return undefined;
     const x = Number(xmlAttr(off, "x"));
@@ -1035,6 +1045,33 @@ function extractBounds(block) {
     if (![x, y, cx, cy].every(Number.isFinite))
         return undefined;
     return { x: emuToPx(x), y: emuToPx(y), width: emuToPx(cx), height: emuToPx(cy) };
+}
+function extractBounds(block) {
+    const content = readPptxBlockTransformContent(block);
+    if (!content)
+        return undefined;
+    return extractBoundsFromTransformContent(content);
+}
+/** Writes bounds to the same transform surface that {@link extractBounds} reads. */
+export function applyBoundsToPptxBlock(block, bounds) {
+    const off = `<a:off x="${pxToEmu(bounds.x)}" y="${pxToEmu(bounds.y)}"/>`;
+    const ext = `<a:ext cx="${pxToEmu(bounds.width)}" cy="${pxToEmu(bounds.height)}"/>`;
+    if (/<p:xfrm\b[\s\S]*?<\/p:xfrm>/i.test(block)) {
+        return block.replace(/<p:xfrm\b([^>]*)>[\s\S]*?<\/p:xfrm>/i, `<p:xfrm$1>${off}${ext}</p:xfrm>`);
+    }
+    if (/<a:xfrm\b[\s\S]*?<\/a:xfrm>/i.test(block)) {
+        return block.replace(/<a:xfrm\b([^>]*)>[\s\S]*?<\/a:xfrm>/i, `<a:xfrm$1>${off}${ext}</a:xfrm>`);
+    }
+    if (/<p:graphicFrame\b/i.test(block)) {
+        return block.replace(/(<p:nvGraphicFramePr\b[\s\S]*?<\/p:nvGraphicFramePr>)/i, `$1<p:xfrm>${off}${ext}</p:xfrm>`);
+    }
+    if (/<p:spPr\b/i.test(block)) {
+        return block.replace(/(<p:spPr\b[^>]*>)/i, `$1<a:xfrm>${off}${ext}</a:xfrm>`);
+    }
+    if (/<p:txBody\b/i.test(block)) {
+        return block.replace(/(<p:txBody\b)/i, `<p:spPr><a:xfrm>${off}${ext}</a:xfrm></p:spPr>$1`);
+    }
+    return block.replace(/(<\/p:sp>)$/i, `<p:spPr><a:xfrm>${off}${ext}</a:xfrm></p:spPr>$1`);
 }
 function positiveNumber(value) {
     const parsed = Number(value);

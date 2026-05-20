@@ -916,13 +916,26 @@ function applyOutputProjection(context, payload) {
         result = withoutObjectMap;
     }
     if (fields?.length && isPlainObject(result)) {
+        const source = result;
         const projected = {};
+        const unavailable = fields.filter((field) => !(field in source) || source[field] === undefined);
         for (const field of fields)
-            if (field in result)
-                projected[field] = result[field];
+            projected[field] = field in source && source[field] !== undefined ? source[field] : null;
         result = {
-            schema: typeof result.schema === "string" ? result.schema : "officegen.projected-result@2.3",
+            schema: typeof source.schema === "string" ? source.schema : "officegen.projected-result@2.3",
             projectedFields: fields,
+            ...(unavailable.length ? {
+                unavailableFields: unavailable,
+                diagnostics: [
+                    ...asArray(source.diagnostics),
+                    ...unavailable.map((field) => ({
+                        code: "FIELD_NOT_AVAILABLE",
+                        severity: "warning",
+                        field,
+                        message: `Requested field "${field}" is not available in this inspect result.`
+                    }))
+                ]
+            } : {}),
             ...projected
         };
     }

@@ -732,18 +732,82 @@ describe("@officegen/formats MVP", () => {
   it("reports page count and geometry changes in semantic diffs", async () => {
     const before = await render({ title: "Before", slides: [{ title: "Slide", body: "Alpha" }] }, { target: "pptx" });
     const inspected = await inspect({ data: before.bytes, format: "pptx" });
+    const titleShape = inspected.objectMap.find((entry) => entry.text === "Slide");
     const shapeId = inspected.objectMap.find((entry) => entry.text === "Alpha")?.stableObjectId;
     const after = await edit(
       { data: before.bytes, format: "pptx" },
       [{ op: "pptx.setBounds", selector: { stableObjectId: shapeId }, bounds: { x: 120, y: 180, width: 300, height: 80 } }]
     );
+    const afterInspect = await inspect({ data: after.bytes, format: "pptx" });
     const diff = await diffDocuments({ data: before.bytes, format: "pptx" }, { data: after.bytes, format: "pptx" });
 
+    expect(afterInspect.objectMap.find((entry) => entry.stableObjectId === titleShape?.stableObjectId)?.bounds).toEqual(titleShape?.bounds);
     expect(diff.changed).toBe(true);
     expect(diff.summary.beforePages).toBe(1);
     expect(diff.summary.afterPages).toBe(1);
-    expect(diff.summary.changedGeometryObjects).toBeGreaterThan(0);
+    expect(diff.summary.changedGeometryObjects).toBe(1);
+    expect(diff.semantic.changedGeometry[0]?.stableObjectId).toBe(shapeId);
     expect(diff.semantic.changedGeometry[0]?.afterBbox?.[0]).toBe(120);
+  });
+
+  it("detects layout-style bounds edits when the active transform is not the first a:off in the block", async () => {
+    const zip = new JSZip();
+    zip.file(
+      "ppt/slides/slide1.xml",
+      [
+        "<p:sld><p:cSld>",
+        '<p:sp><p:nvSpPr><p:cNvPr id="2" name="Body"/></p:nvSpPr>',
+        '<p:spPr><a:xfrm><a:off x="9144000" y="9144000"/><a:ext cx="914400" cy="457200"/></a:xfrm></p:spPr>',
+        "<p:txBody><a:p><a:r><a:t>Alpha</a:t></a:r></a:p></p:txBody></p:sp>",
+        '<p:sp><p:nvSpPr><p:cNvPr id="3" name="Title"/></p:nvSpPr>',
+        '<p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="457200"/></a:xfrm></p:spPr>',
+        '<p:xfrm><a:off x="952500" y="476250"/><a:ext cx="7772400" cy="723900"/></p:xfrm>',
+        "<p:txBody><a:p><a:r><a:t>Slide</a:t></a:r></a:p></p:txBody></p:sp>",
+        "</p:cSld></p:sld>"
+      ].join("")
+    );
+    const bytes = await zip.generateAsync({ type: "uint8array" });
+    const inspected = await inspect({ data: bytes, format: "pptx" });
+    const titleId = inspected.objectMap.find((entry) => entry.text === "Slide")?.stableObjectId;
+    expect(inspected.objectMap.find((entry) => entry.stableObjectId === titleId)?.bbox?.[0]).toBe(100);
+    const after = await edit(
+      { data: bytes, format: "pptx" },
+      [{ op: "pptx.setBounds", selector: { stableObjectId: titleId }, bounds: { x: 40, y: 50, width: 320, height: 90 } }]
+    );
+    const diff = await diffDocuments({ data: bytes, format: "pptx" }, { data: after.bytes, format: "pptx" });
+
+    expect(diff.changed).toBe(true);
+    expect(diff.summary.changedGeometryObjects).toBe(1);
+    expect(diff.semantic.changedGeometry[0]?.stableObjectId).toBe(titleId);
+    expect(diff.semantic.changedGeometry[0]?.afterBbox?.[0]).toBe(40);
+  });
+
+  it("detects geometry when bounds appear after pptx.setBounds on a shape without a transform", async () => {
+    const zip = new JSZip();
+    zip.file(
+      "ppt/slides/slide1.xml",
+      [
+        "<p:sld><p:cSld>",
+        '<p:sp><p:nvSpPr><p:cNvPr id="2" name="Body"/></p:nvSpPr>',
+        "<p:txBody><a:p><a:r><a:t>Alpha</a:t></a:r></a:p></p:txBody></p:sp>",
+        "</p:cSld></p:sld>"
+      ].join("")
+    );
+    const bytes = await zip.generateAsync({ type: "uint8array" });
+    const inspected = await inspect({ data: bytes, format: "pptx" });
+    const shapeId = inspected.objectMap.find((entry) => entry.text === "Alpha")?.stableObjectId;
+    expect(inspected.objectMap.find((entry) => entry.stableObjectId === shapeId)?.bounds).toBeUndefined();
+    const after = await edit(
+      { data: bytes, format: "pptx" },
+      [{ op: "pptx.setBounds", selector: { stableObjectId: shapeId }, bounds: { x: 24, y: 36, width: 280, height: 72 } }]
+    );
+    const diff = await diffDocuments({ data: bytes, format: "pptx" }, { data: after.bytes, format: "pptx" });
+
+    expect(diff.changed).toBe(true);
+    expect(diff.summary.changedGeometryObjects).toBe(1);
+    expect(diff.semantic.changedGeometry[0]?.stableObjectId).toBe(shapeId);
+    expect(diff.semantic.changedGeometry[0]?.beforeBbox).toBeUndefined();
+    expect(diff.semantic.changedGeometry[0]?.afterBbox?.[0]).toBe(24);
   });
 
   it("does not treat different PDF drawing content as a zero visual diff", async () => {

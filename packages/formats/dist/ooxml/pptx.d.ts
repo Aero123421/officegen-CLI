@@ -92,4 +92,8 @@ export declare function addTextBox(zip: JSZip, slideNumber: number, spec: {
     bold?: boolean;
 }): Promise<void>;
 export declare function reorderSlides(zip: JSZip, order: number[]): Promise<void>;
+/** Matches the transform block that {@link applyBoundsToPptxBlock} updates. */
+export declare function readPptxBlockTransformContent(block: string): string | undefined;
+/** Writes bounds to the same transform surface that {@link extractBounds} reads. */
+export declare function applyBoundsToPptxBlock(block: string, bounds: ObjectBounds): string;
 export {};

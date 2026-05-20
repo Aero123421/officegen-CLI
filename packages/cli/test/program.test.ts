@@ -9,6 +9,7 @@ import { runCli } from "../src/program.js";
 import { evaluateNodeRuntime } from "../src/commands/payloads.js";
 import { makeEnvelope } from "../src/shared/envelope.js";
 import { createRuntimeContext } from "../src/shared/context.js";
+import { withJsonStdoutDiagnosticsRedirect } from "../src/shared/diagnostics.js";
 
 interface Captured {
   stdout: string[];
@@ -68,11 +69,24 @@ async function minimalPptxWithImage(includeImage: boolean): Promise<Uint8Array> 
   return zip.generateAsync({ type: "uint8array" });
 }
 
-async function minimalDocx(text: string): Promise<Uint8Array> {
+async function minimalDocx(text: string, options: { styles?: boolean } = {}): Promise<Uint8Array> {
   const zip = new JSZip();
-  zip.file("[Content_Types].xml", "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/word/document.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml\"/></Types>");
+  zip.file("[Content_Types].xml", `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>${options.styles ? "<Override PartName=\"/word/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml\"/>" : ""}</Types>`);
   zip.file("_rels/.rels", "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"word/document.xml\"/></Relationships>");
   zip.file("word/document.xml", `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>${text}</w:t></w:r></w:p></w:body></w:document>`);
+  if (options.styles) {
+    zip.file("word/styles.xml", "<w:styles xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:style w:type=\"paragraph\" w:styleId=\"Normal\"><w:name w:val=\"Normal\"/></w:style></w:styles>");
+  }
+  return zip.generateAsync({ type: "uint8array" });
+}
+
+async function minimalXlsx(): Promise<Uint8Array> {
+  const zip = new JSZip();
+  zip.file("[Content_Types].xml", "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/><Override PartName=\"/xl/worksheets/sheet1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/></Types>");
+  zip.file("_rels/.rels", "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/></Relationships>");
+  zip.file("xl/workbook.xml", "<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheets><sheet name=\"Sheet1\" sheetId=\"1\" r:id=\"rId1\"/></sheets></workbook>");
+  zip.file("xl/_rels/workbook.xml.rels", "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet1.xml\"/></Relationships>");
+  zip.file("xl/worksheets/sheet1.xml", "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData><row r=\"1\"><c r=\"A1\" t=\"inlineStr\"><is><t>Hello</t></is></c></row></sheetData></worksheet>");
   return zip.generateAsync({ type: "uint8array" });
 }
 
@@ -81,6 +95,18 @@ afterEach(() => {
 });
 
 describe("officegen CLI command surface", () => {
+  it("redirects incidental stdout diagnostics while JSON output is active", async () => {
+    const stderr: string[] = [];
+    const result = await withJsonStdoutDiagnosticsRedirect({ json: true }, (text) => stderr.push(text), async () => {
+      console.log("font parser warning");
+      process.stdout.write("raw font warning\n");
+      return "ok";
+    });
+
+    expect(result).toBe("ok");
+    expect(stderr).toEqual(["font parser warning", "raw font warning"]);
+  });
+
   it("wraps capabilities --agent --json in the v1.2 envelope and exposes authoring commands", async () => {
     const captured = await run(["capabilities", "--agent", "--json", "--json-budget-bytes", "80000"]);
     const envelope = parseEnvelope(captured);
@@ -238,6 +264,69 @@ describe("officegen CLI command surface", () => {
     expect(budgetOnly.mutationStatus).toBe("not_applicable");
     expect(budgetOnly.objectiveOk).toBe(false);
     expect(budgetOnly.artifactStatus).toBe("not_expected");
+  });
+
+  it("propagates design apply changedParts as envelope mutationStatus changed", async () => {
+    const context = await createRuntimeContext(
+      ["node", "officegen", "design", "apply", "--name", "brand", "--out", "styled.pptx", "--json"],
+      process.cwd(),
+      {}
+    );
+    const envelope = makeEnvelope(context, "design apply", {
+      kind: "officegen.design.apply",
+      planOnly: false,
+      mutatesOffice: true,
+      out: "styled.pptx",
+      strategy: "theme-only",
+      changedParts: ["ppt/theme/theme1.xml"],
+      visualEffect: "theme-token-change",
+      artifacts: [{ path: "styled.pptx", exists: true, kind: "output" }]
+    }, new Date("2026-05-09T00:00:00.000Z"));
+
+    expect(envelope.ok).toBe(true);
+    expect(envelope.mutationStatus).toBe("changed");
+    expect(envelope.objectiveOk).toBe(true);
+    expect(envelope.artifactStatus).toBe("complete");
+  });
+
+  it("propagates design apply changedParts without visualEffect metadata", async () => {
+    const context = await createRuntimeContext(
+      ["node", "officegen", "design", "apply", "--name", "brand", "--out", "styled.pptx", "--json"],
+      process.cwd(),
+      {}
+    );
+    const envelope = makeEnvelope(context, "design apply", {
+      kind: "officegen.design.apply",
+      planOnly: false,
+      mutatesOffice: true,
+      out: "styled.pptx",
+      changedParts: ["ppt/theme/theme1.xml"]
+    }, new Date("2026-05-09T00:00:00.000Z"));
+
+    expect(envelope.ok).toBe(true);
+    expect(envelope.mutationStatus).toBe("changed");
+    expect(envelope.objectiveOk).toBe(true);
+  });
+
+  it("reports design apply with no changed parts as mutationStatus noop", async () => {
+    const context = await createRuntimeContext(
+      ["node", "officegen", "design", "apply", "--name", "brand", "--out", "styled.pptx", "--json"],
+      process.cwd(),
+      {}
+    );
+    const envelope = makeEnvelope(context, "design apply", {
+      kind: "officegen.design.apply",
+      planOnly: false,
+      mutatesOffice: true,
+      out: "styled.pptx",
+      changedParts: [],
+      visualEffect: "none",
+      artifacts: [{ path: "styled.pptx", exists: true, kind: "output" }]
+    }, new Date("2026-05-09T00:00:00.000Z"));
+
+    expect(envelope.ok).toBe(true);
+    expect(envelope.mutationStatus).toBe("noop");
+    expect(envelope.objectiveOk).toBe(true);
   });
 
   it("treats rolled-back nested editResult evidence as a failed mutation", async () => {
@@ -1151,6 +1240,61 @@ describe("officegen CLI command surface", () => {
       pagination: { totalNodes: envelope.result.objectMap.length }
     });
     expect(validateSchema("officegen.objectGraph@2", envelope.result.objectGraph).ok).toBe(true);
+  });
+
+  it("marks unavailable inspect fields instead of silently omitting them", async () => {
+    const cwd = await tempWorkspace();
+    await writeFile(path.join(cwd, "deck.pptx"), await minimalPptxWithImage(false));
+
+    const captured = await run(["inspect", "deck.pptx", "--fields", "schema,trusted,styleInventory,objectMap", "--json", "--json-budget-bytes", "80000"], cwd);
+    const envelope = parseEnvelope(captured);
+
+    expect(envelope.ok).toBe(true);
+    expect(envelope.result.trusted).toBeDefined();
+    expect(envelope.result.objectMap.length).toBeGreaterThan(0);
+    expect(envelope.result.styleInventory).toBeNull();
+    expect(envelope.result.unavailableFields).toEqual(["styleInventory"]);
+    expect(envelope.result.diagnostics).toContainEqual(expect.objectContaining({
+      code: "FIELD_NOT_AVAILABLE",
+      severity: "warning",
+      field: "styleInventory"
+    }));
+    expect(envelope.diagnostics).toContainEqual(expect.objectContaining({
+      code: "FIELD_NOT_AVAILABLE",
+      field: "styleInventory"
+    }));
+  });
+
+  it("returns styleInventory for DOCX inputs that include styles.xml", async () => {
+    const cwd = await tempWorkspace();
+    await writeFile(path.join(cwd, "styled.docx"), await minimalDocx("Hello", { styles: true }));
+
+    const captured = await run(["inspect", "styled.docx", "--fields", "schema,styleInventory", "--json"], cwd);
+    const envelope = parseEnvelope(captured);
+
+    expect(envelope.ok).toBe(true);
+    expect(envelope.result.styleInventory).toMatchObject({
+      sourcePath: "word/styles.xml",
+      styleCount: 1,
+      styles: ["Normal"]
+    });
+    expect(envelope.result.unavailableFields).toBeUndefined();
+  });
+
+  it("keeps verify --visual --json stdout parseable for DOCX and XLSX", async () => {
+    const cwd = await tempWorkspace();
+    await writeFile(path.join(cwd, "doc.docx"), await minimalDocx("Hello"));
+    await writeFile(path.join(cwd, "book.xlsx"), await minimalXlsx());
+
+    for (const input of ["doc.docx", "book.xlsx"]) {
+      const captured = await run(["verify", input, "--visual", "--json"], cwd);
+      expect(captured.stdout).toHaveLength(1);
+      expect(() => JSON.parse(captured.stdout[0])).not.toThrow();
+      const envelope = parseEnvelope(captured);
+      expect(envelope.schema).toBe("officegen.envelope@1.2");
+      expect(envelope.result.schema).toBe("officegen.verify.result@1.2");
+      if (captured.stderr.length > 0) expect(captured.stdout[0]).not.toContain(captured.stderr[0]);
+    }
   });
 
   it("emits objectGraph directly and lets --no-object-map omit only legacy objectMap", async () => {

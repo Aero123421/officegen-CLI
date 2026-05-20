@@ -141,6 +141,7 @@ async function inspectDocx(input, options) {
     const macros = paths.filter((path) => /vbaProject\.bin$/i.test(path));
     const summaryDepth = options.depth === "summary";
     const structureMap = options.structure ? await inspectDocxStructure(zip, paths) : undefined;
+    const styleInventory = await inspectDocxStyleInventory(zip);
     const fullObjectMap = [...objectMap, ...docxStructureObjectMap(structureMap)];
     return withObjectGraph({
         schema: "officegen.inspect.result@1.2",
@@ -175,6 +176,7 @@ async function inspectDocx(input, options) {
             ...(options.depth === "full" || options.include?.includes("rawPaths") ? { rawPaths: paths } : {})
         },
         objectMap: summaryDepth ? compactObjectMap(fullObjectMap, 35) : fullObjectMap,
+        ...(styleInventory ? { styleInventory } : {}),
         agentInstruction: AGENT_UNTRUSTED_INSTRUCTION
     }, fullObjectMap, input, options, riskFlagsFromMacros(macros, "DOCX_MACROS_PRESENT"));
 }
@@ -602,6 +604,21 @@ async function inspectDocxStructure(zip, paths) {
         fillablePlaceholders: [...documentXml.matchAll(/\{\{\s*([^}]+)\s*\}\}/g)].slice(0, 40).map((match) => ({ field: match[1], untrusted: true })),
         styles: [...stylesXml.matchAll(/<w:style\b[^>]*\bw:styleId="([^"]+)"/g)].slice(0, 80).map((match) => match[1])
     };
+}
+async function inspectDocxStyleInventory(zip) {
+    const stylesXml = await readZipText(zip, "word/styles.xml");
+    if (!stylesXml)
+        return undefined;
+    const styles = [...stylesXml.matchAll(/<w:style\b([^>]*)>([\s\S]*?)<\/w:style>/g)]
+        .map((match) => {
+        const attrs = match[1] ?? "";
+        const body = match[2] ?? "";
+        const styleId = /\bw:styleId="([^"]+)"/.exec(attrs)?.[1];
+        const styleName = /<w:name\b[^>]*\bw:val="([^"]+)"/.exec(body)?.[1];
+        return decodeXmlAttr(styleName ?? styleId ?? "");
+    })
+        .filter(Boolean);
+    return { sourcePath: "word/styles.xml", styleCount: styles.length, styles: styles.slice(0, 80) };
 }
 function inferSheetRole(index, xml) {
     if ((xml.match(/<f\b/g) ?? []).length > 20)

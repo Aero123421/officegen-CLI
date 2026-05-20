@@ -17,7 +17,7 @@ import {
 import { inspect } from "./inspect.js";
 import { commentXml, insertParagraphAfter, insertedParagraphXml, replaceOrCreateHeaderFooter, setParagraphText } from "./ooxml/docx.js";
 import { embedPdfFonts } from "./pdfFonts.js";
-import { addBlankSlide, addTextBox, duplicateSlide, extractShapes, getSlidePaths, reorderSlides, replaceShapeBulletItems } from "./ooxml/pptx.js";
+import { addBlankSlide, addTextBox, applyBoundsToPptxBlock, duplicateSlide, extractShapes, getSlidePaths, reorderSlides, replaceShapeBulletItems } from "./ooxml/pptx.js";
 import { appendRows, insertRows, setCell, sheetPath } from "./ooxml/xlsx.js";
 import { escapeXmlText, pxToEmu, replaceAllXmlText, setFirstTextInBlock, xmlAttr } from "./ooxml/xml.js";
 import { nextRelationshipId } from "./ooxml/relationships.js";
@@ -1226,7 +1226,7 @@ async function editPptxSetAltText(
   const target = singleMatch(objectMap, operation.selector);
   if (!target.sourcePath || !["shape", "picture", "chart"].includes(target.kind)) throw new Error("SELECTOR_NOT_FOUND: selected object cannot receive alt text.");
   const xml = (await readZipText(zip, target.sourcePath)) ?? "";
-  const next = replacePptxObjectBlock(xml, target.kind, String(target.selectorHints?.shapeId ?? ""), (block) =>
+  const next = replacePptxObjectBlock(xml, target.kind, String(target.selectorHints?.shapeId ?? ""), Number(target.selectorHints?.shapeIndex ?? stableOrdinal(target.stableObjectId)), (block) =>
     block.replace(/<p:cNvPr\b([^>]*)\/>/, (_match, attrs: string) => {
       let nextAttrs = attrs;
       if (operation.title !== undefined) nextAttrs = upsertXmlAttr(nextAttrs, "title", operation.title);
@@ -1344,7 +1344,14 @@ async function setPptxTargetBounds(
   }
   const xml = (await readZipText(zip, target.sourcePath)) ?? "";
   const shapeId = String(target.selectorHints?.shapeId ?? "");
-  const next = replacePptxObjectBlock(xml, target.kind, shapeId, (block) => setBlockBounds(block, bounds));
+  const ordinal = Number(
+    target.kind === "picture"
+      ? target.selectorHints?.pictureIndex
+      : target.kind === "chart"
+        ? target.selectorHints?.chartIndex
+        : target.selectorHints?.shapeIndex ?? stableOrdinal(target.stableObjectId)
+  );
+  const next = replacePptxObjectBlock(xml, target.kind, shapeId, ordinal, (block) => applyBoundsToPptxBlock(block, bounds));
   if (next !== xml) zip.file(target.sourcePath, next);
   return next !== xml;
 }
@@ -1712,7 +1719,7 @@ function updatePictureCrop(
   });
 }
 
-function replacePptxObjectBlock(xml: string, kind: string, shapeId: string, updater: (block: string) => string): string {
+function replacePptxObjectBlock(xml: string, kind: string, shapeId: string, ordinal: number, updater: (block: string) => string): string {
   const pattern = kind === "picture"
     ? /<p:pic\b[\s\S]*?<\/p:pic>/g
     : kind === "chart"
@@ -1723,7 +1730,9 @@ function replacePptxObjectBlock(xml: string, kind: string, shapeId: string, upda
     index += 1;
     const cNvPr = /<p:cNvPr\b([^>]*)\/>/.exec(block)?.[1] ?? "";
     const candidateId = /\bid="([^"]+)"/.exec(cNvPr)?.[1];
-    if ((shapeId && candidateId !== shapeId) || (!shapeId && index !== 1)) return block;
+    if (shapeId && candidateId !== shapeId) return block;
+    if (!shapeId && Number.isFinite(ordinal) && index !== ordinal) return block;
+    if (!shapeId && !Number.isFinite(ordinal) && index !== 1) return block;
     return updater(block);
   });
 }
@@ -1940,21 +1949,6 @@ function notesSlideXml(text: string): string {
 
 function extractNotesText(xml: string): string {
   return [...xml.matchAll(/<a:t\b[^>]*>([\s\S]*?)<\/a:t>/g)].map((match) => match[1] ?? "").join("\n");
-}
-
-function setBlockBounds(block: string, bounds: { x: number; y: number; width: number; height: number }): string {
-  const off = `<a:off x="${pxToEmu(bounds.x)}" y="${pxToEmu(bounds.y)}"/>`;
-  const ext = `<a:ext cx="${pxToEmu(bounds.width)}" cy="${pxToEmu(bounds.height)}"/>`;
-  if (/<p:xfrm\b[\s\S]*?<\/p:xfrm>/.test(block)) {
-    return block.replace(/<p:xfrm\b([^>]*)>[\s\S]*?<\/p:xfrm>/, `<p:xfrm$1>${off}${ext}</p:xfrm>`);
-  }
-  if (/<a:xfrm\b[\s\S]*?<\/a:xfrm>/.test(block)) {
-    return block.replace(/<a:xfrm\b([^>]*)>[\s\S]*?<\/a:xfrm>/, `<a:xfrm$1>${off}${ext}</a:xfrm>`);
-  }
-  if (/<p:graphicFrame\b/.test(block)) {
-    return block.replace(/(<p:nvGraphicFramePr\b[\s\S]*?<\/p:nvGraphicFramePr>)/, `$1<p:xfrm>${off}${ext}</p:xfrm>`);
-  }
-  return block.replace(/(<p:spPr\b[^>]*>)/, `$1<a:xfrm>${off}${ext}</a:xfrm>`);
 }
 
 function cropForFit(target: ObjectMapEntry, replacement: Uint8Array, mediaType: string, fit: "contain" | "cover" | "stretch" | undefined): CropRect | undefined {

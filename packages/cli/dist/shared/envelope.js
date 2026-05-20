@@ -412,6 +412,21 @@ function isStatusOnlyMutationResult(record) {
     const schema = typeof record.schema === "string" ? record.schema : "";
     return schema === "officegen.progressive-disclosure@1.2" || record.truncated === true || record.status === "truncated";
 }
+function wrapperMutationChanged(record) {
+    if (record.mutatesOffice !== true)
+        return false;
+    if (extractArrayField(record, "changedParts").length > 0)
+        return true;
+    const visualEffect = String(record.visualEffect ?? "");
+    return visualEffect !== "" && visualEffect !== "none";
+}
+function wrapperMutationNoop(record) {
+    if (record.mutatesOffice !== true)
+        return false;
+    if (wrapperMutationChanged(record))
+        return false;
+    return record.changedParts !== undefined || record.visualEffect !== undefined;
+}
 function mutationStatusFor(command, record, dryRun) {
     if (dryRun || record.planOnly === true)
         return "plan_only";
@@ -424,7 +439,11 @@ function mutationStatusFor(command, record, dryRun) {
         return "failed";
     if (evidence.changed === true || Number(evidence.applied ?? 0) > 0 || editHasAppliedOperation(evidence))
         return "changed";
+    if (wrapperMutationChanged(record))
+        return "changed";
     if (evidence.changed === false || (evidence.applied !== undefined && Number(evidence.applied) === 0))
+        return "noop";
+    if (wrapperMutationNoop(record))
         return "noop";
     return "not_applicable";
 }

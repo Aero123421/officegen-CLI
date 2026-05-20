@@ -1,6 +1,7 @@
 import { Command } from "commander";
 import { OFFICEGEN_CLI_VERSION } from "@officegen/core";
 import { commandFromArgv, positionalArgs } from "../shared/argv.js";
+import { withJsonStdoutDiagnosticsRedirect } from "../shared/diagnostics.js";
 import { makeEnvelope, writeResult } from "../shared/envelope.js";
 import { COMMAND_METADATA, acceptedOptionSpecsFor, effectiveOptionSpecsFor, metadataFor, optionSyntax, type OptionSpec } from "../shared/metadata.js";
 import { type FeatureKey, type RuntimeContext } from "../shared/types.js";
@@ -98,7 +99,7 @@ const groupPayloads: Partial<Record<FeatureKey, GroupPayload>> = {
 export function createProgram(
   context: RuntimeContext,
   stdout: (text: string) => void,
-  _stderr: (text: string) => void,
+  stderr: (text: string) => void,
   now: Date
 ): Command {
   const program = new Command();
@@ -125,11 +126,11 @@ export function createProgram(
     if (entry.feature === "config" || entry.feature === "schema" || entry.feature === "errors") continue;
     const leaf = leafPayloads[entry.feature];
     if (leaf) {
-      registerLeaf(program, entry.feature, context, stdout, now, leaf);
+      registerLeaf(program, entry.feature, context, stdout, stderr, now, leaf);
       continue;
     }
     const group = groupPayloads[entry.feature] ?? groupPayload;
-    registerGroup(program, entry.feature, context, stdout, now, group);
+    registerGroup(program, entry.feature, context, stdout, stderr, now, group);
   }
 
   return program;
@@ -383,6 +384,7 @@ function registerLeaf(
   feature: FeatureKey,
   context: RuntimeContext,
   stdout: (text: string) => void,
+  stderr: (text: string) => void,
   now: Date,
   payloadFactory: LeafPayload
 ): void {
@@ -394,7 +396,7 @@ function registerLeaf(
         writeNativeHelp(context, stdout);
         return;
       }
-      const payload = await payloadFactory(context);
+      const payload = await withJsonStdoutDiagnosticsRedirect(context, stderr, () => Promise.resolve(payloadFactory(context)));
       writeResult(context, makeEnvelope(context, commandFromArgv(context.argv), payload, now), stdout);
     })
   );
@@ -405,6 +407,7 @@ function registerGroup(
   feature: FeatureKey,
   context: RuntimeContext,
   stdout: (text: string) => void,
+  stderr: (text: string) => void,
   now: Date,
   payloadFactory: GroupPayload
 ): void {
@@ -412,14 +415,14 @@ function registerGroup(
   if (!metadata || !isCommandVisibleInNativeHelp(context, feature)) return;
   const subcommands = metadata.commands.map((command) => command.split(" ")[1]).filter((value): value is string => Boolean(value));
   const group = baseCommand(metadata.commandGroup, metadata.description, metadata.commandGroup).action(async () => {
-    const payload = await payloadFactory(context);
+    const payload = await withJsonStdoutDiagnosticsRedirect(context, stderr, () => Promise.resolve(payloadFactory(context)));
     writeResult(context, makeEnvelope(context, commandFromArgv(context.argv), payload, now), stdout);
   });
 
   for (const subcommand of subcommands) {
     group.addCommand(
       baseCommand(subcommand, `${metadata.commandGroup} ${subcommand}`, metadata.commandGroup, subcommand).action(async () => {
-        const payload = await payloadFactory(context, subcommand);
+        const payload = await withJsonStdoutDiagnosticsRedirect(context, stderr, () => Promise.resolve(payloadFactory(context, subcommand)));
         writeResult(context, makeEnvelope(context, commandFromArgv(context.argv), payload, now), stdout);
       })
     );

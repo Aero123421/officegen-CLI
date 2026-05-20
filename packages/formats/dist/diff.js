@@ -80,22 +80,33 @@ function semanticDiff(before, after) {
         const afterEntry = afterMap.get(stableObjectId);
         const beforeBbox = normalizedBbox(beforeEntry);
         const afterBbox = afterEntry ? normalizedBbox(afterEntry) : undefined;
-        if (!afterEntry || !beforeBbox || !afterBbox || bboxEqual(beforeBbox, afterBbox))
+        if (!afterEntry)
+            return undefined;
+        if (!beforeBbox && !afterBbox)
+            return undefined;
+        if (beforeBbox && afterBbox && bboxEqual(beforeBbox, afterBbox))
             return undefined;
         return {
             stableObjectId,
             kind: beforeEntry.kind,
             beforeBbox,
             afterBbox,
-            delta: {
-                x: Number((afterBbox[0] - beforeBbox[0]).toFixed(2)),
-                y: Number((afterBbox[1] - beforeBbox[1]).toFixed(2)),
-                width: Number((afterBbox[2] - beforeBbox[2]).toFixed(2)),
-                height: Number((afterBbox[3] - beforeBbox[3]).toFixed(2))
-            }
+            delta: geometryDelta(beforeBbox, afterBbox)
         };
     })
         .filter((entry) => Boolean(entry));
+    for (const afterEntry of added) {
+        const afterBbox = normalizedBbox(afterEntry);
+        if (!afterBbox)
+            continue;
+        changedGeometry.push({
+            stableObjectId: afterEntry.stableObjectId,
+            kind: afterEntry.kind,
+            beforeBbox: undefined,
+            afterBbox,
+            delta: geometryDelta(undefined, afterBbox)
+        });
+    }
     const changedSemantic = [...beforeMap.entries()]
         .map(([stableObjectId, beforeEntry]) => {
         const afterEntry = afterMap.get(stableObjectId);
@@ -233,6 +244,14 @@ function normalizedBbox(entry) {
 }
 function bboxEqual(left, right) {
     return left.every((value, index) => Math.abs(value - (right[index] ?? 0)) < 0.01);
+}
+function geometryDelta(beforeBbox, afterBbox) {
+    return {
+        x: Number(((afterBbox?.[0] ?? 0) - (beforeBbox?.[0] ?? 0)).toFixed(2)),
+        y: Number(((afterBbox?.[1] ?? 0) - (beforeBbox?.[1] ?? 0)).toFixed(2)),
+        width: Number(((afterBbox?.[2] ?? 0) - (beforeBbox?.[2] ?? 0)).toFixed(2)),
+        height: Number(((afterBbox?.[3] ?? 0) - (beforeBbox?.[3] ?? 0)).toFixed(2))
+    };
 }
 function pageLikeCount(inspected) {
     const summary = inspected.trusted.summary;

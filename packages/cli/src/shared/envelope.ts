@@ -443,6 +443,19 @@ function isStatusOnlyMutationResult(record: Record<string, unknown>): boolean {
   return schema === "officegen.progressive-disclosure@1.2" || record.truncated === true || record.status === "truncated";
 }
 
+function wrapperMutationChanged(record: Record<string, unknown>): boolean {
+  if (record.mutatesOffice !== true) return false;
+  if (extractArrayField(record, "changedParts").length > 0) return true;
+  const visualEffect = String(record.visualEffect ?? "");
+  return visualEffect !== "" && visualEffect !== "none";
+}
+
+function wrapperMutationNoop(record: Record<string, unknown>): boolean {
+  if (record.mutatesOffice !== true) return false;
+  if (wrapperMutationChanged(record)) return false;
+  return record.changedParts !== undefined || record.visualEffect !== undefined;
+}
+
 function mutationStatusFor(command: string, record: Record<string, unknown>, dryRun: boolean): NonNullable<Envelope["mutationStatus"]> {
   if (dryRun || record.planOnly === true) return "plan_only";
   if (!isMutationCommand(command)) return "not_applicable";
@@ -450,7 +463,9 @@ function mutationStatusFor(command: string, record: Record<string, unknown>, dry
   const evidence = mutationEvidenceRecord(record);
   if (evidence.rolledBack === true || editRequiredFailures(evidence).length) return "failed";
   if (evidence.changed === true || Number(evidence.applied ?? 0) > 0 || editHasAppliedOperation(evidence)) return "changed";
+  if (wrapperMutationChanged(record)) return "changed";
   if (evidence.changed === false || (evidence.applied !== undefined && Number(evidence.applied) === 0)) return "noop";
+  if (wrapperMutationNoop(record)) return "noop";
   return "not_applicable";
 }
 
