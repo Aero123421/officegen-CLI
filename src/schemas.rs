@@ -5,9 +5,11 @@ use std::fmt;
 const ENVELOPE_SCHEMA_JSON: &str = include_str!("../schemas/envelope-1.2.schema.json");
 const CAPABILITIES_SCHEMA_JSON: &str = include_str!("../schemas/capabilities-1.2.schema.json");
 const IR_DOCUMENT_SCHEMA_JSON: &str = include_str!("../schemas/ir-document-1.2.schema.json");
+const IR_DOCUMENT_V2_SCHEMA_JSON: &str = include_str!("../schemas/ir-document-2.0.schema.json");
 const EDIT_OPS_SCHEMA_JSON: &str = include_str!("../schemas/edit-ops-1.2.schema.json");
 const MANIFEST_SCHEMA_JSON: &str = include_str!("../schemas/manifest-1.2.schema.json");
 const WORKFLOW_SCHEMA_JSON: &str = include_str!("../schemas/workflow-1.2.schema.json");
+const WORKFLOW_V2_SCHEMA_JSON: &str = include_str!("../schemas/workflow-2.0.schema.json");
 const ERROR_CATALOG_SCHEMA_JSON: &str = include_str!("../schemas/error-catalog-1.2.schema.json");
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -66,9 +68,21 @@ const RAW_SCHEMAS: &[RawSchema] = &[
     },
     RawSchema {
         id: "officegen.ir.document@1.2",
-        aliases: &["ir.document", "document", "document@1.2", "ir-document"],
+        aliases: &["document@1.2", "ir-document@1.2"],
         path: "schemas/ir-document-1.2.schema.json",
         json: IR_DOCUMENT_SCHEMA_JSON,
+    },
+    RawSchema {
+        id: "officegen.ir.document@2.0",
+        aliases: &[
+            "ir.document",
+            "document",
+            "document@2.0",
+            "ir-document",
+            "ir-document@2.0",
+        ],
+        path: "schemas/ir-document-2.0.schema.json",
+        json: IR_DOCUMENT_V2_SCHEMA_JSON,
     },
     RawSchema {
         id: "officegen.edit.ops@1.2",
@@ -84,9 +98,15 @@ const RAW_SCHEMAS: &[RawSchema] = &[
     },
     RawSchema {
         id: "officegen.workflow@1.2",
-        aliases: &["workflow", "workflow@1.2"],
+        aliases: &["workflow@1.2"],
         path: "schemas/workflow-1.2.schema.json",
         json: WORKFLOW_SCHEMA_JSON,
+    },
+    RawSchema {
+        id: "officegen.workflow@2.0",
+        aliases: &["workflow", "workflow@2.0"],
+        path: "schemas/workflow-2.0.schema.json",
+        json: WORKFLOW_V2_SCHEMA_JSON,
     },
     RawSchema {
         id: "officegen.error.catalog@1.2",
@@ -109,14 +129,7 @@ pub fn list_schemas() -> Vec<SchemaCatalogEntry> {
 
 #[allow(dead_code)]
 pub fn resolve_alias(id_or_alias: &str) -> Option<&'static str> {
-    let requested = id_or_alias.trim();
-    RAW_SCHEMAS.iter().find_map(|schema| {
-        if matches_schema_name(schema, requested) {
-            Some(schema.id)
-        } else {
-            None
-        }
-    })
+    raw_schema(id_or_alias).map(|schema| schema.id)
 }
 
 #[allow(dead_code)]
@@ -186,15 +199,19 @@ pub fn validate_minimal_required_fields(id_or_alias: &str, value: &Value) -> Val
 
 fn raw_schema(id_or_alias: &str) -> Option<&'static RawSchema> {
     let requested = id_or_alias.trim();
+    if let Some(schema) = RAW_SCHEMAS
+        .iter()
+        .find(|schema| schema.id == requested || schema.aliases.contains(&requested))
+    {
+        return Some(schema);
+    }
     RAW_SCHEMAS
         .iter()
+        .rev()
         .find(|schema| matches_schema_name(schema, requested))
 }
 
 fn matches_schema_name(schema: &RawSchema, requested: &str) -> bool {
-    if schema.id == requested || schema.aliases.contains(&requested) {
-        return true;
-    }
     let id_without_version = schema.id.split('@').next().unwrap_or(schema.id);
     let short_id = id_without_version
         .strip_prefix("officegen.")

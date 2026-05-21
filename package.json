@@ -1,6 +1,6 @@
 {
   "name": "officegen",
-  "version": "4.5.0",
+  "version": "5.0.0",
   "private": false,
   "description": "Officegen CLI",
   "license": "MIT",
@@ -18,6 +18,8 @@
     "native:smoke": "node scripts/native-release-smoke.mjs",
     "native:assets:check": "node scripts/check-native-release-assets.mjs",
     "installer:smoke": "node scripts/installer-smoke.mjs",
+    "v5:acceptance": "node scripts/v5-acceptance.mjs",
+    "release:gate": "npm run version:check && npm run installer:smoke && cargo fmt --check && cargo test --locked && cargo build --release --locked && npm run v5:acceptance -- --expected-version 5.0.0 && npm run native:smoke -- --expected-version 5.0.0 && npm run typecheck && npm test && npm run build && npm run pack:smoke",
     "pack:smoke": "node scripts/pack-smoke.mjs",
     "github-install:smoke": "node scripts/github-install-smoke.mjs",
     "github-install:head-smoke": "node scripts/github-install-smoke.mjs --head --expected-version current",

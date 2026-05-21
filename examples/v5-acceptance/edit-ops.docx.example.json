@@ -1,0 +1,12 @@
+{
+  "schema": "officegen.edit.ops@1.2",
+  "operations": [
+    {
+      "op": "docx.setText",
+      "selector": {
+        "contains": "Replace this acceptance text"
+      },
+      "text": "v5 acceptance edit applied"
+    }
+  ]
+}

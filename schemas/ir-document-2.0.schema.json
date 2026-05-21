@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "officegen.ir.document@2.0",
+  "type": "object",
+  "required": ["schema"],
+  "properties": {
+    "schema": { "const": "officegen.ir.document@2.0" },
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "author": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "title": { "type": "string" },
+    "theme": { "type": "object", "additionalProperties": true },
+    "targets": {
+      "type": "array",
+      "items": { "enum": ["pptx", "docx", "xlsx", "pdf"] }
+    },
+    "slides": { "type": "array" },
+    "sections": { "type": "array" },
+    "sheets": { "type": "array" },
+    "assets": { "type": "array" },
+    "data": { "type": "object" }
+  },
+  "additionalProperties": false
+}

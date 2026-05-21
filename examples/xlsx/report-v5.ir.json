@@ -1,0 +1,41 @@
+{
+  "schema": "officegen.ir.document@2.0",
+  "title": "Regional sales",
+  "targets": ["xlsx"],
+  "sheets": [
+    {
+      "name": "Summary",
+      "rows": [
+        ["Region", "Revenue"],
+        ["North", 120],
+        ["South", 180]
+      ],
+      "formulas": [
+        {
+          "cell": "B4",
+          "formula": "SUM(B2:B3)"
+        }
+      ],
+      "tables": [
+        {
+          "name": "RevenueTable",
+          "range": "A1:B3"
+        }
+      ],
+      "dataValidations": [
+        {
+          "range": "A2:A3",
+          "type": "list",
+          "formula1": "\"North,South\""
+        }
+      ],
+      "charts": [
+        {
+          "title": "Revenue by region",
+          "labels": ["North", "South"],
+          "values": [120, 180]
+        }
+      ]
+    }
+  ]
+}

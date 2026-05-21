@@ -19,9 +19,11 @@ fn lists_v45_catalog_in_stable_order() {
             "officegen.envelope@1.2",
             "officegen.capabilities@1.2",
             "officegen.ir.document@1.2",
+            "officegen.ir.document@2.0",
             "officegen.edit.ops@1.2",
             "officegen.manifest@1.2",
             "officegen.workflow@1.2",
+            "officegen.workflow@2.0",
             "officegen.error.catalog@1.2",
         ]
     );
@@ -32,16 +34,16 @@ fn fetch_resolves_aliases_and_embedded_schema_ids() {
     assert_eq!(resolve_alias("envelope"), Some("officegen.envelope@1.2"));
     assert_eq!(
         resolve_alias("officegen.ir.document"),
-        Some("officegen.ir.document@1.2")
+        Some("officegen.ir.document@2.0")
     );
     assert_eq!(resolve_alias("edit-ops"), Some("officegen.edit.ops@1.2"));
     assert_eq!(resolve_alias("errors"), Some("officegen.error.catalog@1.2"));
 
     let document = fetch_schema("workflow").unwrap();
 
-    assert_eq!(document.id, "officegen.workflow@1.2");
-    assert_eq!(document.path, "schemas/workflow-1.2.schema.json");
-    assert_eq!(document.schema["$id"], "officegen.workflow@1.2");
+    assert_eq!(document.id, "officegen.workflow@2.0");
+    assert_eq!(document.path, "schemas/workflow-2.0.schema.json");
+    assert_eq!(document.schema["$id"], "officegen.workflow@2.0");
     assert!(get_schema("missing").is_none());
 }
 
@@ -94,9 +96,17 @@ fn validates_minimal_required_fields_for_golden_payloads() {
             }),
         ),
         (
-            "document",
+            "officegen.ir.document@1.2",
             json!({
                 "schema": "officegen.ir.document@1.2",
+                "targets": ["docx"],
+                "sections": []
+            }),
+        ),
+        (
+            "document",
+            json!({
+                "schema": "officegen.ir.document@2.0",
                 "targets": ["docx"],
                 "sections": []
             }),
@@ -117,11 +127,19 @@ fn validates_minimal_required_fields_for_golden_payloads() {
             }),
         ),
         (
-            "workflow",
+            "officegen.workflow@1.2",
             json!({
                 "schema": "officegen.workflow@1.2",
                 "version": "1.0",
                 "steps": [{"id": "inspect"}]
+            }),
+        ),
+        (
+            "workflow",
+            json!({
+                "schema": "officegen.workflow@2.0",
+                "version": "2.0",
+                "steps": [{"id": "inspect", "command": "inspect"}]
             }),
         ),
         (
@@ -154,7 +172,7 @@ fn reports_missing_schema_mismatch_and_type_errors() {
     assert_eq!(missing.errors[0].instance_path, "/artifacts");
 
     let mismatch = validate_minimal_required_fields(
-        "workflow",
+        "officegen.workflow@1.2",
         &json!({
             "schema": "officegen.manifest@1.2",
             "version": "1.0",
@@ -167,7 +185,7 @@ fn reports_missing_schema_mismatch_and_type_errors() {
     }));
 
     let wrong_type = validate_minimal_required_fields(
-        "document",
+        "officegen.ir.document@1.2",
         &json!({
             "schema": "officegen.ir.document@1.2",
             "targets": "docx",
@@ -180,7 +198,7 @@ fn reports_missing_schema_mismatch_and_type_errors() {
     }));
 
     let optional_wrong_type = validate_minimal_required_fields(
-        "document",
+        "officegen.ir.document@1.2",
         &json!({
             "schema": "officegen.ir.document@1.2",
             "title": 42,

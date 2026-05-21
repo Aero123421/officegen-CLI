@@ -2,6 +2,9 @@ mod registry;
 mod runtime;
 mod safety;
 mod schemas;
+mod v5_ooxml;
+mod v5_workflow;
+mod v5_xlsx_template;
 
 fn main() {
     if let Err(error) = runtime::run(

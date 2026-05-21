@@ -1,0 +1,32 @@
+{
+  "schema": "officegen.ir.document@2.0",
+  "title": "Officegen v5 DOCX Example",
+  "targets": ["docx"],
+  "sections": [
+    {
+      "title": "Document Blocks",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "DOCX sections render to editable paragraphs and tables."
+        },
+        {
+          "type": "table",
+          "rows": [
+            ["Block", "Output"],
+            ["Paragraph", "w:p"],
+            ["Table", "w:tbl"]
+          ]
+        },
+        {
+          "type": "image",
+          "alt": "Diagram placeholder"
+        },
+        {
+          "type": "chart",
+          "title": "Verification presence"
+        }
+      ]
+    }
+  ]
+}

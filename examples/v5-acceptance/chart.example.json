@@ -1,0 +1,11 @@
+{
+  "title": "v5 acceptance chart",
+  "data": {
+    "labels": ["A1", "A2", "A3"],
+    "values": [3, 5, 8]
+  },
+  "encoding": {
+    "x": "labels",
+    "y": "values"
+  }
+}

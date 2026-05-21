@@ -36,12 +36,27 @@ jobs:
       - name: Build
         run: cargo build --release --locked
 
+      - name: Setup Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: "24"
+
+      - name: Install without lifecycle scripts
+        run: npm ci --ignore-scripts --prefer-online --no-audit --no-fund
+
       - name: Native CLI smoke
         shell: bash
         run: |
           bin="target/release/officegen"
           if [ "$RUNNER_OS" = "Windows" ]; then bin="target/release/officegen.exe"; fi
           node scripts/native-release-smoke.mjs --bin "$bin" --expected-version "$(node -p "require('./package.json').version")"
+
+      - name: v5 acceptance
+        shell: bash
+        run: |
+          bin="target/release/officegen"
+          if [ "$RUNNER_OS" = "Windows" ]; then bin="target/release/officegen.exe"; fi
+          npm run v5:acceptance -- --bin "$bin" --expected-version current
 
       - name: Installer smoke
         run: npm run installer:smoke

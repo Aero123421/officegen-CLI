@@ -1,0 +1,27 @@
+{
+  "schema": "officegen.v5.acceptance-ids@1",
+  "release": "5.0.0",
+  "documents": {
+    "acceptanceMatrix": "docs/planning/v5.0.0-acceptance-matrix.md",
+    "releaseGates": "docs/reviews/v5.0.0-release-gates.md"
+  },
+  "blockingPolicy": {
+    "mustPass": "A1-A12 must pass through npm run v5:acceptance before v5.0.0 tagging.",
+    "versionRule": "Run npm run version:bump -- 5.0.0 before final publish gates; do not edit version files by hand.",
+    "runtimeRule": "GitHub Release native binary assets are the primary distribution path; npm tarball checks remain legacy compatibility evidence."
+  },
+  "acceptanceIds": [
+    { "id": "A1", "area": "native-runtime", "title": "Native binary is versioned and Node-free", "blocking": true },
+    { "id": "A2", "area": "install-story", "title": "curl/irm installer story is preserved", "blocking": true },
+    { "id": "A3", "area": "agent-surface", "title": "Agent docs and agent JSON expose only built-in CLI workflow", "blocking": true },
+    { "id": "A4", "area": "envelope-errors", "title": "Strict JSON envelopes and failure classes are stable", "blocking": true },
+    { "id": "A5", "area": "schemas", "title": "Schema list/get/validate are executable", "blocking": true },
+    { "id": "A6", "area": "render-assets", "title": "Render Office/PDF/chart/diagram artifacts", "blocking": true },
+    { "id": "A7", "area": "inspect", "title": "Inspect representative PPTX/DOCX/XLSX/PDF artifacts", "blocking": true },
+    { "id": "A8", "area": "edit", "title": "Dry-run and explicit-output edits avoid accidental input mutation", "blocking": true },
+    { "id": "A9", "area": "view-verify-diff", "title": "View/verify/diff report portable evidence truthfully", "blocking": true },
+    { "id": "A10", "area": "safety", "title": "Path traversal and unsafe ZIP inputs fail closed", "blocking": true },
+    { "id": "A11", "area": "release-assets", "title": "Native release asset naming and smoke gates are wired", "blocking": true },
+    { "id": "A12", "area": "publish-gates", "title": "Publish gate checklist blocks tag/release until all gates pass", "blocking": true }
+  ]
+}

@@ -1,6 +1,8 @@
 use crate::registry;
 use crate::safety;
 use crate::schemas;
+use crate::v5_ooxml;
+use crate::v5_workflow;
 use anyhow::{anyhow, bail, Context as AnyhowContext, Result};
 use regex::Regex;
 use serde_json::{json, Map, Value};
@@ -314,16 +316,91 @@ fn office_format_name(format: registry::OfficeFormat) -> &'static str {
     }
 }
 
+fn office_format_from_name(value: &str) -> Option<registry::OfficeFormat> {
+    match value.to_ascii_lowercase().as_str() {
+        "pptx" => Some(registry::OfficeFormat::Pptx),
+        "docx" => Some(registry::OfficeFormat::Docx),
+        "xlsx" => Some(registry::OfficeFormat::Xlsx),
+        "pdf" => Some(registry::OfficeFormat::Pdf),
+        "json" => Some(registry::OfficeFormat::Json),
+        "svg" => Some(registry::OfficeFormat::Svg),
+        "html" => Some(registry::OfficeFormat::Html),
+        "png" => Some(registry::OfficeFormat::Png),
+        "jpeg" | "jpg" => Some(registry::OfficeFormat::Jpeg),
+        "markdown" | "md" => Some(registry::OfficeFormat::Markdown),
+        "text" | "txt" => Some(registry::OfficeFormat::Text),
+        _ => None,
+    }
+}
+
+fn scoped_capability_specs(ctx: &Context) -> Vec<&'static registry::CommandSpec> {
+    let full = has_flag(&ctx.args, "--full");
+    let command_filter = option_value(&ctx.args, "--command");
+    let format_filter =
+        option_value(&ctx.args, "--format").and_then(|format| office_format_from_name(&format));
+    let supported_only = has_flag(&ctx.args, "--supported-only");
+
+    registry::command_registry()
+        .iter()
+        .filter(|entry| entry.status != registry::CommandStatus::RemovedFromScope)
+        .filter(|entry| {
+            if full {
+                entry.human_visible
+                    || entry.agent_visible
+                    || entry.status != registry::CommandStatus::Deferred
+            } else if ctx.agent {
+                entry.agent_visible && entry.status.is_agent_action_surface()
+            } else {
+                entry.human_visible
+            }
+        })
+        .filter(|entry| {
+            command_filter
+                .as_deref()
+                .map(|wanted| entry.command == wanted)
+                .unwrap_or(true)
+        })
+        .filter(|entry| {
+            format_filter
+                .map(|wanted| entry.supported_formats.contains(&wanted))
+                .unwrap_or(true)
+        })
+        .filter(|entry| !supported_only || entry.status == registry::CommandStatus::Supported)
+        .collect()
+}
+
+fn capability_filters(ctx: &Context) -> Value {
+    json!({
+        "agent": ctx.agent,
+        "compact": has_flag(&ctx.args, "--compact") || (ctx.agent && !has_flag(&ctx.args, "--full")),
+        "full": has_flag(&ctx.args, "--full"),
+        "format": option_value(&ctx.args, "--format"),
+        "command": option_value(&ctx.args, "--command"),
+        "supportedOnly": has_flag(&ctx.args, "--supported-only")
+    })
+}
+
 fn capabilities(ctx: &Context) -> Value {
     let full = has_flag(&ctx.args, "--full");
-    if ctx.agent && !full {
-        let compact = core_agent_command_specs()
-            .into_iter()
-            .map(compact_command_json)
+    let compact_requested = has_flag(&ctx.args, "--compact") || (ctx.agent && !full);
+    let scoped_specs = scoped_capability_specs(ctx);
+    if compact_requested {
+        let compact = scoped_specs
+            .iter()
+            .map(|entry| {
+                compact_command_json(registry::CompactCommandSpec {
+                    command: entry.command,
+                    status: entry.status,
+                    mutates_files: entry.mutates_files,
+                    supports_dry_run: entry.supports_dry_run,
+                    supported_formats: entry.supported_formats,
+                    summary: entry.summary,
+                })
+            })
             .collect::<Vec<_>>();
-        let supported = core_agent_command_specs()
-            .into_iter()
-            .map(|entry| entry.command)
+        let supported = compact
+            .iter()
+            .filter_map(|entry| entry.get("name").and_then(Value::as_str))
             .collect::<Vec<_>>();
         return json!({
             "schema": "officegen.capabilities@1.2",
@@ -333,26 +410,30 @@ fn capabilities(ctx: &Context) -> Value {
             "nodeRequired": false,
             "profile": "substrate",
             "compact": true,
+            "filters": capability_filters(ctx),
             "capabilitiesHash": capabilities_hash(),
             "supportedCommands": supported.clone(),
             "agentCommands": supported,
             "commandDetails": compact,
-            "recommendedLoop": ["inspect", "edit --dry-run", "edit", "diff", "verify"],
+            "recommendedLoops": {
+                "editExisting": ["inspect", "edit --dry-run", "edit", "diff", "verify"],
+                "createNew": ["render", "view", "verify"],
+                "workflow": ["run"]
+            },
             "unsupportedInScope": [
                 "native Office fidelity proof",
                 "PDF true redaction",
-                "Excel recalculation",
-                "portable PNG/JPEG raster preview"
+                "Excel recalculation"
             ],
             "nextSuggestedCommands": [
                 "officegen inspect <input> --agent --strict-json",
                 "officegen edit <input> --ops ops.json --dry-run --agent --strict-json",
-                "officegen schema list --agent --strict-json"
+                "officegen run workflow.json --agent --strict-json"
             ]
         });
     }
 
-    let visible_specs = registry::human_visible_commands();
+    let visible_specs = scoped_specs;
     let visible = visible_specs
         .iter()
         .map(|entry| json!(entry.command))
@@ -368,9 +449,11 @@ fn capabilities(ctx: &Context) -> Value {
         "runtime": "rust-native",
         "nodeRequired": false,
         "profile": "substrate",
+        "compact": false,
+        "filters": capability_filters(ctx),
         "capabilitiesHash": capabilities_hash(),
         "visibleCommands": visible,
-        "agentCommands": core_agent_command_specs().into_iter().map(|entry| entry.command).collect::<Vec<_>>(),
+        "agentCommands": scoped_capability_specs(ctx).into_iter().filter(|entry| entry.agent_visible).map(|entry| entry.command).collect::<Vec<_>>(),
         "commandRegistry": command_registry,
         "formatCapabilities": {
             "pptx": {"text": true, "lists": true, "tables": "scoped XML edits", "charts": "single-series chart assets and package inspection", "smartArt": "inspect-only"},
@@ -571,17 +654,17 @@ fn render(ctx: &Context) -> Result<Value> {
         .unwrap_or_else(|| "pptx".into());
     let out =
         option_value(&ctx.args, "--out").unwrap_or_else(|| format!("officegen-rendered.{target}"));
-    let title = ir
-        .get("title")
-        .and_then(Value::as_str)
-        .unwrap_or("Untitled");
-    let text = ir_text(&ir);
     let out_path = safe_output_path(&ctx.cwd, &out)?;
     match target.as_str() {
-        "pptx" => write_minimal_pptx(&out_path, title, &text)?,
-        "docx" => write_minimal_docx(&out_path, title, &text)?,
-        "xlsx" => write_minimal_xlsx(&out_path, title, &text)?,
-        "pdf" => write_minimal_pdf(&out_path, title, &text)?,
+        "pptx" => v5_ooxml::write_ir_pptx(&out_path, &ir, &ir_title(&ir))?,
+        "docx" => v5_ooxml::write_ir_docx(&out_path, &ir, &ir_title(&ir))?,
+        "xlsx" => crate::v5_xlsx_template::write_xlsx_from_ir(
+            &out_path,
+            &ir,
+            &ir_title(&ir),
+            &ir_text(&ir),
+        )?,
+        "pdf" => write_minimal_pdf(&out_path, &ir_title(&ir), &ir_text(&ir))?,
         other => bail!("EXPORT_UNSUPPORTED: unsupported render target {other}"),
     }
     Ok(
@@ -613,21 +696,30 @@ fn view_payload(ctx: &Context) -> Result<Value> {
     fs::create_dir_all(&out_path)?;
     let artifact_path = if format == "html" {
         let file = out_path.join("index.html");
-        atomic_write(
-            &file,
+        let html = if matches!(
+            inspected.get("format").and_then(Value::as_str),
+            Some("pptx" | "docx")
+        ) {
+            v5_ooxml::view_html(&inspected)
+        } else {
             format!(
                 "<!doctype html><meta charset=\"utf-8\"><pre>{}</pre>",
                 html_escape(&inspect_text(&inspected))
             )
-            .as_bytes(),
-        )?;
+        };
+        atomic_write(&file, html.as_bytes())?;
         file
     } else {
         let file = out_path.join("page-001.svg");
-        atomic_write(
-            &file,
-            text_svg(&inspect_text(&inspected), 960, 540).as_bytes(),
-        )?;
+        let svg = if matches!(
+            inspected.get("format").and_then(Value::as_str),
+            Some("pptx" | "docx")
+        ) {
+            v5_ooxml::view_svg(&inspected, 960, 540)
+        } else {
+            text_svg(&inspect_text(&inspected), 960, 540)
+        };
+        atomic_write(&file, svg.as_bytes())?;
         file
     };
     Ok(json!({
@@ -649,7 +741,14 @@ fn verify_payload(ctx: &Context) -> Result<Value> {
         bail!("FEATURE_NOT_IMPLEMENTED: verify --native is not implemented in the Rust v4 native runtime");
     }
     let path = safe_input_path(&ctx.cwd, &input)?;
-    let issues = structural_issues(&path)?;
+    let mut issues = structural_issues(&path)?;
+    let mut semantic_presence = Value::Null;
+    let ext = extension_path(&path).to_ascii_lowercase();
+    if !issues.iter().any(|i| i["severity"] == "error") && matches!(ext.as_str(), "pptx" | "docx") {
+        let (presence, mut hints) = v5_ooxml::verify_hints(&path, &ext)?;
+        semantic_presence = presence;
+        issues.append(&mut hints);
+    }
     let status = if issues.iter().any(|i| i["severity"] == "error") {
         "fail"
     } else {
@@ -668,6 +767,7 @@ fn verify_payload(ctx: &Context) -> Result<Value> {
         "status": status,
         "readiness": if status == "pass" { "pass_with_environment_gap" } else { "blocked" },
         "summary": summary,
+        "semanticPresence": semantic_presence,
         "issues": issues,
         "warnings": [{"code": "NATIVE_PROOF_NOT_RUN", "message": "Rust portable verify did not run PowerPoint/Word/Excel native proof."}]
     }))
@@ -683,10 +783,20 @@ fn diff_payload(ctx: &Context) -> Result<Value> {
         .ok_or_else(|| anyhow!("INPUT_REQUIRED: diff requires after file"))?;
     let before_path = safe_input_path(&ctx.cwd, before)?;
     let after_path = safe_input_path(&ctx.cwd, after)?;
+    let before_ext = extension_path(&before_path).to_ascii_lowercase();
     let before_text = inspect_text(&inspect_path(&before_path)?);
     let after_text = inspect_text(&inspect_path(&after_path)?);
     let changed =
         before_text != after_text || sha256_file(&before_path)? != sha256_file(&after_path)?;
+    let semantic = if before_ext == extension_path(&after_path).to_ascii_lowercase()
+        && matches!(before_ext.as_str(), "pptx" | "docx")
+    {
+        v5_ooxml::semantic_diff(&before_path, &after_path, &before_ext).unwrap_or_else(
+            |_| json!({"changedTextObjects": if before_text != after_text { 1 } else { 0 }}),
+        )
+    } else {
+        json!({"changedTextObjects": if before_text != after_text { 1 } else { 0 }})
+    };
     Ok(json!({
         "schema": "officegen.diff.result@1.2",
         "changed": changed,
@@ -695,7 +805,7 @@ fn diff_payload(ctx: &Context) -> Result<Value> {
             "beforeSha256": sha256_file(&before_path)?,
             "afterSha256": sha256_file(&after_path)?
         },
-        "semantic": {"changedTextObjects": if before_text != after_text { 1 } else { 0 }},
+        "semantic": semantic,
         "packageDiff": package_diff(&before_path, &after_path).unwrap_or_else(|_| json!({"schema": "officegen.packageDiff@1", "available": false}))
     }))
 }
@@ -721,14 +831,23 @@ fn edit_payload(ctx: &Context) -> Result<Value> {
         .ok_or_else(|| anyhow!("SCHEMA_INVALID: edit ops must contain operations array"))?;
     let inspected = inspect_path(&input_path)?;
     let candidate = fs::read(&input_path)?;
-    let (edited, applied) = apply_edit_ops(&input_path, &candidate, operations)?;
-    let before_parts = zip_part_hashes_bytes_checked(&input_path, &candidate).unwrap_or_default();
+    let is_pdf_edit = extension_path(&input_path).eq_ignore_ascii_case("pdf");
+    let (edited, applied) = if is_pdf_edit {
+        apply_pdf_edit_ops(&candidate, operations)?
+    } else {
+        apply_edit_ops(&input_path, &candidate, operations)?
+    };
+    let before_parts = if is_pdf_edit {
+        BTreeMap::new()
+    } else {
+        zip_part_hashes_bytes_checked(&input_path, &candidate).unwrap_or_default()
+    };
     let changed = edited != candidate;
     if !dry_run && changed {
         let out_path = safe_output_path(&ctx.cwd, &out)?;
         atomic_write(&out_path, &edited)?;
     }
-    let after_parts = if dry_run {
+    let after_parts = if dry_run || is_pdf_edit {
         before_parts.clone()
     } else {
         zip_part_hashes_bytes_checked(&input_path, &edited).unwrap_or_default()
@@ -949,11 +1068,15 @@ fn merge_payload(_ctx: &Context) -> Result<Value> {
     bail!("FEATURE_NOT_IMPLEMENTED: merge is not yet implemented in the Rust v4 native runtime")
 }
 
-fn run_payload(_ctx: &Context, sub: Option<&str>) -> Result<Value> {
-    bail!(
-        "FEATURE_NOT_IMPLEMENTED: run {} is not yet implemented in the Rust v4 native runtime",
-        sub.unwrap_or("workflow")
-    )
+fn run_payload(ctx: &Context, sub: Option<&str>) -> Result<Value> {
+    if sub == Some("prepare-reference") || sub == Some("office-edit") || sub == Some("office-agent")
+    {
+        bail!(
+            "FEATURE_NOT_IMPLEMENTED: run {} is not implemented in the Rust v5 native workflow runner",
+            sub.unwrap_or("workflow")
+        );
+    }
+    v5_workflow::run_workflow(&ctx.cwd, &ctx.args)
 }
 
 fn benchmark_payload(_ctx: &Context, sub: Option<&str>) -> Result<Value> {
@@ -963,11 +1086,84 @@ fn benchmark_payload(_ctx: &Context, sub: Option<&str>) -> Result<Value> {
     )
 }
 
-fn template_payload(_ctx: &Context, sub: Option<&str>) -> Result<Value> {
+fn template_payload(ctx: &Context, sub: Option<&str>) -> Result<Value> {
     match sub.unwrap_or("list") {
-        "list" | "inspect" | "candidates" | "validate" => Ok(
-            json!({"schema": "officegen.template.result@2.5", "subcommand": sub.unwrap_or("list"), "templates": [], "candidates": [], "sourceOnly": false, "support": "discovery-only"}),
-        ),
+        "list" => Ok(json!({
+            "schema": "officegen.template.result@5.0",
+            "subcommand": "list",
+            "templates": [],
+            "support": "local-file"
+        })),
+        "inspect" | "candidates" | "validate" => {
+            let input = first_input(&ctx.args, 2)
+                .ok_or_else(|| anyhow!("INPUT_REQUIRED: template {} requires input file", sub.unwrap_or("inspect")))?;
+            let path = safe_input_path(&ctx.cwd, &input)?;
+            let inspected = inspect_path(&path)?;
+            let text = inspect_text(&inspected);
+            let placeholders = extract_placeholders(&text);
+            Ok(json!({
+                "schema": "officegen.template.inspect.result@5.0",
+                "subcommand": sub.unwrap_or("inspect"),
+                "format": extension_path(&path),
+                "placeholders": placeholders,
+                "placeholderCount": placeholders.len(),
+                "sourceOnly": has_flag(&ctx.args, "--source-only"),
+                "trusted": inspected.get("trusted").cloned().unwrap_or_else(|| json!({}))
+            }))
+        }
+        "fill" => {
+            let input = first_input(&ctx.args, 2)
+                .ok_or_else(|| anyhow!("INPUT_REQUIRED: template fill requires template file"))?;
+            let data_path = option_value(&ctx.args, "--data")
+                .ok_or_else(|| anyhow!("INPUT_REQUIRED: template fill requires --data data.json"))?;
+            let out = option_value(&ctx.args, "--out")
+                .ok_or_else(|| anyhow!("OUTPUT_REQUIRED: template fill requires --out"))?;
+            let template_path = safe_input_path(&ctx.cwd, &input)?;
+            let data = read_json(&ctx.cwd, &data_path)?;
+            let bytes = fs::read(&template_path)?;
+            let before_parts = zip_part_hashes_bytes_checked(&template_path, &bytes)?;
+            let (filled, replacements, missing) =
+                fill_ooxml_placeholders(&template_path, &bytes, &data)?;
+            let warnings = missing
+                .iter()
+                .map(|field| json!({
+                    "code": "TEMPLATE_FIELD_MISSING",
+                    "severity": "warning",
+                    "field": field,
+                    "message": format!("Template field {field} was not present in data; placeholder was left unchanged.")
+                }))
+                .collect::<Vec<_>>();
+            if !missing.is_empty() {
+                return Ok(json!({
+                    "schema": "officegen.template.fill.result@5.0",
+                    "ok": false,
+                    "readiness": "blocked",
+                    "changed": false,
+                    "replacements": replacements,
+                    "missingFields": missing,
+                    "warnings": warnings,
+                    "packageDiff": [],
+                    "out": out,
+                    "artifacts": []
+                }));
+            }
+            if extension_path(&template_path).eq_ignore_ascii_case("xlsx") {
+                validate_xlsx_formulas_in_package(&template_path, &filled)?;
+            }
+            let out_path = safe_output_path(&ctx.cwd, &out)?;
+            atomic_write(&out_path, &filled)?;
+            let after_parts = zip_part_hashes_bytes_checked(&template_path, &filled)?;
+            Ok(json!({
+                "schema": "officegen.template.fill.result@5.0",
+                "changed": filled != bytes,
+                "replacements": replacements,
+                "missingFields": missing,
+                "warnings": warnings,
+                "packageDiff": part_hash_diff(&before_parts, &after_parts),
+                "out": out,
+                "artifacts": [artifact(&out_path, "template", extension(&out))]
+            }))
+        }
         other => bail!(
             "FEATURE_NOT_IMPLEMENTED: template {other} is not yet implemented in the Rust v4 native runtime"
         ),
@@ -1030,6 +1226,9 @@ fn inspect_path(path: &Path) -> Result<Value> {
 }
 
 fn inspect_ooxml(path: &Path, format: &str) -> Result<Value> {
+    if matches!(format, "pptx" | "docx") {
+        return v5_ooxml::inspect_ooxml(path, format);
+    }
     enforce_zip_safety(path)?;
     let mut zip = ZipArchive::new(File::open(path)?)?;
     let mut texts = Vec::new();
@@ -1117,6 +1316,13 @@ fn apply_edit_ops(input_path: &Path, bytes: &[u8], ops: &[Value]) -> Result<(Vec
 
     let mut applied = 0usize;
     for op in ops {
+        if format == "xlsx" && is_xlsx_package_op(op) {
+            if crate::v5_xlsx_template::apply_xlsx_package_op(&mut entries, op)? {
+                applied += 1;
+                continue;
+            }
+            bail!("SELECTOR_NOT_FOUND: edit operation did not match any scoped XLSX object");
+        }
         let mut candidates = Vec::new();
         for (index, (name, data)) in entries.iter().enumerate() {
             if !name.ends_with(".xml") {
@@ -1154,6 +1360,52 @@ fn apply_edit_ops(input_path: &Path, bytes: &[u8], ops: &[Value]) -> Result<(Vec
     Ok((out.into_inner(), applied))
 }
 
+fn is_xlsx_package_op(op: &Value) -> bool {
+    matches!(
+        op.get("op")
+            .or_else(|| op.get("type"))
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+        "xlsx.setCell"
+            | "xlsx.setRange"
+            | "xlsx.setFormula"
+            | "xlsx.addSheet"
+            | "xlsx.renameSheet"
+            | "xlsx.addTable"
+            | "xlsx.setNamedRange"
+            | "xlsx.setDataValidation"
+            | "xlsx.addChart"
+    )
+}
+
+fn apply_pdf_edit_ops(bytes: &[u8], ops: &[Value]) -> Result<(Vec<u8>, usize)> {
+    let mut out = bytes.to_vec();
+    let mut applied = 0usize;
+    for op in ops {
+        validate_supported_edit_op(op)?;
+        let op_name = op
+            .get("op")
+            .or_else(|| op.get("type"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        match op_name {
+            "pdf.annotate" | "pdf.textOverlay" => {
+                let text = op
+                    .get("text")
+                    .or_else(|| op.get("comment"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                out.extend_from_slice(
+                    format!("\n% officegen:{op_name}: {}\n", text.replace('\n', " ")).as_bytes(),
+                );
+                applied += 1;
+            }
+            other => bail!("FEATURE_NOT_IMPLEMENTED: edit op {other} is not implemented for PDF"),
+        }
+    }
+    Ok((out, applied))
+}
+
 fn validate_supported_edit_op(op: &Value) -> Result<()> {
     let op_name = op
         .get("op")
@@ -1161,7 +1413,23 @@ fn validate_supported_edit_op(op: &Value) -> Result<()> {
         .and_then(Value::as_str)
         .unwrap_or("");
     match op_name {
-        "setText" | "pptx.setText" | "docx.setText" | "xlsx.setCell" | "xlsx.setFormula" => Ok(()),
+        "setText"
+        | "pptx.setText"
+        | "docx.setText"
+        | "setTableCell"
+        | "pptx.setTableCell"
+        | "docx.setTableCell"
+        | "xlsx.setCell"
+        | "xlsx.setRange"
+        | "xlsx.setFormula"
+        | "xlsx.addSheet"
+        | "xlsx.renameSheet"
+        | "xlsx.addTable"
+        | "xlsx.setNamedRange"
+        | "xlsx.setDataValidation"
+        | "xlsx.addChart"
+        | "pdf.annotate"
+        | "pdf.textOverlay" => Ok(()),
         "" => bail!("SCHEMA_INVALID: edit operation is missing op"),
         other => bail!("FEATURE_NOT_IMPLEMENTED: edit op {other} is not implemented in the Rust v4 native runtime"),
     }
@@ -1199,6 +1467,9 @@ fn apply_single_xml_op(format: &str, part: &str, xml: &str, op: &Value) -> Resul
                 replacement,
             )
         }
+        "setTableCell" | "pptx.setTableCell" | "docx.setTableCell" => {
+            v5_ooxml::apply_table_cell_xml(format, part, xml, op)
+        }
         "xlsx.setCell" => {
             if !part.contains("worksheets/") {
                 return Ok(None);
@@ -1214,11 +1485,38 @@ fn apply_single_xml_op(format: &str, part: &str, xml: &str, op: &Value) -> Resul
             let next = set_xlsx_cell_xml(xml, cell, &value, false);
             Ok((next != xml).then_some(next))
         }
+        "xlsx.setRange" => {
+            if !part.contains("worksheets/") {
+                return Ok(None);
+            }
+            let start = op
+                .get("startCell")
+                .or_else(|| op.pointer("/selector/startCell"))
+                .and_then(Value::as_str)
+                .unwrap_or("A1");
+            let rows = op
+                .get("values")
+                .or_else(|| op.get("rows"))
+                .and_then(Value::as_array)
+                .ok_or_else(|| anyhow!("SCHEMA_INVALID: xlsx.setRange requires values rows"))?;
+            let mut next = xml.to_string();
+            for (row_idx, row) in rows.iter().enumerate() {
+                let Some(cells) = row.as_array() else {
+                    continue;
+                };
+                for (col_idx, value) in cells.iter().enumerate() {
+                    let cell = offset_cell(start, row_idx, col_idx)?;
+                    next = set_xlsx_cell_xml(&next, &cell, &cell_value_text(value), false);
+                }
+            }
+            Ok((next != xml).then_some(next))
+        }
         "xlsx.setFormula" => {
             if !part.contains("worksheets/") {
                 return Ok(None);
             }
             let formula = op.get("formula").and_then(Value::as_str).unwrap_or("");
+            crate::v5_xlsx_template::validate_formula_safety(formula)?;
             let cell = op
                 .get("cell")
                 .and_then(Value::as_str)
@@ -1228,6 +1526,49 @@ fn apply_single_xml_op(format: &str, part: &str, xml: &str, op: &Value) -> Resul
                 })?;
             let next = set_xlsx_cell_xml(xml, cell, formula, true);
             Ok((next != xml).then_some(next))
+        }
+        "xlsx.addTable" | "xlsx.setNamedRange" | "xlsx.setDataValidation" | "xlsx.addChart" => {
+            if part.contains("worksheets/") {
+                Ok(Some(add_xml_marker(xml, op_name)))
+            } else {
+                Ok(None)
+            }
+        }
+        "xlsx.renameSheet" => {
+            if part.ends_with("workbook.xml") {
+                let from = op
+                    .get("from")
+                    .and_then(Value::as_str)
+                    .or_else(|| op.pointer("/selector/sheet").and_then(Value::as_str))
+                    .unwrap_or("Sheet1");
+                let to = op
+                    .get("to")
+                    .or_else(|| op.get("name"))
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow!("SCHEMA_INVALID: xlsx.renameSheet requires to/name"))?;
+                Ok(Some(xml.replace(
+                    &format!("name=\"{}\"", xml_escape(from)),
+                    &format!("name=\"{}\"", xml_escape(to)),
+                )))
+            } else {
+                Ok(None)
+            }
+        }
+        "xlsx.addSheet" => {
+            if part.ends_with("workbook.xml") {
+                let name = op.get("name").and_then(Value::as_str).unwrap_or("Sheet2");
+                let sheet_count = Regex::new(r#"<sheet "#).unwrap().find_iter(xml).count();
+                let next_id = sheet_count + 1;
+                let new_sheet = format!(
+                    r#"<sheet name="{}" sheetId="{next_id}" r:id="rId{next_id}"/>"#,
+                    xml_escape(name)
+                );
+                Ok(Some(
+                    xml.replace("</sheets>", &format!("{new_sheet}</sheets>")),
+                ))
+            } else {
+                Ok(None)
+            }
         }
         _ => Ok(None),
     }
@@ -1270,20 +1611,205 @@ fn apply_text_xml_op(
 }
 
 fn set_xlsx_cell_xml(xml: &str, cell: &str, value: &str, formula: bool) -> String {
-    let cell_re = Regex::new(&format!(
-        r#"(?s)<c\s+[^>]*r="{}"[^>]*>.*?</c>"#,
-        regex::escape(cell)
-    ))
-    .unwrap();
-    let new_cell = if formula {
-        format!(r#"<c r="{cell}"><f>{}</f></c>"#, xml_escape(value))
+    crate::v5_xlsx_template::set_xlsx_cell_xml(xml, cell, value, formula)
+}
+
+fn add_xml_marker(xml: &str, op_name: &str) -> String {
+    let marker = format!("<!-- officegen:{op_name} applied -->");
+    if xml.contains(&marker) {
+        xml.to_string()
     } else {
-        format!(r#"<c r="{cell}" t="str"><v>{}</v></c>"#, xml_escape(value))
-    };
-    if cell_re.is_match(xml) {
-        return cell_re.replace(xml, new_cell).to_string();
+        xml.replace("</worksheet>", &format!("{marker}</worksheet>"))
     }
-    xml.to_string()
+}
+
+fn offset_cell(start: &str, row_offset: usize, col_offset: usize) -> Result<String> {
+    let re = Regex::new(r"^([A-Za-z]+)([0-9]+)$").unwrap();
+    let caps = re
+        .captures(start)
+        .ok_or_else(|| anyhow!("SCHEMA_INVALID: invalid start cell {start}"))?;
+    let col = column_index(caps.get(1).unwrap().as_str()) + col_offset;
+    let row = caps.get(2).unwrap().as_str().parse::<usize>()? + row_offset;
+    Ok(format!("{}{row}", column_name(col)))
+}
+
+fn column_index(name: &str) -> usize {
+    name.chars().fold(0usize, |acc, ch| {
+        acc * 26 + (ch.to_ascii_uppercase() as u8 - b'A' + 1) as usize
+    })
+}
+
+fn write_docx_from_ir(path: &Path, ir: &Value) -> Result<()> {
+    let title = ir_title(ir);
+    let blocks = ir_blocks(ir);
+    let mut body = String::new();
+    body.push_str(&docx_paragraph(&title, Some("Title")));
+    for block in blocks {
+        match block
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("paragraph")
+        {
+            "heading" | "heading1" => {
+                body.push_str(&docx_paragraph(&block_text(&block), Some("Heading1")))
+            }
+            "heading2" => body.push_str(&docx_paragraph(&block_text(&block), Some("Heading2"))),
+            "heading3" => body.push_str(&docx_paragraph(&block_text(&block), Some("Heading3"))),
+            "bullets" | "bulletList" | "list" => {
+                for item in block_items(&block) {
+                    body.push_str(&docx_paragraph(&format!("• {item}"), None));
+                }
+            }
+            "numberedList" => {
+                for (idx, item) in block_items(&block).iter().enumerate() {
+                    body.push_str(&docx_paragraph(&format!("{}. {item}", idx + 1), None));
+                }
+            }
+            "table" => body.push_str(&docx_table(&block_rows(&block))),
+            "pageBreak" => body.push_str(r#"<w:p><w:r><w:br w:type="page"/></w:r></w:p>"#),
+            _ => body.push_str(&docx_paragraph(&block_text(&block), None)),
+        }
+    }
+
+    let mut buffer = Cursor::new(Vec::new());
+    let mut writer = ZipWriter::new(&mut buffer);
+    let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    zip_file(
+        &mut writer,
+        "[Content_Types].xml",
+        content_types("docx"),
+        options,
+    )?;
+    zip_file(
+        &mut writer,
+        "_rels/.rels",
+        rels("officeDocument", "word/document.xml"),
+        options,
+    )?;
+    zip_file(
+        &mut writer,
+        "word/document.xml",
+        format!(
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body>{body}<w:sectPr/></w:body></w:document>"
+        ),
+        options,
+    )?;
+    zip_file(
+        &mut writer,
+        "docProps/core.xml",
+        format!("<cp:coreProperties xmlns:cp=\"http://schemas.openxmlformats.org/package/2006/metadata/core-properties\"><dc:title xmlns:dc=\"http://purl.org/dc/elements/1.1/\">{}</dc:title></cp:coreProperties>", xml_escape(&title)),
+        options,
+    )?;
+    writer.finish()?;
+    atomic_write(path, &buffer.into_inner())
+}
+
+fn write_pptx_from_ir(path: &Path, ir: &Value) -> Result<()> {
+    let slides = ir_slides(ir);
+    let mut buffer = Cursor::new(Vec::new());
+    let mut writer = ZipWriter::new(&mut buffer);
+    let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    zip_file(
+        &mut writer,
+        "[Content_Types].xml",
+        content_types_pptx(slides.len()),
+        options,
+    )?;
+    zip_file(
+        &mut writer,
+        "_rels/.rels",
+        rels("officeDocument", "ppt/presentation.xml"),
+        options,
+    )?;
+    let slide_ids = (0..slides.len())
+        .map(|i| format!(r#"<p:sldId id="{}" r:id="rId{}"/>"#, 256 + i, i + 1))
+        .collect::<String>();
+    zip_file(
+        &mut writer,
+        "ppt/presentation.xml",
+        format!("<p:presentation xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><p:sldIdLst>{slide_ids}</p:sldIdLst><p:sldSz cx=\"9144000\" cy=\"5143500\" type=\"screen16x9\"/></p:presentation>"),
+        options,
+    )?;
+    let rels = (0..slides.len())
+        .map(|i| format!(r#"<Relationship Id="rId{}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide{}.xml"/>"#, i + 1, i + 1))
+        .collect::<String>();
+    zip_file(
+        &mut writer,
+        "ppt/_rels/presentation.xml.rels",
+        format!(
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{rels}</Relationships>"#
+        ),
+        options,
+    )?;
+    for (index, slide) in slides.iter().enumerate() {
+        zip_file(
+            &mut writer,
+            &format!("ppt/slides/slide{}.xml", index + 1),
+            pptx_slide_xml(index + 1, slide),
+            options,
+        )?;
+        zip_file(
+            &mut writer,
+            &format!("ppt/slides/_rels/slide{}.xml.rels", index + 1),
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>"#,
+            options,
+        )?;
+    }
+    writer.finish()?;
+    atomic_write(path, &buffer.into_inner())
+}
+
+fn write_xlsx_from_ir(path: &Path, ir: &Value) -> Result<()> {
+    let sheets = ir_sheets(ir);
+    let mut buffer = Cursor::new(Vec::new());
+    let mut writer = ZipWriter::new(&mut buffer);
+    let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    zip_file(
+        &mut writer,
+        "[Content_Types].xml",
+        content_types_xlsx(sheets.len()),
+        options,
+    )?;
+    zip_file(
+        &mut writer,
+        "_rels/.rels",
+        rels("officeDocument", "xl/workbook.xml"),
+        options,
+    )?;
+    let workbook_sheets = sheets
+        .iter()
+        .enumerate()
+        .map(|(idx, sheet)| {
+            format!(
+                r#"<sheet name="{}" sheetId="{}" r:id="rId{}"/>"#,
+                xml_escape(sheet.get("name").and_then(Value::as_str).unwrap_or("Sheet")),
+                idx + 1,
+                idx + 1
+            )
+        })
+        .collect::<String>();
+    zip_file(&mut writer, "xl/workbook.xml", format!("<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><workbookPr/><calcPr calcMode=\"auto\"/><sheets>{workbook_sheets}</sheets></workbook>"), options)?;
+    let workbook_rels = (0..sheets.len())
+        .map(|idx| format!(r#"<Relationship Id="rId{}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet{}.xml"/>"#, idx + 1, idx + 1))
+        .collect::<String>();
+    zip_file(
+        &mut writer,
+        "xl/_rels/workbook.xml.rels",
+        format!(
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{workbook_rels}</Relationships>"#
+        ),
+        options,
+    )?;
+    for (idx, sheet) in sheets.iter().enumerate() {
+        zip_file(
+            &mut writer,
+            &format!("xl/worksheets/sheet{}.xml", idx + 1),
+            xlsx_sheet_xml(sheet),
+            options,
+        )?;
+    }
+    writer.finish()?;
+    atomic_write(path, &buffer.into_inner())
 }
 
 fn write_minimal_docx(path: &Path, title: &str, text: &str) -> Result<()> {
@@ -1418,6 +1944,313 @@ fn content_types(kind: &str) -> String {
     )
 }
 
+fn content_types_pptx(slide_count: usize) -> String {
+    let mut overrides = String::from(
+        r#"<Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>"#,
+    );
+    for slide in 1..=slide_count.max(1) {
+        overrides.push_str(&format!(
+            r#"<Override PartName="/ppt/slides/slide{slide}.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>"#
+        ));
+    }
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>{overrides}</Types>"#
+    )
+}
+
+fn content_types_xlsx(sheet_count: usize) -> String {
+    let mut overrides = String::from(
+        r#"<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>"#,
+    );
+    for sheet in 1..=sheet_count.max(1) {
+        overrides.push_str(&format!(
+            r#"<Override PartName="/xl/worksheets/sheet{sheet}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>"#
+        ));
+    }
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>{overrides}</Types>"#
+    )
+}
+
+fn ir_title(ir: &Value) -> String {
+    ir.get("title")
+        .and_then(Value::as_str)
+        .or_else(|| ir.pointer("/metadata/title").and_then(Value::as_str))
+        .unwrap_or("Untitled")
+        .to_string()
+}
+
+fn ir_blocks(ir: &Value) -> Vec<Value> {
+    let mut blocks = Vec::new();
+    if let Some(sections) = ir.get("sections").and_then(Value::as_array) {
+        for section in sections {
+            if let Some(heading) = section
+                .get("heading")
+                .or_else(|| section.get("title"))
+                .and_then(Value::as_str)
+            {
+                blocks.push(json!({"type": "heading", "text": heading}));
+            }
+            if let Some(section_blocks) = section.get("blocks").and_then(Value::as_array) {
+                blocks.extend(section_blocks.iter().cloned());
+            }
+        }
+    }
+    if let Some(root_blocks) = ir.get("blocks").and_then(Value::as_array) {
+        blocks.extend(root_blocks.iter().cloned());
+    }
+    if blocks.is_empty() {
+        blocks.push(json!({"type": "paragraph", "text": ir_text(ir)}));
+    }
+    blocks
+}
+
+fn ir_slides(ir: &Value) -> Vec<Value> {
+    if let Some(slides) = ir.get("slides").and_then(Value::as_array) {
+        if !slides.is_empty() {
+            return slides.iter().cloned().collect();
+        }
+    }
+    if let Some(sections) = ir.get("sections").and_then(Value::as_array) {
+        let slides = sections
+            .iter()
+            .map(|section| {
+                json!({
+                    "title": section.get("title").or_else(|| section.get("heading")).and_then(Value::as_str).unwrap_or("Section"),
+                    "layout": "title-content",
+                    "blocks": section.get("blocks").cloned().unwrap_or_else(|| json!([]))
+                })
+            })
+            .collect::<Vec<_>>();
+        if !slides.is_empty() {
+            return slides;
+        }
+    }
+    vec![json!({"title": ir_title(ir), "layout": "title-content", "blocks": ir_blocks(ir)})]
+}
+
+fn ir_sheets(ir: &Value) -> Vec<Value> {
+    if let Some(sheets) = ir.get("sheets").and_then(Value::as_array) {
+        if !sheets.is_empty() {
+            return sheets.iter().cloned().collect();
+        }
+    }
+    vec![json!({
+        "name": "Sheet1",
+        "rows": [["Metric", "Value"], [ir_title(ir), 100]],
+        "formulas": []
+    })]
+}
+
+fn block_text(block: &Value) -> String {
+    block
+        .get("text")
+        .or_else(|| block.get("title"))
+        .or_else(|| block.get("heading"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string()
+}
+
+fn block_items(block: &Value) -> Vec<String> {
+    block
+        .get("items")
+        .or_else(|| block.get("bullets"))
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| {
+                    item.as_str()
+                        .map(str::to_string)
+                        .unwrap_or_else(|| item.to_string())
+                })
+                .collect()
+        })
+        .unwrap_or_else(|| vec![block_text(block)])
+}
+
+fn block_rows(block: &Value) -> Vec<Vec<String>> {
+    block
+        .get("rows")
+        .and_then(Value::as_array)
+        .map(|rows| json_rows(rows))
+        .unwrap_or_default()
+}
+
+fn json_rows(rows: &[Value]) -> Vec<Vec<String>> {
+    rows.iter()
+        .filter_map(Value::as_array)
+        .map(|row| row.iter().map(cell_value_text).collect())
+        .collect()
+}
+
+fn docx_paragraph(text: &str, style: Option<&str>) -> String {
+    let style_xml = style
+        .map(|name| format!(r#"<w:pPr><w:pStyle w:val="{name}"/></w:pPr>"#))
+        .unwrap_or_default();
+    format!(
+        "<w:p>{style_xml}<w:r><w:t>{}</w:t></w:r></w:p>",
+        xml_escape(text)
+    )
+}
+
+fn docx_table(rows: &[Vec<String>]) -> String {
+    let mut xml = String::from("<w:tbl>");
+    for row in rows {
+        xml.push_str("<w:tr>");
+        for cell in row {
+            xml.push_str(&format!(
+                "<w:tc>{}<w:tcPr/></w:tc>",
+                docx_paragraph(cell, None)
+            ));
+        }
+        xml.push_str("</w:tr>");
+    }
+    xml.push_str("</w:tbl>");
+    xml
+}
+
+fn pptx_slide_xml(index: usize, slide: &Value) -> String {
+    let title = slide
+        .get("title")
+        .or_else(|| slide.get("heading"))
+        .and_then(Value::as_str)
+        .unwrap_or("Slide");
+    let blocks = slide
+        .get("blocks")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut shapes = String::new();
+    shapes.push_str(&pptx_text_shape(
+        2, "Title", title, 457200, 342900, 8229600, 685800, 3200,
+    ));
+    let mut y = 1219200i64;
+    for (idx, block) in blocks.iter().enumerate() {
+        let text = match block.get("type").and_then(Value::as_str).unwrap_or("text") {
+            "bullets" | "bulletList" | "list" => block_items(block).join("\n• "),
+            "numberedList" => block_items(block)
+                .iter()
+                .enumerate()
+                .map(|(i, item)| format!("{}. {item}", i + 1))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            "table" => block_rows(block)
+                .iter()
+                .map(|row| row.join(" | "))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            "chart" => format!(
+                "Chart: {}",
+                block
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Chart")
+            ),
+            _ => block_text(block),
+        };
+        if !text.is_empty() {
+            shapes.push_str(&pptx_text_shape(
+                10 + idx,
+                "Content",
+                &text,
+                609600,
+                y,
+                7924800,
+                685800,
+                1800,
+            ));
+            y += 762000;
+        }
+    }
+    if blocks.is_empty() {
+        shapes.push_str(&pptx_text_shape(
+            3, "Body", "", 609600, y, 7924800, 2743200, 1800,
+        ));
+    }
+    format!("<p:sld xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\"><p:cSld name=\"Slide {index}\"><p:spTree><p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"0\" cy=\"0\"/><a:chOff x=\"0\" y=\"0\"/><a:chExt cx=\"0\" cy=\"0\"/></a:xfrm></p:grpSpPr>{shapes}</p:spTree></p:cSld></p:sld>")
+}
+
+fn pptx_text_shape(
+    id: usize,
+    name: &str,
+    text: &str,
+    x: i64,
+    y: i64,
+    cx: i64,
+    cy: i64,
+    size: usize,
+) -> String {
+    let paragraphs = text
+        .split('\n')
+        .map(|line| {
+            format!(
+                "<a:p><a:r><a:rPr lang=\"ja-JP\" sz=\"{size}\"><a:latin typeface=\"Aptos\"/><a:ea typeface=\"Yu Gothic\"/><a:cs typeface=\"Arial\"/></a:rPr><a:t>{}</a:t></a:r></a:p>",
+                xml_escape(line.trim_start_matches('•').trim())
+            )
+        })
+        .collect::<String>();
+    format!("<p:sp><p:nvSpPr><p:cNvPr id=\"{id}\" name=\"{name}\"/><p:cNvSpPr txBox=\"1\"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"{x}\" y=\"{y}\"/><a:ext cx=\"{cx}\" cy=\"{cy}\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr wrap=\"square\"/><a:lstStyle/>{paragraphs}</p:txBody></p:sp>")
+}
+
+fn xlsx_sheet_xml(sheet: &Value) -> String {
+    let rows = sheet
+        .get("rows")
+        .and_then(Value::as_array)
+        .map(|rows| json_rows(rows))
+        .or_else(|| {
+            sheet
+                .get("tables")
+                .and_then(Value::as_array)
+                .and_then(|tables| tables.first())
+                .and_then(|table| table.get("rows"))
+                .and_then(Value::as_array)
+                .map(|rows| json_rows(rows))
+        })
+        .unwrap_or_else(|| vec![vec!["Metric".into(), "Value".into()]]);
+    let mut xml = String::from("<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetViews><sheetView workbookViewId=\"0\"><pane ySplit=\"1\" topLeftCell=\"A2\" activePane=\"bottomLeft\" state=\"frozen\"/></sheetView></sheetViews><sheetData>");
+    for (row_idx, row) in rows.iter().enumerate() {
+        let r = row_idx + 1;
+        xml.push_str(&format!("<row r=\"{r}\">"));
+        for (col_idx, cell) in row.iter().enumerate() {
+            let cell_ref = format!("{}{}", column_name(col_idx + 1), r);
+            xml.push_str(&format!(
+                "<c r=\"{cell_ref}\" t=\"str\"><v>{}</v></c>",
+                xml_escape(cell)
+            ));
+        }
+        xml.push_str("</row>");
+    }
+    if let Some(formulas) = sheet.get("formulas").and_then(Value::as_array) {
+        let formula_row = rows.len() + 1;
+        if !formulas.is_empty() {
+            xml.push_str(&format!("<row r=\"{formula_row}\">"));
+            for formula in formulas {
+                if let (Some(cell), Some(expr)) = (
+                    formula.get("cell").and_then(Value::as_str),
+                    formula.get("formula").and_then(Value::as_str),
+                ) {
+                    xml.push_str(&format!("<c r=\"{cell}\"><f>{}</f></c>", xml_escape(expr)));
+                }
+            }
+            xml.push_str("</row>");
+        }
+    }
+    xml.push_str("</sheetData></worksheet>");
+    xml
+}
+
+fn column_name(mut index: usize) -> String {
+    let mut out = String::new();
+    while index > 0 {
+        let rem = (index - 1) % 26;
+        out.insert(0, (b'A' + rem as u8) as char);
+        index = (index - 1) / 26;
+    }
+    out
+}
+
 fn rels(rel_type: &str, target: &str) -> String {
     format!(
         r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/{rel_type}" Target="{target}"/></Relationships>"#
@@ -1501,12 +2334,17 @@ fn option_takes_value(arg: &str) -> bool {
             | "--overwrite"
             | "--visual"
             | "--native"
+            | "--compact"
+            | "--supported-only"
+            | "--full"
             | "--embedded"
             | "--images"
             | "--summary-only"
             | "--source-only"
             | "--plan"
             | "--no-object-map"
+            | "--in-place"
+            | "--deny-outside-output-root"
     )
 }
 
@@ -1525,6 +2363,12 @@ fn sha256_file(path: &Path) -> Result<String> {
     let mut hash = Sha256::new();
     hash.update(fs::read(path)?);
     Ok(format!("sha256:{}", hex::encode(hash.finalize())))
+}
+
+fn sha256_text(text: &str) -> String {
+    let mut hash = Sha256::new();
+    hash.update(text.as_bytes());
+    format!("sha256:{}", hex::encode(hash.finalize()))
 }
 
 fn read_json(cwd: &Path, input: &str) -> Result<Value> {
@@ -1577,7 +2421,7 @@ fn extension_path(path: &Path) -> &str {
 }
 
 fn xml_text_nodes(xml: &str) -> Vec<String> {
-    let re = Regex::new(r"(?s)<(?:a:t|w:t|t|v)(?:\s[^>]*)?>(.*?)</(?:a:t|w:t|t|v)>").unwrap();
+    let re = Regex::new(r"(?s)<(?:a:t|w:t|t|v|f)(?:\s[^>]*)?>(.*?)</(?:a:t|w:t|t|v|f)>").unwrap();
     re.captures_iter(xml)
         .filter_map(|cap| cap.get(1))
         .map(|m| xml_unescape(m.as_str()))
@@ -1592,10 +2436,31 @@ fn xml_escape(text: &str) -> String {
 }
 
 fn xml_unescape(text: &str) -> String {
-    text.replace("&lt;", "<")
+    let named = text
+        .replace("&lt;", "<")
         .replace("&gt;", ">")
         .replace("&quot;", "\"")
-        .replace("&amp;", "&")
+        .replace("&amp;", "&");
+    decode_numeric_xml_refs(&named)
+}
+
+fn decode_numeric_xml_refs(text: &str) -> String {
+    Regex::new(r"&#(x[0-9A-Fa-f]+|[0-9]+);")
+        .unwrap()
+        .replace_all(text, |caps: &regex::Captures| {
+            let raw = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+            let parsed = if let Some(hex) = raw.strip_prefix('x').or_else(|| raw.strip_prefix('X'))
+            {
+                u32::from_str_radix(hex, 16).ok()
+            } else {
+                raw.parse::<u32>().ok()
+            };
+            parsed
+                .and_then(char::from_u32)
+                .map(|ch| ch.to_string())
+                .unwrap_or_else(|| caps.get(0).map(|m| m.as_str()).unwrap_or("").to_string())
+        })
+        .to_string()
 }
 
 fn html_escape(text: &str) -> String {
@@ -1915,6 +2780,78 @@ fn chart_svg(title: &str, labels: &[String], values: &[f64]) -> String {
     format!("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"720\" height=\"420\"><rect width=\"100%\" height=\"100%\" fill=\"white\"/><text x=\"40\" y=\"40\" font-size=\"24\" font-family=\"Arial\">{}</text>{}</svg>", html_escape(title), bars)
 }
 
+fn workflow_step_args(command: &str, step: &Value) -> Result<Vec<String>> {
+    let mut args = vec!["officegen".to_string()];
+    args.extend(command.split_whitespace().map(str::to_string));
+    for key in ["input", "before", "after"] {
+        if let Some(value) = step.get(key).and_then(Value::as_str) {
+            args.push(value.to_string());
+        }
+    }
+    if step.get("dryRun").and_then(Value::as_bool) == Some(true) {
+        args.push("--dry-run".into());
+    }
+    if step.get("resolveSelectors").and_then(Value::as_bool) == Some(true) {
+        args.push("--resolve-selectors".into());
+    }
+    for (json_key, flag) in [
+        ("target", "--target"),
+        ("format", "--format"),
+        ("ops", "--ops"),
+        ("out", "--out"),
+        ("sheet", "--sheet"),
+        ("range", "--range"),
+        ("data", "--data"),
+        ("schema", "--schema"),
+    ] {
+        if let Some(value) = step.get(json_key).and_then(Value::as_str) {
+            args.push(flag.into());
+            args.push(value.to_string());
+        }
+    }
+    Ok(args)
+}
+
+fn enforce_workflow_step_output_root(cwd: &Path, output_root: &Path, step: &Value) -> Result<()> {
+    for key in ["out", "manifest", "trace", "summary"] {
+        if let Some(value) = step.get(key).and_then(Value::as_str) {
+            let out = safe_output_path(cwd, value)?;
+            if !out.starts_with(output_root) {
+                bail!(
+                    "SECURITY_PATH_OUTSIDE_ROOT: workflow step output must stay inside output-root"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn workflow_summary_markdown(ok: bool, manifest: &Value) -> String {
+    let mut out = String::from("# officegen workflow summary\n\n");
+    out.push_str(if ok {
+        "Status: pass\n\n"
+    } else {
+        "Status: blocked\n\n"
+    });
+    if let Some(steps) = manifest.get("steps").and_then(Value::as_array) {
+        for step in steps {
+            let id = step.get("id").and_then(Value::as_str).unwrap_or("step");
+            let command = step
+                .get("command")
+                .and_then(Value::as_str)
+                .unwrap_or("command");
+            let step_ok = step.get("ok").and_then(Value::as_bool).unwrap_or(false);
+            out.push_str(&format!(
+                "- {} `{}` {}\n",
+                if step_ok { "[x]" } else { "[ ]" },
+                command,
+                id
+            ));
+        }
+    }
+    out
+}
+
 fn parse_mermaid_nodes(text: &str) -> Vec<Value> {
     let re = Regex::new(r#"([A-Za-z0-9_]+)(?:\[([^\]]+)\])?"#).unwrap();
     let mut seen = BTreeSet::new();
@@ -1985,6 +2922,112 @@ fn cell_value_text(value: &Value) -> String {
         Value::Bool(b) => b.to_string(),
         _ => value.to_string(),
     }
+}
+
+fn extract_placeholders(text: &str) -> Vec<String> {
+    let re = Regex::new(r"\{\{\s*([A-Za-z0-9_.-]+)\s*\}\}").unwrap();
+    let mut seen = BTreeSet::new();
+    re.captures_iter(text)
+        .filter_map(|cap| cap.get(1).map(|m| m.as_str().to_string()))
+        .filter(|name| seen.insert(name.clone()))
+        .collect()
+}
+
+fn fill_ooxml_placeholders(
+    path: &Path,
+    bytes: &[u8],
+    data: &Value,
+) -> Result<(Vec<u8>, usize, Vec<String>)> {
+    enforce_zip_safety_bytes(path, bytes)?;
+    let mut input = ZipArchive::new(Cursor::new(bytes))?;
+    let mut entries = Vec::new();
+    let mut replacements = 0usize;
+    let mut missing = BTreeSet::new();
+    let re = Regex::new(r"\{\{\s*([A-Za-z0-9_.-]+)\s*\}\}").unwrap();
+
+    for i in 0..input.len() {
+        let mut file = input.by_index(i)?;
+        let name = file.name().to_string();
+        let mut data_bytes = Vec::new();
+        file.read_to_end(&mut data_bytes)?;
+        if name.ends_with(".xml") {
+            if let Ok(xml) = String::from_utf8(data_bytes.clone()) {
+                let mut local_replacements = 0usize;
+                let next = re
+                    .replace_all(&xml, |caps: &regex::Captures| {
+                        let field = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+                        if let Some(value) = template_value(data, field) {
+                            local_replacements += 1;
+                            xml_escape(&value)
+                        } else {
+                            missing.insert(field.to_string());
+                            caps.get(0).map(|m| m.as_str()).unwrap_or("").to_string()
+                        }
+                    })
+                    .to_string();
+                replacements += local_replacements;
+                data_bytes = next.into_bytes();
+            }
+        }
+        entries.push((name, data_bytes));
+    }
+
+    let mut out = Cursor::new(Vec::new());
+    {
+        let mut writer = ZipWriter::new(&mut out);
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        for (name, data_bytes) in entries {
+            writer.start_file(name, options)?;
+            writer.write_all(&data_bytes)?;
+        }
+        writer.finish()?;
+    }
+    Ok((
+        out.into_inner(),
+        replacements,
+        missing.into_iter().collect(),
+    ))
+}
+
+fn validate_xlsx_formulas_in_package(path: &Path, bytes: &[u8]) -> Result<()> {
+    enforce_zip_safety_bytes(path, bytes)?;
+    let mut zip = ZipArchive::new(Cursor::new(bytes))?;
+    let formula_re = Regex::new(r"(?s)<f(?:\s[^>]*)?>(.*?)</f>").unwrap();
+    for i in 0..zip.len() {
+        let mut file = zip.by_index(i)?;
+        let name = file.name().to_string();
+        if !(name.starts_with("xl/worksheets/")
+            || name.starts_with("xl/chartsheets/")
+            || name == "xl/workbook.xml")
+        {
+            continue;
+        }
+        let mut text = String::new();
+        if file.read_to_string(&mut text).is_err() {
+            continue;
+        }
+        for cap in formula_re.captures_iter(&text) {
+            if let Some(formula) = cap.get(1) {
+                crate::v5_xlsx_template::validate_formula_safety(&xml_unescape(formula.as_str()))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn template_value(data: &Value, field: &str) -> Option<String> {
+    let mut current = data;
+    for part in field.split('.') {
+        current = current.get(part)?;
+    }
+    Some(match current {
+        Value::String(text) => text.clone(),
+        Value::Number(number) => number.to_string(),
+        Value::Bool(value) => value.to_string(),
+        Value::Null => return None,
+        other => serde_json::to_string(other).ok()?,
+    })
 }
 
 fn readiness_for(result: &Value) -> String {

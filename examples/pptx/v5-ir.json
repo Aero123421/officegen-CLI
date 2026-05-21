@@ -1,0 +1,28 @@
+{
+  "schema": "officegen.ir.document@2.0",
+  "title": "Officegen v5 PPTX Example",
+  "targets": ["pptx"],
+  "slides": [
+    {
+      "title": "Authoring Surface",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "PPTX blocks render to scoped OOXML text shapes."
+        },
+        {
+          "type": "table",
+          "rows": [
+            ["Capability", "Status"],
+            ["Text edit", "Safe"],
+            ["Table cell edit", "Safe"]
+          ]
+        },
+        {
+          "type": "chart",
+          "title": "Presence summary"
+        }
+      ]
+    }
+  ]
+}

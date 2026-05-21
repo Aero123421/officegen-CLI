@@ -279,7 +279,7 @@ dependencies = [
 
 [[package]]
 name = "officegen"
-version = "4.5.0"
+version = "5.0.0"
 dependencies = [
  "anyhow",
  "hex",

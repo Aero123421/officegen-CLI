@@ -26,6 +26,7 @@ npm run version:bump -- 1.2.7
 ```bash
 npm run version:check
 npm run installer:smoke
+npm run v5:acceptance -- --expected-version <version>
 # macOS/Linux
 npm run native:smoke -- --bin target/release/officegen --expected-version <version>
 # Windows
@@ -38,6 +39,8 @@ npm test
 npm run build
 npm run pack:smoke
 ```
+
+v5.0.0 以降の publish/tag 前には `npm run v5:acceptance -- --expected-version <version>` の A1-A12 がすべて pass していることを確認する。
 
 `npm run version:check` が失敗する状態で release tag を切らない。
 

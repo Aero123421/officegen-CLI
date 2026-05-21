@@ -1,0 +1,14 @@
+{
+  "schema": "officegen.ir.document@2.0",
+  "title": "Template fill example",
+  "targets": ["xlsx"],
+  "sheets": [
+    {
+      "name": "Template",
+      "rows": [
+        ["Customer", "{{customer.name}}"],
+        ["Amount", "{{amount}}"]
+      ]
+    }
+  ]
+}

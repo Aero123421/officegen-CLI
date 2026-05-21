@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-const bin = valueArg("--bin") ?? process.env.OFFICEGEN_NATIVE_BIN;
-const expectedVersion = valueArg("--expected-version") ?? process.env.OFFICEGEN_EXPECTED_VERSION;
+const bin = valueArg("--bin") ?? process.env.OFFICEGEN_NATIVE_BIN ?? defaultNativeBin();
+const expectedVersion = resolveExpectedVersion(valueArg("--expected-version") ?? process.env.OFFICEGEN_EXPECTED_VERSION);
 
 if (!bin) {
-  console.error("usage: node scripts/native-release-smoke.mjs --bin <path> [--expected-version x.y.z]");
+  console.error("usage: node scripts/native-release-smoke.mjs [--bin <path>] [--expected-version x.y.z|current]");
   process.exit(2);
 }
 
@@ -18,7 +18,7 @@ if (!existsSync(binPath)) {
   process.exit(1);
 }
 
-for (const args of [["--version"], ["--help"], ["capabilities", "--agent", "--json"]]) {
+for (const args of [["--version"], ["--help"], ["capabilities", "--agent", "--json"], ["help", "workflow", "inspect-edit-verify", "--agent", "--strict-json"]]) {
   const result = run(binPath, args);
   if (args[0] === "--version" && expectedVersion && result.stdout.trim() !== expectedVersion) {
     console.error(`officegen --version returned ${result.stdout.trim()}, expected ${expectedVersion}.`);
@@ -37,6 +37,22 @@ for (const args of [["--version"], ["--help"], ["capabilities", "--agent", "--js
     const capabilityText = JSON.stringify(envelope.result);
     if (capabilityText.includes("mcp serve")) {
       console.error("native binary capabilities exposed mcp serve.");
+      process.exit(1);
+    }
+    if (/\bmcp\b/i.test(capabilityText) || /\bplugin\b/i.test(capabilityText)) {
+      console.error("native binary agent capabilities exposed removed management runtime wording.");
+      process.exit(1);
+    }
+  }
+  if (args[0] === "help") {
+    const envelope = JSON.parse(result.stdout);
+    const helpText = JSON.stringify(envelope.result);
+    if (!envelope.ok || envelope.result?.schema !== "officegen.help@1.2") {
+      console.error("native binary workflow help smoke did not emit a valid help envelope.");
+      process.exit(1);
+    }
+    if (/\bmcp\b/i.test(helpText) || /\bplugin\b/i.test(helpText)) {
+      console.error("native binary agent workflow help exposed removed management runtime wording.");
       process.exit(1);
     }
   }
@@ -58,6 +74,36 @@ try {
   if (!envelope.ok || envelope.result?.format !== "docx") {
     console.error("native binary render/inspect smoke failed.");
     process.exit(1);
+  }
+  const workflow = path.join(temp, "workflow.json");
+  writeFileSync(workflow, JSON.stringify({
+    schema: "officegen.workflow@2.0",
+    version: "2.0",
+    outputRoot: "workflow-out",
+    steps: [
+      {
+        id: "scaffold",
+        command: "scaffold",
+        args: ["--kind", "docx", "--title", "Workflow smoke", "--out", "workflow.ir.json"]
+      },
+      {
+        id: "render",
+        command: "render",
+        args: ["workflow-out/workflow.ir.json", "--target", "docx", "--out", "workflow.docx"]
+      }
+    ]
+  }));
+  const workflowRun = run(binPath, ["run", "workflow.json", "--agent", "--strict-json"], temp);
+  const workflowEnvelope = JSON.parse(workflowRun.stdout);
+  if (!workflowEnvelope.ok || workflowEnvelope.result?.schema !== "officegen.workflow.run.result@2.0") {
+    console.error("native binary workflow run smoke failed.");
+    process.exit(1);
+  }
+  for (const artifact of ["manifest.json", "trace.json", "summary.json", "workflow.docx"]) {
+    if (!existsSync(path.join(temp, "workflow-out", artifact))) {
+      console.error(`native binary workflow smoke did not write ${artifact}.`);
+      process.exit(1);
+    }
   }
   const rasterOut = path.join(temp, "raster-view");
   const raster = runAllowFailure(binPath, ["view", "smoke.docx", "--format", "png", "--out", "raster-view", "--agent", "--strict-json"], temp);
@@ -113,6 +159,18 @@ console.log(`officegen native binary smoke passed for ${binPath}`);
 function valueArg(name) {
   const index = process.argv.indexOf(name);
   return index >= 0 ? process.argv[index + 1] : undefined;
+}
+
+function defaultNativeBin() {
+  return path.join("target", "release", process.platform === "win32" ? "officegen.exe" : "officegen");
+}
+
+function resolveExpectedVersion(value) {
+  if (!value) return undefined;
+  if (value === "current") {
+    return JSON.parse(readFileSync("package.json", "utf8")).version;
+  }
+  return value.replace(/^v/, "");
 }
 
 function run(command, args, cwd = process.cwd()) {

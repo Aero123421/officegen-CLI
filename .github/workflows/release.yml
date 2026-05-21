@@ -50,6 +50,12 @@ jobs:
       - name: Install without lifecycle scripts
         run: npm ci --ignore-scripts --prefer-online --no-audit --no-fund
 
+      - name: Setup Rust
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
       - name: Version sync check
         run: npm run version:check
 
@@ -85,6 +91,12 @@ jobs:
 
       - name: Installer smoke
         run: npm run installer:smoke
+
+      - name: Build host native binary for v5 acceptance
+        run: cargo build --release --locked
+
+      - name: v5 acceptance
+        run: npm run v5:acceptance -- --bin target/release/officegen --expected-version "${{ steps.version.outputs.version }}"
 
       - name: GitHub install smoke
         run: npm run github-install:smoke
@@ -145,6 +157,13 @@ jobs:
         with:
           name: officegen-perfect-spec-evidence
           path: .officegen/acceptance/perfect-spec/**
+          if-no-files-found: error
+
+      - name: Upload v5 acceptance evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: officegen-v5-acceptance-evidence
+          path: .officegen/acceptance/v5.0.0/**
           if-no-files-found: error
 
   native:
@@ -297,6 +316,18 @@ jobs:
           pattern: officegen-native-*
           path: dist
           merge-multiple: true
+
+      - name: Download v5 acceptance evidence
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: officegen-v5-acceptance-evidence
+          path: .officegen/acceptance/v5.0.0
+
+      - name: Check v5 acceptance evidence
+        shell: bash
+        run: |
+          test -s .officegen/acceptance/v5.0.0/manifest.json
+          node -e "const m=require('./.officegen/acceptance/v5.0.0/manifest.json'); if (m.release !== 'v5.0.0' || !Array.isArray(m.checks) || !m.checks.every(c => c.ok)) process.exit(1)"
 
       - name: Release asset completeness check
         run: npm run native:assets:check -- --version "${{ steps.version.outputs.version }}" --dist-dir dist --include-installers

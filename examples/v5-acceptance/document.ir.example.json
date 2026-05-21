@@ -1,0 +1,17 @@
+{
+  "schema": "officegen.ir.document@1.2",
+  "title": "v5 acceptance",
+  "targets": ["pptx", "docx", "xlsx", "pdf"],
+  "sections": [
+    {
+      "id": "section-1",
+      "title": "Acceptance",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Replace this acceptance text"
+        }
+      ]
+    }
+  ]
+}
