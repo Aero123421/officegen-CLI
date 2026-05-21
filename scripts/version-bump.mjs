@@ -13,6 +13,8 @@ const coreTypesPath = "packages/core/src/types.ts";
 const coreDistTypesPath = "packages/core/dist/types.js";
 const coreDistDtsPath = "packages/core/dist/types.d.ts";
 const readmePath = "README.md";
+const cargoManifestPath = "Cargo.toml";
+const cargoLockPath = "Cargo.lock";
 
 const args = process.argv.slice(2);
 const checkOnly = args.includes("--check");
@@ -35,6 +37,8 @@ if (checkOnly) {
   if (!bumpArg) usage();
   await updatePackageManifests(nextVersion);
   await updatePackageLock(nextVersion);
+  await updateCargoManifestIfExists(nextVersion);
+  await updateCargoLockIfExists(nextVersion);
   await updateCoreVersionConstant(currentVersion, nextVersion);
   await updateReadme(currentVersion, nextVersion);
   console.log(`Updated Officegen version: ${currentVersion} -> ${nextVersion}`);
@@ -64,6 +68,8 @@ async function assertCurrentVersions(expectedVersion, foundIssues) {
   }
   await assertVersionText(coreDistTypesPath, expectedVersion, foundIssues, "OFFICEGEN_CLI_VERSION");
   await assertVersionText(coreDistDtsPath, expectedVersion, foundIssues, "OFFICEGEN_CLI_VERSION");
+  await assertCargoManifestVersion(expectedVersion, foundIssues);
+  await assertCargoLockVersion(expectedVersion, foundIssues);
   await assertReadmeReleaseRefs(expectedVersion, foundIssues);
 }
 
@@ -84,14 +90,43 @@ async function updatePackageLock(version) {
   await writeJson(lockPath, lock);
 }
 
+async function updateCargoManifestIfExists(version) {
+  let text;
+  try {
+    text = await readText(cargoManifestPath);
+  } catch (error) {
+    if (error?.code === "ENOENT") return;
+    throw error;
+  }
+  const after = replaceCargoPackageVersion(text, version);
+  await writeFile(path.resolve(cargoManifestPath), after, "utf8");
+}
+
+async function updateCargoLockIfExists(version) {
+  let text;
+  try {
+    text = await readText(cargoLockPath);
+  } catch (error) {
+    if (error?.code === "ENOENT") return;
+    throw error;
+  }
+  const after = replaceCargoLockPackageVersion(text, version);
+  await writeFile(path.resolve(cargoLockPath), after, "utf8");
+}
+
 async function updateCoreVersionConstant(currentVersion, version) {
-  await replaceVersion(coreTypesPath, currentVersion, version);
-  await replaceVersionIfExists(coreDistTypesPath, currentVersion, version);
-  await replaceVersionIfExists(coreDistDtsPath, currentVersion, version);
+  await replaceCoreVersionConstant(coreTypesPath, version);
+  await replaceCoreVersionConstantIfExists(coreDistTypesPath, version);
+  await replaceCoreVersionConstantIfExists(coreDistDtsPath, version);
 }
 
 async function updateReadme(currentVersion, version) {
-  await replaceVersion(readmePath, currentVersion, version);
+  const before = await readText(readmePath);
+  const after = before
+    .replaceAll(currentVersion, version)
+    .replace(/releases\/download\/v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?/g, `releases/download/v${version}`)
+    .replace(/officegen-v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?\.tgz/g, `officegen-v${version}.tgz`);
+  await writeFile(readmePath, after, "utf8");
 }
 
 function resolveNextVersion(currentVersion, bump) {
@@ -122,6 +157,23 @@ async function replaceVersion(filePath, currentVersion, version) {
   await writeFile(filePath, after, "utf8");
 }
 
+async function replaceCoreVersionConstantIfExists(filePath, version) {
+  try {
+    await replaceCoreVersionConstant(filePath, version);
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+}
+
+async function replaceCoreVersionConstant(filePath, version) {
+  const before = await readText(filePath);
+  const after = before.replace(/(OFFICEGEN_CLI_VERSION\s*=\s*")[^"]+(")/, `$1${version}$2`);
+  if (after === before && !before.includes(`OFFICEGEN_CLI_VERSION = "${version}"`)) {
+    throw new Error(`${filePath}: could not find OFFICEGEN_CLI_VERSION`);
+  }
+  await writeFile(filePath, after, "utf8");
+}
+
 async function readJson(filePath) {
   return JSON.parse(await readText(filePath));
 }
@@ -144,7 +196,10 @@ async function assertReadmeReleaseRefs(expectedVersion, foundIssues) {
     { label: "GitHub release download tag", regex: /github\.com\/[^\s)"']+\/releases\/download\/v(?<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/g },
     { label: "GitHub release tag URL", regex: /github\.com\/[^\s)"']+\/releases\/tag\/v(?<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/g },
     { label: "GitHub install ref", regex: /github:[^\s)"']+#v(?<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/g },
-    { label: "release tarball filename", regex: /officegen-v(?<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)\.tgz/g }
+    { label: "release tarball filename", regex: /officegen-v(?<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)\.tgz/g },
+    { label: "README cliVersion example", regex: /"cliVersion":\s*"(?<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)"/g },
+    { label: "benchmark result version filename", regex: /benchmark-results\/v(?<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)\.json/g },
+    { label: "version bump literal", regex: /version:bump -- (?<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/g }
   ];
 
   try {
@@ -172,6 +227,67 @@ async function assertReadmeReleaseRefs(expectedVersion, foundIssues) {
   } catch (error) {
     if (error?.code !== "ENOENT") throw error;
   }
+}
+
+async function assertCargoManifestVersion(expectedVersion, foundIssues) {
+  let text;
+  try {
+    text = await readText(cargoManifestPath);
+  } catch (error) {
+    if (error?.code === "ENOENT") return;
+    throw error;
+  }
+  const version = readCargoPackageVersion(text);
+  if (version !== expectedVersion) {
+    foundIssues.push(`${cargoManifestPath}: package.version expected ${expectedVersion}, found ${version ?? "<missing>"}`);
+  }
+}
+
+async function assertCargoLockVersion(expectedVersion, foundIssues) {
+  let text;
+  try {
+    text = await readText(cargoLockPath);
+  } catch (error) {
+    if (error?.code === "ENOENT") return;
+    throw error;
+  }
+  const version = readCargoLockPackageVersion(text);
+  if (version !== expectedVersion) {
+    foundIssues.push(`${cargoLockPath}: officegen package.version expected ${expectedVersion}, found ${version ?? "<missing>"}`);
+  }
+}
+
+function readCargoPackageVersion(text) {
+  return /^\[package\][\s\S]*?^\s*version\s*=\s*"(?<version>[^"]+)"\s*$/m.exec(text)?.groups?.version;
+}
+
+function replaceCargoPackageVersion(text, version) {
+  let replaced = false;
+  const after = text.replace(/(^\[package\][\s\S]*?^\s*version\s*=\s*")[^"]+(".*$)/m, (_section, before, afterVersion) => {
+    replaced = true;
+    return `${before}${version}${afterVersion}`;
+  });
+  if (!replaced) {
+    throw new Error(`${cargoManifestPath}: could not find [package] version`);
+  }
+  return after;
+}
+
+function readCargoLockPackageVersion(text) {
+  const section = /\[\[package\]\]\s*\nname = "officegen"\s*\nversion = "(?<version>[^"]+)"/m.exec(text);
+  return section?.groups?.version;
+}
+
+function replaceCargoLockPackageVersion(text, version) {
+  let replaced = false;
+  const after = text.replace(/(\[\[package\]\]\s*\nname = "officegen"\s*\nversion = ")[^"]+(")/m, (_match, before, afterVersion) => {
+    replaced = true;
+    return `${before}${version}${afterVersion}`;
+  });
+  if (!replaced) {
+    throw new Error(`${cargoLockPath}: could not find officegen package version`);
+  }
+  return after;
 }
 
 function textLocation(text, index) {

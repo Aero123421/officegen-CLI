@@ -83,6 +83,9 @@ jobs:
       - name: Packed install smoke
         run: npm run pack:smoke
 
+      - name: Installer smoke
+        run: npm run installer:smoke
+
       - name: GitHub install smoke
         run: npm run github-install:smoke
 
@@ -91,7 +94,12 @@ jobs:
           OFFICEGEN_GITHUB_INSTALL_SPEC: github:${{ github.repository }}#${{ github.sha }}
         run: npm run github-install:smoke
 
+      - name: GitHub tag install smoke
+        if: github.event_name == 'push'
+        run: npm run github-install:tag-smoke
+
       - name: Post-tag perfect-spec smoke evidence
+        if: github.event_name == 'push'
         run: npm run perfect-spec:post-tag-smoke
 
       - name: Perfect spec evidence
@@ -108,6 +116,14 @@ jobs:
           release_tarball="officegen-v${{ steps.version.outputs.version }}.tgz"
           mv "$tarball" "dist/${release_tarball}"
           node scripts/sha256-file.mjs "dist/${release_tarball}" > "dist/${release_tarball}.sha256"
+
+      - name: Package installers
+        shell: bash
+        run: |
+          cp install/install.sh dist/install.sh
+          cp install/install.ps1 dist/install.ps1
+          node scripts/sha256-file.mjs dist/install.sh > dist/install.sh.sha256
+          node scripts/sha256-file.mjs dist/install.ps1 > dist/install.ps1.sha256
 
       - name: Release tarball install smoke
         run: npm run release-tarball:smoke -- "dist/officegen-v${{ steps.version.outputs.version }}.tgz"
@@ -131,9 +147,106 @@ jobs:
           path: .officegen/acceptance/perfect-spec/**
           if-no-files-found: error
 
+  native:
+    name: Build native Rust (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+          - target: aarch64-apple-darwin
+            os: macos-15
+          - target: x86_64-pc-windows-msvc
+            os: windows-2025
+          - target: aarch64-pc-windows-msvc
+            os: windows-11-arm
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Setup Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: "24"
+
+      - name: Resolve release version
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            version="${{ inputs.version }}"
+          else
+            version="${GITHUB_REF_NAME#v}"
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Check manifest version
+        shell: bash
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          package_version="$(node -p "require('./package.json').version")"
+          cargo_version="$(node -e "const fs=require('fs'); const text=fs.readFileSync('Cargo.toml','utf8'); const m=/^\[package\][\s\S]*?^version\s*=\s*\"([^\"]+)\"/m.exec(text); console.log(m?.[1] ?? '')")"
+          test "$package_version" = "$version"
+          test "$cargo_version" = "$version"
+
+      - name: Setup Rust target
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add "${{ matrix.target }}"
+
+      - name: Build native binary
+        shell: bash
+        run: |
+          cargo fmt --check
+          cargo test --locked
+          cargo build --locked --release --target "${{ matrix.target }}"
+
+      - name: Native binary smoke
+        shell: bash
+        run: |
+          binary="target/${{ matrix.target }}/release/officegen"
+          if [[ "${{ matrix.target }}" == *windows* ]]; then
+            binary="${binary}.exe"
+          fi
+          npm run native:smoke -- --bin "$binary" --expected-version "${{ steps.version.outputs.version }}"
+
+      - name: Package native release asset
+        shell: bash
+        run: |
+          binary="target/${{ matrix.target }}/release/officegen"
+          if [[ "${{ matrix.target }}" == *windows* ]]; then
+            binary="${binary}.exe"
+          fi
+          node scripts/package-native-asset.mjs \
+            --bin "$binary" \
+            --target "${{ matrix.target }}" \
+            --version "${{ steps.version.outputs.version }}" \
+            --out-dir dist/native
+
+      - name: Attest native provenance
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: dist/native/*
+
+      - name: Upload native artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: officegen-native-${{ matrix.target }}
+          path: dist/native/*
+          if-no-files-found: error
+
   publish:
     name: Publish GitHub release
-    needs: build
+    needs: [build, native]
     runs-on: ubuntu-latest
 
     steps:
@@ -172,11 +285,21 @@ jobs:
       - name: Version sync check
         run: npm run version:check
 
-      - name: Download artifacts
+      - name: Download package artifacts
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           name: officegen-npm-package
           path: dist
+
+      - name: Download native artifacts
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          pattern: officegen-native-*
+          path: dist
+          merge-multiple: true
+
+      - name: Release asset completeness check
+        run: npm run native:assets:check -- --version "${{ steps.version.outputs.version }}" --dist-dir dist --include-installers
 
       - name: Create or update release
         uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3
@@ -191,3 +314,44 @@ jobs:
         env:
           OFFICEGEN_RELEASE_TARBALL_SPEC: https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.tag }}/officegen-v${{ steps.version.outputs.version }}.tgz
         run: npm run release-tarball:smoke
+
+      - name: Release curl installer smoke
+        shell: bash
+        run: |
+          install_root="$(mktemp -d)"
+          install_dir="${install_root}/bin"
+          curl -fsSL "https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.tag }}/install.sh" \
+            | OFFICEGEN_VERSION="${{ steps.version.outputs.version }}" OFFICEGEN_REPO="${{ github.repository }}" OFFICEGEN_INSTALL_DIR="$install_dir" sh
+          test "$("$install_dir/officegen" --version)" = "${{ steps.version.outputs.version }}"
+
+  windows-installer-smoke:
+    name: Release Windows irm installer smoke
+    needs: publish
+    runs-on: windows-2025
+
+    steps:
+      - name: Resolve release version
+        id: version
+        shell: pwsh
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $version = "${{ inputs.version }}"
+          } else {
+            $version = "${{ github.ref_name }}".TrimStart("v")
+          }
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "tag=v$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Release irm installer smoke
+        shell: pwsh
+        run: |
+          $installRoot = Join-Path ([System.IO.Path]::GetTempPath()) ([System.Guid]::NewGuid().ToString("N"))
+          $installDir = Join-Path $installRoot "bin"
+          $env:OFFICEGEN_VERSION = "${{ steps.version.outputs.version }}"
+          $env:OFFICEGEN_REPO = "${{ github.repository }}"
+          $env:OFFICEGEN_INSTALL_DIR = $installDir
+          irm "https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.tag }}/install.ps1" | iex
+          $actual = & (Join-Path $installDir "officegen.exe") --version
+          if ($actual -ne "${{ steps.version.outputs.version }}") {
+            throw "officegen.exe --version returned $actual"
+          }

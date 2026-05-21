@@ -1,0 +1,23 @@
+[package]
+name = "officegen"
+version = "4.0.0"
+edition = "2021"
+license = "MIT"
+description = "Officegen CLI native Rust runtime"
+repository = "https://github.com/Aero123421/officegen-CLI"
+
+[[bin]]
+name = "officegen"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+hex = "0.4"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+tempfile = "3"

@@ -9,8 +9,45 @@ permissions:
   contents: read
 
 jobs:
-  node:
-    name: Node package (${{ matrix.os }})
+  rust:
+    name: Rust native CLI (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Install Rust
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup component add rustfmt clippy
+
+      - name: Format check
+        run: cargo fmt --check
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Native CLI smoke
+        shell: bash
+        run: |
+          bin="target/release/officegen"
+          if [ "$RUNNER_OS" = "Windows" ]; then bin="target/release/officegen.exe"; fi
+          node scripts/native-release-smoke.mjs --bin "$bin" --expected-version "$(node -p "require('./package.json').version")"
+
+      - name: Installer smoke
+        run: npm run installer:smoke
+
+  node-compat:
+    name: Legacy contract checks (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -57,22 +94,11 @@ jobs:
       - name: Benchmark local fixtures
         run: npm run benchmark:local-fixtures
 
-      - name: Build
+      - name: Build legacy TypeScript package
         run: npm run build
 
-      - name: CLI smoke
-        run: |
-          node packages/cli/dist/main.js --version
-          node packages/cli/dist/main.js capabilities --json
-
-      - name: Packed install smoke
-        run: npm run pack:smoke
-
-      - name: GitHub HEAD install smoke
-        if: runner.os != 'Windows'
-        env:
-          OFFICEGEN_GITHUB_INSTALL_SPEC: github:${{ github.repository }}#${{ github.sha }}
-        run: npm run github-install:smoke
+      - name: Installer smoke
+        run: npm run installer:smoke
 
   dependency-review:
     name: Dependency review

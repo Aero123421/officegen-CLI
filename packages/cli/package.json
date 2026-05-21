@@ -1,6 +1,6 @@
 {
   "name": "@officegen/cli",
-  "version": "3.1.8",
+  "version": "4.0.0",
   "license": "MIT",
   "type": "module",
   "bin": {

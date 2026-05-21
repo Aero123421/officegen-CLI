@@ -6,37 +6,46 @@ It gives humans, CI, and AI agents a structured interface for PPTX, DOCX, XLSX, 
 
 ## What It Does
 
-- Generate PPTX, DOCX, XLSX, PDF, chart SVG, and diagram SVG artifacts from structured IR.
+- Generate basic PPTX, DOCX, XLSX, PDF, chart SVG, and diagram SVG artifacts from structured IR.
 - Inspect Office/PDF files with agent-safe JSON summaries, object maps, and untrusted-content markers.
-- Edit supported text, table, image, comment/redline/style, single-series chart data, pivot-refresh, slicer-selection, and non-redaction PDF overlay/annotation operations through JSON EditOps.
-- Capture template/design/layout signals and apply best-effort Office mutations with explicit limitations.
-- Verify openability, repair risk, layout warnings, semantic diffs, native renderer output, and repeated warning summaries.
+- Edit a conservative Rust-native subset of scoped text and existing XLSX cell/formula XML operations through JSON EditOps.
+- Disclose unsupported template/design/layout/native-renderer surfaces instead of returning false mutation success.
+- Verify package risks and portable readiness, with native Office/LibreOffice proof still treated as an external optional step.
 - Run multi-step workflows with traceable artifacts under `.officegen/runs`.
 - Keep risky capabilities honest: native renderers, plugins, and external-process features are gated by configuration.
 
 ## Install
 
-Requires Node.js 24 or later.
+Officegen v4 is a native Rust binary. Node.js is not required to run the CLI.
 
-Recommended install is the checked release tarball:
-
-```bash
-npm install -g https://github.com/Aero123421/officegen-CLI/releases/download/v3.1.8/officegen-v3.1.8.tgz
-```
-
-GitHub direct install is also smoke-tested, but use the tarball when an agent or CI needs the most deterministic path:
+macOS/Linux:
 
 ```bash
-npm install -g github:Aero123421/officegen-CLI#v3.1.8
+curl -fsSL https://github.com/Aero123421/officegen-CLI/releases/latest/download/install.sh | sh
 ```
 
-The `officegen` package name is not published from this project to the public npm registry, because that name is owned separately on npm.
+Windows PowerShell:
+
+```powershell
+irm https://github.com/Aero123421/officegen-CLI/releases/latest/download/install.ps1 | iex
+```
+
+Manual GitHub Release assets are also published with SHA-256 checksum files:
+
+- `officegen-v4.0.0-x86_64-unknown-linux-gnu.tar.gz`
+- `officegen-v4.0.0-aarch64-unknown-linux-gnu.tar.gz`
+- `officegen-v4.0.0-x86_64-apple-darwin.tar.gz`
+- `officegen-v4.0.0-aarch64-apple-darwin.tar.gz`
+- `officegen-v4.0.0-x86_64-pc-windows-msvc.zip`
+- `officegen-v4.0.0-aarch64-pc-windows-msvc.zip`
+
+The GitHub Release may also include `officegen-v4.0.0.tgz` as a legacy compatibility artifact for existing CI smoke tests. The native binary assets above are the primary v4 runtime path. The `officegen` package name is not published from this project to the public npm registry, because that name is owned separately on npm.
 
 Smoke check:
 
 ```bash
 officegen --version
-officegen capabilities --agent --json
+officegen capabilities --agent --strict-json
 ```
 
 ## Quick Start
@@ -135,7 +144,7 @@ officegen run workflow.json \
   --json
 ```
 
-This avoids PowerShell encoding surprises, records artifact `exists/bytes/sha256`, and makes missing expected outputs a top-level failure.
+The v4 Rust runtime exposes this command shape for compatibility, but workflow execution is not ported yet and currently fails closed with `FEATURE_NOT_IMPLEMENTED`. Use the explicit `inspect -> edit --dry-run -> edit -> diff -> verify` command sequence until the Rust workflow runner is implemented.
 
 ## Command Map
 
@@ -152,24 +161,24 @@ Core commands:
 - `edit` - JSON edit operations with dry-run and selector resolution
 - `scaffold` - starter IR generation
 - `render` - IR to PPTX, DOCX, XLSX, or PDF
-- `export` - PDF and preview-oriented exports
+- `export` - same-format copy/export only in the Rust runtime; cross-format conversion requires an external native renderer
 - `verify` - openability, repair risk, warning aggregation, and quality gates
 - `diagnose` - quality/layout issue detection
 - `repair` - conservative repair or suggested ops
 - `diff` - semantic and approximate visual comparison
-- `run` - manifest-driven workflows
+- `run` - manifest-driven workflow skeletons
 - `critique` - business-quality lint for generated PPTX/DOCX/XLSX
 - `improve` - plan-only improvement suggestions with executable command/EditOps skeletons
-- `benchmark` - optional corpus run/compare reports
+- `benchmark` - optional corpus run/compare reports (legacy TypeScript path; Rust-native benchmark is deferred)
 - `asset` - inspect files, inspect embedded Office media, extract, replace, and repair media
 - `chart` - standalone chart SVG
 - `diagram` - standalone diagram SVG
 
-Authoring commands enabled in the default profile:
+Authoring command names are preserved for agent compatibility, but mutation-heavy Rust-native implementations fail closed until ported:
 
-- `template`
-- `design`
-- `layout`
+- `template create/apply-map/fill`
+- `design init/edit/update/capture/apply`
+- `layout apply`
 
 Enterprise/optional commands are disabled unless enabled by policy:
 
@@ -189,38 +198,40 @@ officegen asset replace deck.pptx --asset ppt/media/image1.png logo.png --out de
 
 ## Current Capability Level
 
-Officegen v3.1.8 is a practical v2 authoring substrate. It is strongest when an agent needs structured, auditable Office automation rather than free-form binary generation.
+Officegen v4.0.0 is the native Rust transition release. It is strongest when an agent needs a Node-free, structured Office/PDF command surface with conservative OOXML inspection, basic artifact generation, scoped selector-based XML edits, and explicit failure for unported mutation-heavy surfaces. The v3.1.x TypeScript implementation remains the reference for the deepest legacy Office feature coverage while v4 ports that behavior into Rust.
 
 PPTX:
 
-- Native text, lists, tables, images, callouts, image replacement, fit/crop metadata, bounds edits, stable object maps, and single-series Office chart cache/workbook data updates.
-- `design capture` records design-pack and capture artifacts; `design apply --strategy theme-only|inspired|faithful` applies real PPTX changes where possible and reports limitations.
-- Master/layout/placeholder handling is conservative and best-effort rather than a full PowerPoint designer.
-- SmartArt editing and multi-series, secondary-axis, or combo chart editing are not implemented.
+- Rust-native inspect extracts package parts and XML text objects with stable IDs.
+- Rust-native render writes a minimal editable PPTX package for structured IR.
+- Rust-native edit supports scoped text XML replacement and reports package diff evidence.
+- Image replacement, theme/design mutation, SmartArt editing, and chart authoring beyond single-series chart data are not implemented in the Rust runtime.
 
 DOCX:
 
-- Paragraphs, headers/footers, comments, styles, tracked insert/delete/replace, selected table-cell text edits, and structure maps.
-- Useful for agent-safe document review and template-style editing.
-- Content controls and fields are inspected as structure signals; Officegen is not a full DTP or legal-contract authoring engine.
+- Rust-native inspect extracts document XML text and package metadata.
+- Rust-native render writes a minimal DOCX package.
+- Rust-native edit supports conservative text XML replacement.
+- Comments, tracked changes, style mutation, content controls, and legal/DTP fidelity are deferred in the Rust runtime.
 
 XLSX:
 
-- Compact workbook inspection, sheet/range scoping, formulas, tables, single-series chart data updates, named ranges, validation/protection signals, pivot refresh flags, and slicer selection updates.
-- Table/chart operations are OOXML based; recalculation and refresh validation can use native Excel when enabled.
-- Pivot field/layout/value editing, slicer authoring/styling, multi-series charts, secondary axes, and combo chart editing are not implemented.
+- Rust-native inspect extracts worksheet XML text/value nodes and package metadata.
+- Rust-native render writes a minimal XLSX package.
+- Rust-native edit supports existing-cell `xlsx.setCell` and `xlsx.setFormula`; it does not insert missing cells or recalculate formulas.
+- Table/chart operations, named ranges, validation/protection analysis, Pivot field/layout/value editing, slicers, and multi-series chart editing are deferred in the Rust runtime.
 
 PDF:
 
-- CJK-capable direct PDF generation with bundled fallback fonts.
-- PDF inspect includes best-effort text previews for plain text operators and quality warnings for zero extractable text.
-- PDF mutation is overlay/annotation only. Physical redaction, underlying-content removal, and general PDF content rewriting are unsupported.
+- Rust-native PDF generation is minimal and intended for smoke artifacts, not full typographic fidelity.
+- PDF inspect includes best-effort byte/text previews and confidence disclosure.
+- PDF mutation is not implemented in the Rust runtime. Physical redaction, underlying-content removal, and general PDF content rewriting are unsupported.
 - Scanned/image-heavy PDFs should be reviewed through page preview artifacts and external vision tooling.
 
 Native renderers:
 
-- `export --mode native` and `verify --native` can use Windows Office COM or LibreOffice headless when explicitly allowed.
-- Repair-dialog status is inferred from native open/export behavior and repair-mode signals.
+- `renderer doctor` reports native proof as unavailable in the Rust v4 runtime unless a future renderer bridge is added.
+- `export --mode native` and cross-format Office/LibreOffice conversion are not implemented in the Rust v4 runtime.
 - Default profile does not run external renderers.
 
 ## JSON Contracts
@@ -233,7 +244,7 @@ Use `--json` for machine-readable output. Responses use the `officegen.envelope@
   "ok": true,
   "command": "capabilities",
   "runId": "...",
-  "cliVersion": "3.1.8",
+  "cliVersion": "4.0.0",
   "capabilitiesHash": "sha256:...",
   "pathsRedacted": true,
   "result": {},
@@ -261,8 +272,8 @@ Officegen is conservative by default:
 - No required Python, Office, LibreOffice, Chromium, Java, or cloud API.
 - Output paths must stay inside the project unless policy allows otherwise.
 - Absolute output paths are denied by default.
-- Existing outputs require `--overwrite`.
-- Symlink and hardlink output writes are denied where detectable.
+- Parent-directory traversal is denied by default, and existing symlink outputs are denied where detectable.
+- Existing regular outputs may be replaced by commands that explicitly write an output path.
 - Project and home paths are redacted in JSON output.
 - Document text is marked untrusted for agents.
 - Native renderers, plugins, and external processes are disabled by default.
@@ -334,6 +345,7 @@ npm run typecheck
 npm test
 npm run build
 npm run pack:smoke
+npm run installer:smoke
 npm run perfect-spec:evidence
 npm run perfect-spec:check
 npm run github-install:smoke
@@ -356,7 +368,7 @@ npm run perfect-spec:evidence
 npm run perfect-spec:check -- --gate=publish
 npm run github-install:tag-smoke
 npm run github-install:remote-smoke
-OFFICEGEN_RELEASE_TARBALL_SPEC=https://github.com/Aero123421/officegen-CLI/releases/download/v3.1.8/officegen-v3.1.8.tgz npm run release-tarball:smoke
+OFFICEGEN_RELEASE_TARBALL_SPEC=https://github.com/Aero123421/officegen-CLI/releases/download/v4.0.0/officegen-v4.0.0.tgz npm run release-tarball:smoke
 ```
 
 The pre-tag visibility gate may show `L7-A009` as pending because tag and release install checks need a real tag or released asset. The release workflow must collect `.officegen/acceptance/perfect-spec/post-tag-smoke.json` plus the tag/remote smoke logs, regenerate the perfect-spec evidence bundle, and pass `npm run perfect-spec:check -- --gate=publish` before packaging release assets. The workflow uploads `.officegen/acceptance/perfect-spec` as CI evidence.
@@ -368,8 +380,8 @@ Optional public corpus benchmark:
 ```bash
 npm run benchmark:fetch
 npm run benchmark:review
-officegen benchmark run --manifest benchmarks/office-corpus/manifest.json --report-out .officegen/benchmark-results/v3.1.8.json --agent --json
-officegen benchmark compare old.json .officegen/benchmark-results/v3.1.8.json --json
+officegen benchmark run --manifest benchmarks/office-corpus/manifest.json --report-out .officegen/benchmark-results/v4.0.0.json --agent --json
+officegen benchmark compare old.json .officegen/benchmark-results/v4.0.0.json --json
 ```
 
 The benchmark downloads public corpus files into `.officegen/benchmark-corpus/`; Office/PDF binaries are not committed to the repository.
@@ -379,13 +391,13 @@ Version bump:
 ```bash
 npm run version:bump -- patch
 npm run version:bump -- minor
-npm run version:bump -- 3.1.8
+npm run version:bump -- 4.0.0
 npm run version:check
 ```
 
-The version bump script updates root/workspace manifests, `package-lock.json`, `OFFICEGEN_CLI_VERSION`, and README release URLs together.
+The version bump script updates root/workspace manifests, `package-lock.json`, `Cargo.toml`, `OFFICEGEN_CLI_VERSION`, and README release URLs together.
 
-GitHub Actions run CI, CodeQL, release packaging, tarball smoke tests, GitHub direct-install smoke tests, and release asset upload for `vX.Y.Z` tags.
+GitHub Actions run CI, CodeQL, release packaging, Rust native binary packaging, installer smoke tests, tarball smoke tests, GitHub direct-install smoke tests, and release asset upload for `vX.Y.Z` tags.
 
 Clean generated build output:
 

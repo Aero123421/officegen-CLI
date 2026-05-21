@@ -19,12 +19,17 @@ npm run version:bump -- major
 npm run version:bump -- 1.2.7
 ```
 
-このスクリプトは root/workspace package manifests、`package-lock.json`、`OFFICEGEN_CLI_VERSION`、README の release URL 例をまとめて同期する。
+このスクリプトは root/workspace package manifests、`package-lock.json`、`Cargo.toml`、`OFFICEGEN_CLI_VERSION`、README の release URL 例をまとめて同期する。
 
 リリース前、タグ作成前、version まわりを触った後は必ず以下を実行する。
 
 ```bash
 npm run version:check
+npm run installer:smoke
+npm run native:smoke -- --bin target/release/officegen --expected-version <version>
+cargo fmt --check
+cargo test --locked
+cargo build --release --locked
 npm run typecheck
 npm test
 npm run build
@@ -33,4 +38,6 @@ npm run pack:smoke
 
 `npm run version:check` が失敗する状態で release tag を切らない。
 
-GitHub Release は `vX.Y.Z` tag または手動 workflow で作るが、workflow は manifest version と release version の一致を検査する。ズレた場合は workflow が失敗するため、先に `npm run version:bump -- <version>` を実行してから commit/push/tag する。
+GitHub Release は `vX.Y.Z` tag または手動 workflow で作るが、workflow は manifest version、Cargo version、release version の一致を検査する。ズレた場合は workflow が失敗するため、先に `npm run version:bump -- <version>` を実行してから commit/push/tag する。
+
+v4 以降の配布は GitHub Release の native binary asset を主経路にする。macOS/Linux は `install/install.sh` を `curl` で取得し、Windows は `install/install.ps1` を `irm` で取得する。npm package/tarball は v3 互換確認用の legacy 経路として扱い、ランタイム要件に Node.js を戻さない。
