@@ -753,7 +753,7 @@ pub const COMMAND_REGISTRY: &[CommandSpec] = &[
         false,
         false,
         NO_FORMATS,
-        "MCP is removed from the v4.5 native command scope.",
+        "MCP is removed from the native command scope.",
     ),
     spec(
         "renderer list",
@@ -803,7 +803,7 @@ pub const COMMAND_REGISTRY: &[CommandSpec] = &[
         false,
         false,
         NO_FORMATS,
-        "Plugins are outside the v4.5 native command scope.",
+        "Plugins are outside the native command scope.",
     ),
     spec(
         "plugin inspect",
@@ -813,7 +813,7 @@ pub const COMMAND_REGISTRY: &[CommandSpec] = &[
         false,
         false,
         NO_FORMATS,
-        "Plugins are outside the v4.5 native command scope.",
+        "Plugins are outside the native command scope.",
     ),
     spec(
         "plugin install",
@@ -823,7 +823,7 @@ pub const COMMAND_REGISTRY: &[CommandSpec] = &[
         false,
         false,
         NO_FORMATS,
-        "Plugins are outside the v4.5 native command scope.",
+        "Plugins are outside the native command scope.",
     ),
     spec(
         "plugin trust",
@@ -833,7 +833,7 @@ pub const COMMAND_REGISTRY: &[CommandSpec] = &[
         false,
         false,
         NO_FORMATS,
-        "Plugins are outside the v4.5 native command scope.",
+        "Plugins are outside the native command scope.",
     ),
 ];
 

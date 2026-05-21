@@ -189,11 +189,32 @@ pub fn validate_minimal_required_fields(id_or_alias: &str, value: &Value) -> Val
 
     let mut errors = Vec::new();
     validate_value("", value, &schema_doc, &mut errors);
+    validate_schema_specific_contracts(schema.id, value, &mut errors);
 
     ValidationReport {
         schema_id: schema.id,
         ok: errors.is_empty(),
         errors,
+    }
+}
+
+fn validate_schema_specific_contracts(
+    schema_id: &str,
+    value: &Value,
+    errors: &mut Vec<ValidationError>,
+) {
+    if schema_id != "officegen.edit.ops@1.2" {
+        return;
+    }
+    let operations = value.get("operations").and_then(Value::as_array);
+    let ops_alias = value.get("ops").and_then(Value::as_array);
+    if let (Some(left), Some(right)) = (operations, ops_alias) {
+        if left != right {
+            errors.push(ValidationError {
+                instance_path: String::new(),
+                message: "operations and ops must be identical when both are present".to_string(),
+            });
+        }
     }
 }
 
@@ -229,6 +250,20 @@ fn parse_schema(schema: &RawSchema) -> Result<Value, SchemaCatalogError> {
 }
 
 fn validate_value(path: &str, value: &Value, schema: &Value, errors: &mut Vec<ValidationError>) {
+    if let Some(any_of) = schema.get("anyOf").and_then(Value::as_array) {
+        let matches_any_branch = any_of.iter().any(|branch| {
+            let mut branch_errors = Vec::new();
+            validate_value(path, value, branch, &mut branch_errors);
+            branch_errors.is_empty()
+        });
+        if !matches_any_branch {
+            errors.push(ValidationError {
+                instance_path: path.to_string(),
+                message: "expected value to match at least one anyOf schema".to_string(),
+            });
+        }
+    }
+
     if let Some(expected) = schema.get("const") {
         if value != expected {
             errors.push(ValidationError {

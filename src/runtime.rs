@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::registry;
 use crate::safety;
 use crate::schemas;
@@ -27,6 +29,16 @@ struct Context {
     command: String,
 }
 
+#[derive(Clone, Debug, Default)]
+struct OutputControl {
+    object_map_limit: Option<usize>,
+    json_budget_bytes: Option<usize>,
+    no_object_map: bool,
+    summary_only: bool,
+    sheet: Option<String>,
+    range: Option<String>,
+}
+
 pub fn run(args: Vec<String>, cwd: PathBuf) -> Result<()> {
     let ctx = Context::new(args, cwd);
     if !ctx.json && ctx.command == "version" {
@@ -37,7 +49,7 @@ pub fn run(args: Vec<String>, cwd: PathBuf) -> Result<()> {
         println!("{}", native_help());
         return Ok(());
     }
-    let payload = command_envelope(&ctx);
+    let payload = apply_json_budget(&ctx, command_envelope(&ctx))?;
     let ok = payload["ok"].as_bool().unwrap_or(false);
 
     if ctx.json || ctx.strict_json || ctx.agent {
@@ -163,7 +175,7 @@ fn dispatch(ctx: &Context) -> Result<Value> {
         "design" => design_payload(ctx, words.get(1).map(String::as_str)),
         "layout" => layout_payload(ctx, words.get(1).map(String::as_str)),
         "agent" => bail!(
-            "FEATURE_NOT_IMPLEMENTED: agent {} is not implemented in the Rust v4.5 native runtime",
+            "FEATURE_NOT_IMPLEMENTED: agent {} is not implemented in the Rust-native runtime",
             words.get(1).map(String::as_str).unwrap_or("install")
         ),
         "mcp" => bail!(
@@ -245,6 +257,167 @@ fn envelope(ctx: &Context, ok: bool, result: Value, error: Option<Value>) -> Val
     }
     payload.insert("result".into(), result);
     Value::Object(payload)
+}
+
+fn output_control(ctx: &Context) -> OutputControl {
+    OutputControl {
+        object_map_limit: option_value(&ctx.args, "--object-map-limit")
+            .and_then(|value| value.parse::<usize>().ok()),
+        json_budget_bytes: option_value(&ctx.args, "--json-budget-bytes")
+            .and_then(|value| value.parse::<usize>().ok()),
+        no_object_map: has_flag(&ctx.args, "--no-object-map"),
+        summary_only: has_flag(&ctx.args, "--summary-only"),
+        sheet: option_value(&ctx.args, "--sheet"),
+        range: option_value(&ctx.args, "--range"),
+    }
+}
+
+fn apply_json_budget(ctx: &Context, mut payload: Value) -> Result<Value> {
+    let Some(budget) = output_control(ctx).json_budget_bytes else {
+        return Ok(payload);
+    };
+    if budget == 0 || serde_json::to_string_pretty(&payload)?.len() <= budget {
+        return Ok(payload);
+    }
+
+    if let Some(result) = payload.get_mut("result") {
+        truncate_large_result(result, Some(8));
+    }
+    mark_payload_partial(
+        &mut payload,
+        "JSON_BUDGET_TRUNCATED",
+        "Response was truncated to stay within --json-budget-bytes; rerun with a larger budget or narrower inspect options.",
+    );
+
+    if serde_json::to_string_pretty(&payload)?.len() > budget {
+        if let Some(result) = payload.get_mut("result") {
+            truncate_large_result(result, Some(0));
+        }
+        mark_payload_partial(
+            &mut payload,
+            "JSON_BUDGET_SUMMARY_ONLY",
+            "Large arrays and previews were omitted because the JSON budget is very small.",
+        );
+    }
+    if serde_json::to_string_pretty(&payload)?.len() > budget {
+        if budget < 512 {
+            if let Some(result) = payload.get_mut("result") {
+                let schema = result
+                    .get("schema")
+                    .cloned()
+                    .unwrap_or_else(|| json!("unknown"));
+                let format = result.get("format").cloned().unwrap_or(Value::Null);
+                *result = json!({
+                    "schema": schema,
+                    "format": format,
+                    "partial": true,
+                    "readiness": "partial",
+                    "responseTruncated": true,
+                    "fullResultOmitted": true
+                });
+            }
+            mark_payload_partial(
+                &mut payload,
+                "JSON_BUDGET_TOO_SMALL",
+                "The requested JSON budget is below the minimum useful envelope size; output remains valid JSON but may exceed the requested byte count.",
+            );
+            return Ok(payload);
+        }
+        if let Some(result) = payload.get_mut("result") {
+            let schema = result
+                .get("schema")
+                .cloned()
+                .unwrap_or_else(|| json!("unknown"));
+            let format = result.get("format").cloned().unwrap_or(Value::Null);
+            let trusted = result.get("trusted").cloned().unwrap_or_else(|| json!({}));
+            *result = json!({
+                "schema": schema,
+                "format": format,
+                "trusted": trusted,
+                "partial": true,
+                "readiness": "partial",
+                "responseTruncated": true,
+                "fullResultOmitted": true
+            });
+        }
+        mark_payload_partial(
+            &mut payload,
+            "JSON_BUDGET_MINIMAL_RESULT",
+            "The result was reduced to trusted summary fields to fit the requested JSON budget.",
+        );
+    }
+    Ok(payload)
+}
+
+fn mark_payload_partial(payload: &mut Value, code: &str, message: &str) {
+    payload["readiness"] = json!("partial");
+    payload["partial"] = json!(true);
+    payload["responseTruncated"] = json!(true);
+    payload["objectiveOk"] = json!(true);
+    let warning = json!({"code": code, "severity": "warning", "message": message});
+    push_array_value(payload, "/warnings", warning.clone());
+    if let Some(result) = payload.get_mut("result") {
+        result["readiness"] = json!("partial");
+        result["partial"] = json!(true);
+        result["responseTruncated"] = json!(true);
+        push_array_value(result, "/warnings", warning);
+    }
+}
+
+fn push_array_value(target: &mut Value, pointer: &str, value: Value) {
+    if let Some(array) = target.pointer_mut(pointer).and_then(Value::as_array_mut) {
+        if !array
+            .iter()
+            .any(|existing| existing["code"] == value["code"])
+        {
+            array.push(value);
+        }
+    }
+}
+
+fn truncate_large_result(result: &mut Value, object_limit: Option<usize>) {
+    if let Some(limit) = object_limit {
+        truncate_array_field(result, "objectMap", limit);
+    }
+    if let Some(parts) = result
+        .pointer_mut("/untrusted/parts")
+        .and_then(Value::as_array_mut)
+    {
+        let original = parts.len();
+        parts.truncate(20);
+        if original > parts.len() {
+            result["truncated"]["untrustedParts"] =
+                json!({"originalCount": original, "returnedCount": parts.len()});
+        }
+    }
+    if let Some(parts) = result
+        .pointer_mut("/package/parts")
+        .and_then(Value::as_array_mut)
+    {
+        let original = parts.len();
+        parts.truncate(20);
+        if original > parts.len() {
+            result["truncated"]["packageParts"] =
+                json!({"originalCount": original, "returnedCount": parts.len()});
+        }
+    }
+    if let Some(preview) = result
+        .pointer("/untrusted/textPreview")
+        .and_then(Value::as_str)
+        .map(|text| text.chars().take(800).collect::<String>())
+    {
+        result["untrusted"]["textPreview"] = json!(preview);
+    }
+}
+
+fn truncate_array_field(result: &mut Value, field: &str, limit: usize) {
+    if let Some(array) = result.get_mut(field).and_then(Value::as_array_mut) {
+        let original = array.len();
+        array.truncate(limit);
+        if original > limit {
+            result["truncated"][field] = json!({"originalCount": original, "returnedCount": limit, "omittedCount": original - limit});
+        }
+    }
 }
 
 fn available_commands_for(ctx: &Context) -> Vec<&'static str> {
@@ -459,7 +632,7 @@ fn capabilities(ctx: &Context) -> Value {
             "pptx": {"text": true, "lists": true, "tables": "scoped XML edits", "charts": "single-series chart assets and package inspection", "smartArt": "inspect-only"},
             "docx": {"text": "scoped paragraph/run replacement", "tables": "inspect and scoped text replacement", "comments": "inspect count"},
             "xlsx": {"cells": true, "formulas": "guarded XML write; no calculation engine"},
-            "pdf": {"inspect": "best-effort byte/text metadata", "overlays": "not implemented in v4 rust core yet"}
+            "pdf": {"inspect": "best-effort safe text metadata; raw streams are never exposed", "overlays": "limited annotations only"}
         },
         "featureContracts": [
             {"area": "Runtime", "support": "supported", "summary": "Rust native single binary runtime; no Node required at execution time."},
@@ -469,7 +642,7 @@ fn capabilities(ctx: &Context) -> Value {
             "PowerPoint/Word/Excel native application fidelity still requires external Office/LibreOffice proof.",
             "PDF physical redaction remains unsupported.",
             "Complete SmartArt authoring remains unsupported.",
-            "Rust v4 does not preserve OOXML digital signatures or ZIP metadata during edits.",
+            "Rust native edit does not preserve OOXML digital signatures or ZIP metadata during edits.",
             "Mutation-heavy optional surfaces that are not ported fail closed instead of claiming success."
         ],
         "nextSuggestedCommands": if ctx.agent { json!(["officegen inspect input.pptx --agent --strict-json", "officegen schema list --agent --strict-json"]) } else { json!(["officegen help --json"]) }
@@ -478,11 +651,13 @@ fn capabilities(ctx: &Context) -> Value {
 
 fn help_payload(ctx: &Context, topic: &[&str]) -> Value {
     let topic_text = topic.join(" ");
+    let topic_details = help_topic_details(&topic_text);
     json!({
         "schema": "officegen.help@1.2",
         "topic": if topic_text.is_empty() { "index" } else { &topic_text },
         "commands": available_commands_for(ctx),
         "workflows": ["inspect-edit-verify", "render-view-verify"],
+        "details": topic_details,
         "agentGuidance": {
             "firstCommand": "officegen capabilities --agent --strict-json",
             "dryRunBeforeEdit": "Run edit --dry-run --resolve-selectors before writing.",
@@ -500,6 +675,36 @@ fn native_help() -> String {
             .collect::<Vec<_>>()
             .join("\n  ")
     )
+}
+
+fn help_topic_details(topic: &str) -> Value {
+    match topic {
+        "edit" => json!({
+            "usage": "officegen edit <input> --ops ops.json [--dry-run] [--out output.ext|--in-place]",
+            "required": ["input", "--ops"],
+            "dryRun": "Does not require --out and never writes an artifact.",
+            "opsPayloads": ["{\"schema\":\"officegen.edit.ops@1.2\",\"operations\":[...]}", "{\"schema\":\"officegen.edit.ops@1.2\",\"ops\":[...]}"],
+            "loop": ["inspect", "edit --dry-run", "edit --out", "diff", "verify"]
+        }),
+        "template fill" => json!({
+            "usage": "officegen template fill <template.pptx|docx|xlsx> --data data.json --out filled.ext",
+            "required": ["template", "--data", "--out"],
+            "contract": "Missing fields fail closed. If no placeholders are found, the command returns changed:false and writes no artifact.",
+            "placeholderSyntax": ["{{field}}"]
+        }),
+        "run" | "workflow" | "workflow inspect-edit-verify" => json!({
+            "usage": "officegen run workflow.json --output-root .officegen/runs --agent --strict-json",
+            "schema": "officegen.workflow@2.0",
+            "contract": "Workflow steps run sequentially, stop on first failure, and scope mutating outputs under outputRoot.",
+            "artifacts": ["manifest.json", "trace.json", "summary.json"],
+            "failure": "A failed step returns WORKFLOW_STEP_FAILED with failedStep and trace artifacts."
+        }),
+        "schema fetch" | "schema get" => json!({
+            "usage": "officegen schema fetch <schema-id|alias> [--out schema.json] --agent --strict-json",
+            "contract": "--out writes the raw JSON Schema while stdout remains a JSON envelope."
+        }),
+        _ => json!({}),
+    }
 }
 
 fn doctor() -> Value {
@@ -543,11 +748,22 @@ fn schema_payload(ctx: &Context, sub: Option<&str>) -> Result<Value> {
                 .unwrap_or_else(|| "officegen.envelope@1.2".into());
             let document =
                 schemas::fetch_schema(&id).map_err(|error| anyhow!("SCHEMA_INVALID: {error}"))?;
+            let mut artifacts = Vec::new();
+            let mut out = Value::Null;
+            if let Some(out_arg) = option_value(&ctx.args, "--out") {
+                let out_path = safe_output_path(&ctx.cwd, &out_arg)?;
+                atomic_write(&out_path, &serde_json::to_vec_pretty(&document.schema)?)?;
+                artifacts.push(artifact(&out_path, "schema", "json"));
+                out = json!(out_arg);
+            }
             Ok(json!({
                 "schema": "officegen.schema.get@1.2",
                 "id": document.id,
                 "path": document.path,
-                "jsonSchema": document.schema
+                "jsonSchema": document.schema,
+                "out": out,
+                "changed": !artifacts.is_empty(),
+                "artifacts": artifacts
             }))
         }
         "validate" => {
@@ -568,7 +784,7 @@ fn schema_payload(ctx: &Context, sub: Option<&str>) -> Result<Value> {
             }))
         }
         "migrate" => Ok(
-            json!({"schema": "officegen.schema.migrate.result@1.2", "changed": false, "summary": "No schema migration is required by the Rust v4 compatibility layer."}),
+            json!({"schema": "officegen.schema.migrate.result@1.2", "changed": false, "summary": "No schema migration is required by the current Rust-native compatibility layer."}),
         ),
         other => bail!("UNKNOWN_COMMAND: schema {other}"),
     }
@@ -577,9 +793,23 @@ fn schema_payload(ctx: &Context, sub: Option<&str>) -> Result<Value> {
 fn errors_payload(ctx: &Context, sub: Option<&str>) -> Result<Value> {
     let errors = json!([
         {"code": "UNKNOWN_COMMAND", "category": "usage", "severity": "error", "nextSuggestedCommands": ["officegen help --agent --strict-json"]},
-        {"code": "INPUT_NOT_FOUND", "category": "input", "severity": "error"},
-        {"code": "SCHEMA_INVALID", "category": "schema", "severity": "error"},
+        {"code": "INPUT_REQUIRED", "category": "usage", "severity": "error", "nextSuggestedCommands": ["officegen help <command> --agent --strict-json"]},
+        {"code": "OUTPUT_REQUIRED", "category": "usage", "severity": "error", "nextSuggestedCommands": ["officegen help edit --agent --strict-json"]},
+        {"code": "INPUT_NOT_FOUND", "category": "input", "severity": "error", "nextSuggestedCommands": ["officegen inspect <input> --agent --strict-json"]},
+        {"code": "SCHEMA_INVALID", "category": "schema", "severity": "error", "nextSuggestedCommands": ["officegen schema list --agent --strict-json"]},
+        {"code": "FORMAT_UNSUPPORTED", "category": "unsupported", "severity": "error"},
+        {"code": "UNSUPPORTED_FORMAT", "category": "unsupported", "severity": "error"},
+        {"code": "EXPORT_UNSUPPORTED", "category": "input", "severity": "error"},
+        {"code": "INTERNAL_ERROR", "category": "runtime", "severity": "error"},
         {"code": "OOXML_VALIDATION_FAILED", "category": "runtime", "severity": "error"},
+        {"code": "OOXML_PARSE_FAILED", "category": "runtime", "severity": "error"},
+        {"code": "SECURITY_PATH_OUTSIDE_ROOT", "category": "security", "severity": "error"},
+        {"code": "SECURITY_ZIP_UNSAFE", "category": "security", "severity": "error"},
+        {"code": "SELECTOR_NOT_FOUND", "category": "selector", "severity": "error", "nextSuggestedCommands": ["officegen inspect <input> --object-map-limit 20 --agent --strict-json"]},
+        {"code": "SELECTOR_AMBIGUOUS", "category": "selector", "severity": "error", "nextSuggestedCommands": ["officegen inspect <input> --object-map-limit 20 --agent --strict-json"]},
+        {"code": "WORKFLOW_STEP_FAILED", "category": "workflow", "severity": "error", "nextSuggestedCommands": ["officegen run workflow.json --output-root .officegen/runs --agent --strict-json"]},
+        {"code": "WORKFLOW_RECURSION_DENIED", "category": "workflow", "severity": "error", "nextSuggestedCommands": ["officegen help run --agent --strict-json"]},
+        {"code": "PDF_UNSUPPORTED_OPERATION", "category": "unsupported", "severity": "error"},
         {"code": "FEATURE_NOT_IMPLEMENTED", "category": "unsupported", "severity": "error"},
         {"code": "FEATURE_REMOVED_FROM_SCOPE", "category": "unsupported", "severity": "error", "nextSuggestedCommands": ["officegen capabilities --agent --strict-json"]}
     ]);
@@ -676,7 +906,7 @@ fn inspect_payload(ctx: &Context) -> Result<Value> {
     let input = first_input(&ctx.args, 1)
         .ok_or_else(|| anyhow!("INPUT_REQUIRED: inspect requires input file"))?;
     let path = safe_input_path(&ctx.cwd, &input)?;
-    let inspected = inspect_path(&path)?;
+    let inspected = apply_inspect_controls(inspect_path(&path)?, &output_control(ctx));
     Ok(inspected)
 }
 
@@ -684,17 +914,18 @@ fn view_payload(ctx: &Context) -> Result<Value> {
     let input = first_input(&ctx.args, 1)
         .ok_or_else(|| anyhow!("INPUT_REQUIRED: view requires input file"))?;
     let path = safe_input_path(&ctx.cwd, &input)?;
-    let inspected = inspect_path(&path)?;
+    let inspected = apply_inspect_controls(inspect_path(&path)?, &output_control(ctx));
     let format = option_value(&ctx.args, "--format").unwrap_or_else(|| "svg".into());
     if matches!(format.as_str(), "png" | "jpg" | "jpeg") {
         bail!(
-            "FEATURE_NOT_IMPLEMENTED: portable PNG/JPEG raster preview is not available in the Rust v4.5 runtime; use --format svg or --format html"
+            "FEATURE_NOT_IMPLEMENTED: portable PNG/JPEG raster preview is not available in the Rust-native runtime; use --format svg or --format html"
         );
     }
     let out = option_value(&ctx.args, "--out").unwrap_or_else(|| ".officegen/view".into());
     let out_path = safe_output_path(&ctx.cwd, &out)?;
     fs::create_dir_all(&out_path)?;
-    let artifact_path = if format == "html" {
+    let mut artifacts = Vec::new();
+    if format == "html" {
         let file = out_path.join("index.html");
         let html = if matches!(
             inspected.get("format").and_then(Value::as_str),
@@ -708,20 +939,37 @@ fn view_payload(ctx: &Context) -> Result<Value> {
             )
         };
         atomic_write(&file, html.as_bytes())?;
-        file
+        artifacts.push(artifact(&file, "view", &format));
     } else {
-        let file = out_path.join("page-001.svg");
-        let svg = if matches!(
-            inspected.get("format").and_then(Value::as_str),
-            Some("pptx" | "docx")
-        ) {
-            v5_ooxml::view_svg(&inspected, 960, 540)
-        } else {
-            text_svg(&inspect_text(&inspected), 960, 540)
-        };
-        atomic_write(&file, svg.as_bytes())?;
-        file
-    };
+        if inspected.get("format").and_then(Value::as_str) == Some("pptx") {
+            let max_pages = option_value(&ctx.args, "--max-pages")
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(50);
+            for (index, source_path) in pptx_slide_sources(&inspected)
+                .into_iter()
+                .take(max_pages)
+                .enumerate()
+            {
+                let file = out_path.join(format!("page-{index:03}.svg", index = index + 1));
+                let svg = semantic_svg_page(&inspected, Some(&source_path), 960, 540);
+                atomic_write(&file, svg.as_bytes())?;
+                artifacts.push(artifact(&file, "view", &format));
+            }
+        }
+        if artifacts.is_empty() {
+            let file = out_path.join("page-001.svg");
+            let svg = if matches!(
+                inspected.get("format").and_then(Value::as_str),
+                Some("pptx" | "docx")
+            ) {
+                semantic_svg_page(&inspected, None, 960, 540)
+            } else {
+                text_svg(&inspect_text(&inspected), 960, 540)
+            };
+            atomic_write(&file, svg.as_bytes())?;
+            artifacts.push(artifact(&file, "view", &format));
+        }
+    }
     Ok(json!({
         "schema": "officegen.view.result@1.2",
         "ok": true,
@@ -729,8 +977,8 @@ fn view_payload(ctx: &Context) -> Result<Value> {
         "out": out,
         "artifactUsable": true,
         "readiness": "pass",
-        "qualityWarnings": [],
-        "artifacts": [artifact(&artifact_path, "view", &format)]
+        "qualityWarnings": [{"code": "PORTABLE_SEMANTIC_PREVIEW", "severity": "info", "message": "SVG/HTML previews are semantic approximations, not native Office raster proof."}],
+        "artifacts": artifacts
     }))
 }
 
@@ -738,7 +986,7 @@ fn verify_payload(ctx: &Context) -> Result<Value> {
     let input = first_input(&ctx.args, 1)
         .ok_or_else(|| anyhow!("INPUT_REQUIRED: verify requires input file"))?;
     if has_flag(&ctx.args, "--native") {
-        bail!("FEATURE_NOT_IMPLEMENTED: verify --native is not implemented in the Rust v4 native runtime");
+        bail!("FEATURE_NOT_IMPLEMENTED: verify --native is not implemented in the portable Rust-native runtime");
     }
     let path = safe_input_path(&ctx.cwd, &input)?;
     let mut issues = structural_issues(&path)?;
@@ -762,6 +1010,11 @@ fn verify_payload(ctx: &Context) -> Result<Value> {
             .cloned()
             .unwrap_or_else(|| json!({}))
     };
+    let warnings = if matches!(ext.as_str(), "pptx" | "docx" | "xlsx") {
+        json!([{"code": "NATIVE_PROOF_NOT_RUN", "message": "Rust portable verify did not run PowerPoint/Word/Excel native proof."}])
+    } else {
+        json!([])
+    };
     Ok(json!({
         "schema": "officegen.verify.result@1.2",
         "status": status,
@@ -769,7 +1022,7 @@ fn verify_payload(ctx: &Context) -> Result<Value> {
         "summary": summary,
         "semanticPresence": semantic_presence,
         "issues": issues,
-        "warnings": [{"code": "NATIVE_PROOF_NOT_RUN", "message": "Rust portable verify did not run PowerPoint/Word/Excel native proof."}]
+        "warnings": warnings
     }))
 }
 
@@ -814,21 +1067,20 @@ fn edit_payload(ctx: &Context) -> Result<Value> {
     let input = first_input(&ctx.args, 1)
         .ok_or_else(|| anyhow!("INPUT_REQUIRED: edit requires input file"))?;
     let input_path = safe_input_path(&ctx.cwd, &input)?;
-    let in_place = has_flag(&ctx.args, "--in-place");
-    let out = match (option_value(&ctx.args, "--out"), in_place) {
-        (Some(out), _) => out,
-        (None, true) => input.clone(),
-        (None, false) => bail!("OUTPUT_REQUIRED: edit requires --out, or explicit --in-place"),
-    };
     let dry_run = has_flag(&ctx.args, "--dry-run");
+    let in_place = has_flag(&ctx.args, "--in-place");
+    let out = match (option_value(&ctx.args, "--out"), in_place, dry_run) {
+        (Some(out), _, _) => Some(out),
+        (None, true, _) => Some(input.clone()),
+        (None, false, true) => None,
+        (None, false, false) => {
+            bail!("OUTPUT_REQUIRED: edit requires --out, or explicit --in-place")
+        }
+    };
     let ops_path = option_value(&ctx.args, "--ops")
         .ok_or_else(|| anyhow!("INPUT_REQUIRED: edit requires --ops ops.json"))?;
     let ops = read_json(&ctx.cwd, &ops_path)?;
-    let operations = ops
-        .get("operations")
-        .and_then(Value::as_array)
-        .or_else(|| ops.as_array())
-        .ok_or_else(|| anyhow!("SCHEMA_INVALID: edit ops must contain operations array"))?;
+    let operations = edit_operations(&ops)?;
     let inspected = inspect_path(&input_path)?;
     let candidate = fs::read(&input_path)?;
     let is_pdf_edit = extension_path(&input_path).eq_ignore_ascii_case("pdf");
@@ -844,24 +1096,35 @@ fn edit_payload(ctx: &Context) -> Result<Value> {
     };
     let changed = edited != candidate;
     if !dry_run && changed {
-        let out_path = safe_output_path(&ctx.cwd, &out)?;
+        let out_path = safe_output_path(&ctx.cwd, out.as_deref().unwrap())?;
         atomic_write(&out_path, &edited)?;
     }
-    let after_parts = if dry_run || is_pdf_edit {
+    let after_parts = if is_pdf_edit {
         before_parts.clone()
     } else {
         zip_part_hashes_bytes_checked(&input_path, &edited).unwrap_or_default()
     };
+    let artifacts = if dry_run || !changed {
+        json!([])
+    } else {
+        let out_ref = out.as_deref().unwrap();
+        json!([artifact(
+            &safe_output_path(&ctx.cwd, out_ref)?,
+            "edit",
+            extension(out_ref)
+        )])
+    };
     Ok(json!({
         "schema": "officegen.edit.result@1.2",
         "dryRun": dry_run,
+        "wouldChange": changed,
         "changed": changed && !dry_run,
         "applied": applied,
         "inputSummary": inspected.get("trusted").cloned().unwrap_or_else(|| json!({})),
         "out": if dry_run { Value::Null } else { json!(out) },
         "packageDiff": part_hash_diff(&before_parts, &after_parts),
-        "warnings": [{"code": "OOXML_ZIP_METADATA_NOT_PRESERVED", "severity": "warning", "message": "Rust v4 edit preserves part names/content semantics but rewrites ZIP metadata and invalidates digital signatures."}],
-        "artifacts": if dry_run || !changed { json!([]) } else { json!([artifact(&safe_output_path(&ctx.cwd, &out)?, "edit", extension(&out))]) }
+        "warnings": [{"code": "OOXML_ZIP_METADATA_NOT_PRESERVED", "severity": "warning", "message": "Rust native edit preserves part names/content semantics but rewrites ZIP metadata and invalidates digital signatures."}],
+        "artifacts": artifacts
     }))
 }
 
@@ -894,7 +1157,7 @@ fn asset_payload(ctx: &Context, sub: Option<&str>) -> Result<Value> {
             )
         }
         "replace" => Ok(
-            json!({"schema": "officegen.asset.replace.result@1.2", "changed": false, "planOnly": true, "message": "Use edit ops for scoped package replacement in Rust v4."}),
+            json!({"schema": "officegen.asset.replace.result@1.2", "changed": false, "planOnly": true, "message": "Use edit ops for scoped package replacement in the Rust-native runtime."}),
         ),
         other => bail!("UNKNOWN_COMMAND: asset {other}"),
     }
@@ -976,12 +1239,12 @@ fn export_payload(ctx: &Context) -> Result<Value> {
     let input = first_input(&ctx.args, 1)
         .ok_or_else(|| anyhow!("INPUT_REQUIRED: export requires input file"))?;
     if option_value(&ctx.args, "--mode").as_deref() == Some("native") {
-        bail!("FEATURE_NOT_IMPLEMENTED: export --mode native is not implemented in the Rust v4 native runtime");
+        bail!("FEATURE_NOT_IMPLEMENTED: export --mode native is not implemented in the portable Rust-native runtime");
     }
     let to = option_value(&ctx.args, "--to").unwrap_or_else(|| "pdf".into());
     let from = extension(&input).to_ascii_lowercase();
     if from != to.to_ascii_lowercase() {
-        bail!("EXPORT_UNSUPPORTED: Rust v4 native export does not perform format conversion yet; use native renderer proof/export when available");
+        bail!("EXPORT_UNSUPPORTED: Rust-native export does not perform format conversion yet; use native renderer proof/export when available");
     }
     let out = option_value(&ctx.args, "--out").unwrap_or_else(|| format!("{input}.{to}"));
     let input_path = safe_input_path(&ctx.cwd, &input)?;
@@ -1028,7 +1291,7 @@ fn prepare_payload(ctx: &Context) -> Result<Value> {
 fn manifest_payload(ctx: &Context, sub: Option<&str>) -> Result<Value> {
     match sub.unwrap_or("create") {
         "verify" => bail!(
-            "FEATURE_NOT_IMPLEMENTED: manifest verify is not yet implemented in the Rust v4 native runtime"
+            "FEATURE_NOT_IMPLEMENTED: manifest verify is not yet implemented in the Rust-native runtime"
         ),
         other => Ok(
             json!({"schema": "officegen.manifest.result@1.2", "subcommand": other, "valid": false, "cwd": redacted(&ctx.cwd), "support": "metadata-only"}),
@@ -1060,12 +1323,12 @@ fn lock_payload(ctx: &Context) -> Result<Value> {
         .or_else(|| option_value(&ctx.args, "--name"))
         .unwrap_or_else(|| "agent".into());
     Ok(
-        json!({"schema": "officegen.lock.result@1.2", "owner": owner, "locked": false, "planOnly": true, "support": "lock persistence is not implemented in the Rust v4 native runtime"}),
+        json!({"schema": "officegen.lock.result@1.2", "owner": owner, "locked": false, "planOnly": true, "support": "lock persistence is not implemented in the Rust-native runtime"}),
     )
 }
 
 fn merge_payload(_ctx: &Context) -> Result<Value> {
-    bail!("FEATURE_NOT_IMPLEMENTED: merge is not yet implemented in the Rust v4 native runtime")
+    bail!("FEATURE_NOT_IMPLEMENTED: merge is not yet implemented in the Rust-native runtime")
 }
 
 fn run_payload(ctx: &Context, sub: Option<&str>) -> Result<Value> {
@@ -1081,7 +1344,7 @@ fn run_payload(ctx: &Context, sub: Option<&str>) -> Result<Value> {
 
 fn benchmark_payload(_ctx: &Context, sub: Option<&str>) -> Result<Value> {
     bail!(
-        "FEATURE_NOT_IMPLEMENTED: benchmark {} is not yet implemented in the Rust v4 native runtime",
+        "FEATURE_NOT_IMPLEMENTED: benchmark {} is not yet implemented in the Rust-native runtime",
         sub.unwrap_or("run")
     )
 }
@@ -1150,22 +1413,42 @@ fn template_payload(ctx: &Context, sub: Option<&str>) -> Result<Value> {
             if extension_path(&template_path).eq_ignore_ascii_case("xlsx") {
                 validate_xlsx_formulas_in_package(&template_path, &filled)?;
             }
+            let after_parts = zip_part_hashes_bytes_checked(&template_path, &filled)?;
+            let package_diff = part_hash_diff(&before_parts, &after_parts);
+            let content_changed = package_diff.as_array().map(|items| !items.is_empty()).unwrap_or(false);
+            if replacements == 0 && !content_changed {
+                let mut warnings = warnings;
+                warnings.push(json!({
+                    "code": "NO_PLACEHOLDERS_FOUND",
+                    "severity": "warning",
+                    "message": "No template placeholders were found or replaced; no output artifact was written."
+                }));
+                return Ok(json!({
+                    "schema": "officegen.template.fill.result@5.0",
+                    "changed": false,
+                    "replacements": 0,
+                    "missingFields": missing,
+                    "warnings": warnings,
+                    "packageDiff": package_diff,
+                    "out": Value::Null,
+                    "artifacts": []
+                }));
+            }
             let out_path = safe_output_path(&ctx.cwd, &out)?;
             atomic_write(&out_path, &filled)?;
-            let after_parts = zip_part_hashes_bytes_checked(&template_path, &filled)?;
             Ok(json!({
                 "schema": "officegen.template.fill.result@5.0",
-                "changed": filled != bytes,
+                "changed": content_changed,
                 "replacements": replacements,
                 "missingFields": missing,
                 "warnings": warnings,
-                "packageDiff": part_hash_diff(&before_parts, &after_parts),
+                "packageDiff": package_diff,
                 "out": out,
-                "artifacts": [artifact(&out_path, "template", extension(&out))]
+                "artifacts": if content_changed { json!([artifact(&out_path, "template", extension(&out))]) } else { json!([]) }
             }))
         }
         other => bail!(
-            "FEATURE_NOT_IMPLEMENTED: template {other} is not yet implemented in the Rust v4 native runtime"
+            "FEATURE_NOT_IMPLEMENTED: template {other} is not yet implemented in the Rust-native runtime"
         ),
     }
 }
@@ -1176,7 +1459,7 @@ fn design_payload(_ctx: &Context, sub: Option<&str>) -> Result<Value> {
             json!({"schema": "officegen.design.result@1.2", "subcommand": sub.unwrap_or("list"), "designs": [], "changed": false, "support": "discovery-only"}),
         ),
         other => bail!(
-            "FEATURE_NOT_IMPLEMENTED: design {other} is not yet implemented in the Rust v4 native runtime"
+            "FEATURE_NOT_IMPLEMENTED: design {other} is not yet implemented in the Rust-native runtime"
         ),
     }
 }
@@ -1185,7 +1468,7 @@ fn layout_payload(_ctx: &Context, sub: Option<&str>) -> Result<Value> {
     if sub != Some("apply") {
         bail!("UNKNOWN_COMMAND: layout {}", sub.unwrap_or(""));
     }
-    bail!("FEATURE_NOT_IMPLEMENTED: layout apply is not yet implemented in the Rust v4 native runtime")
+    bail!("FEATURE_NOT_IMPLEMENTED: layout apply is not yet implemented in the Rust-native runtime")
 }
 
 fn renderer_payload(_ctx: &Context, sub: Option<&str>) -> Result<Value> {
@@ -1195,7 +1478,9 @@ fn renderer_payload(_ctx: &Context, sub: Option<&str>) -> Result<Value> {
         );
     }
     if sub == Some("trust") {
-        bail!("FEATURE_NOT_IMPLEMENTED: renderer trust is not implemented in the Rust v4.5 native runtime");
+        bail!(
+            "FEATURE_NOT_IMPLEMENTED: renderer trust is not implemented in the Rust-native runtime"
+        );
     }
     Ok(management_payload(
         "officegen.renderer.result@1.2",
@@ -1225,6 +1510,109 @@ fn inspect_path(path: &Path) -> Result<Value> {
     }
 }
 
+fn apply_inspect_controls(mut inspected: Value, control: &OutputControl) -> Value {
+    apply_scope_filters(&mut inspected, control);
+    if control.summary_only {
+        inspected["objectMap"] = json!([]);
+        inspected["untrusted"] = json!({
+            "textPreview": inspected.pointer("/untrusted/textPreview").and_then(Value::as_str).unwrap_or("").chars().take(400).collect::<String>()
+        });
+        inspected["package"] = json!({});
+        inspected["truncated"]["summaryOnly"] = json!(true);
+        inspected["readiness"] = json!("partial");
+        return inspected;
+    }
+    if control.no_object_map {
+        let original = inspected
+            .get("objectMap")
+            .and_then(Value::as_array)
+            .map(Vec::len)
+            .unwrap_or(0);
+        inspected["objectMap"] = json!([]);
+        inspected["truncated"]["objectMap"] =
+            json!({"originalCount": original, "returnedCount": 0, "omittedCount": original});
+    } else if let Some(limit) = control.object_map_limit {
+        truncate_array_field(&mut inspected, "objectMap", limit);
+    }
+    inspected
+}
+
+fn apply_scope_filters(inspected: &mut Value, control: &OutputControl) {
+    if inspected.get("format").and_then(Value::as_str) == Some("xlsx") {
+        if control.sheet.is_none() && control.range.is_none() {
+            return;
+        }
+        if let Some(objects) = inspected.get_mut("objectMap").and_then(Value::as_array_mut) {
+            let sheet = control.sheet.as_deref();
+            let range = control.range.as_deref().and_then(parse_cell_range);
+            objects.retain(|object| {
+                let sheet_ok = sheet
+                    .map(|wanted| xlsx_object_matches_sheet(object, wanted))
+                    .unwrap_or(true);
+                let range_ok = range
+                    .map(|(start_col, start_row, end_col, end_row)| {
+                        object
+                            .get("cell")
+                            .and_then(Value::as_str)
+                            .and_then(parse_cell_ref)
+                            .map(|(col, row)| {
+                                col >= start_col
+                                    && col <= end_col
+                                    && row >= start_row
+                                    && row <= end_row
+                            })
+                            .unwrap_or(false)
+                    })
+                    .unwrap_or(true);
+                sheet_ok && range_ok
+            });
+            let count = objects.len();
+            inspected["trusted"]["summary"]["textObjects"] = json!(count);
+            inspected["trusted"]["summary"]["cells"] = json!(count);
+            inspected["trusted"]["summary"]["scope"] =
+                json!({"sheet": control.sheet.clone(), "range": control.range.clone()});
+        }
+    }
+}
+
+fn xlsx_object_matches_sheet(object: &Value, wanted: &str) -> bool {
+    let Some(source) = object.get("sourcePath").and_then(Value::as_str) else {
+        return false;
+    };
+    if let Ok(index) = wanted.parse::<usize>() {
+        return source == format!("xl/worksheets/sheet{index}.xml");
+    }
+    let normalized = wanted.trim();
+    source.ends_with(&format!("{normalized}.xml"))
+        || (normalized.eq_ignore_ascii_case("sheet1") && source.ends_with("sheet1.xml"))
+        || object
+            .pointer("/selectorHints/sheet")
+            .and_then(Value::as_str)
+            == Some(normalized)
+}
+
+fn parse_cell_range(range: &str) -> Option<(usize, usize, usize, usize)> {
+    let mut parts = range.split(':');
+    let start = parse_cell_ref(parts.next()?)?;
+    let end = parse_cell_ref(parts.next().unwrap_or_else(|| range))?;
+    Some((
+        start.0.min(end.0),
+        start.1.min(end.1),
+        start.0.max(end.0),
+        start.1.max(end.1),
+    ))
+}
+
+fn parse_cell_ref(cell: &str) -> Option<(usize, usize)> {
+    let re = Regex::new(r"^([A-Za-z]+)([0-9]+)$").ok()?;
+    let cap = re.captures(cell)?;
+    let col = cap.get(1)?.as_str().chars().fold(0usize, |acc, ch| {
+        acc * 26 + (ch.to_ascii_uppercase() as u8 - b'A' + 1) as usize
+    });
+    let row = cap.get(2)?.as_str().parse::<usize>().ok()?;
+    Some((col, row))
+}
+
 fn inspect_ooxml(path: &Path, format: &str) -> Result<Value> {
     if matches!(format, "pptx" | "docx") {
         return v5_ooxml::inspect_ooxml(path, format);
@@ -1246,19 +1634,38 @@ fn inspect_ooxml(path: &Path, format: &str) -> Result<Value> {
             continue;
         }
         let part_texts = xml_text_nodes(&xml);
-        for (idx, text) in part_texts.iter().enumerate() {
-            if text.trim().is_empty() {
-                continue;
+        if format == "xlsx" && name.starts_with("xl/worksheets/") {
+            for (cell, text, is_formula) in xlsx_cells_from_sheet_xml(&xml) {
+                if text.trim().is_empty() {
+                    continue;
+                }
+                let id = stable_id(format, &format!("{name}:{cell}"), 0, "");
+                object_map.push(json!({
+                    "stableObjectId": id,
+                    "type": "cell",
+                    "sourcePath": name,
+                    "cell": cell,
+                    "textPreview": text,
+                    "formula": is_formula,
+                    "selectorHints": {"cell": cell, "sourcePath": name, "stableObjectId": id}
+                }));
+                texts.push(text.clone());
             }
-            let id = stable_id(format, &name, idx, text);
-            object_map.push(json!({
-                "stableObjectId": id,
-                "type": "text",
-                "sourcePath": name,
-                "textPreview": text,
-                "selectorHints": {"contains": text, "stableObjectId": id}
-            }));
-            texts.push(text.clone());
+        } else {
+            for (idx, text) in part_texts.iter().enumerate() {
+                if text.trim().is_empty() {
+                    continue;
+                }
+                let id = stable_id(format, &name, idx, "");
+                object_map.push(json!({
+                    "stableObjectId": id,
+                    "type": "text",
+                    "sourcePath": name,
+                    "textPreview": text,
+                    "selectorHints": {"contains": text, "stableObjectId": id}
+                }));
+                texts.push(text.clone());
+            }
         }
     }
     let summary = json!({
@@ -1278,21 +1685,111 @@ fn inspect_ooxml(path: &Path, format: &str) -> Result<Value> {
     }))
 }
 
+fn xlsx_cells_from_sheet_xml(xml: &str) -> Vec<(String, String, bool)> {
+    let cell_re =
+        Regex::new(r#"(?s)<c\b[^>]*\br="([A-Za-z]+[0-9]+)"[^>]*(?:>(.*?)</c>|/>)"#).unwrap();
+    let f_re = Regex::new(r#"(?s)<f(?:\s[^>]*)?>(.*?)</f>"#).unwrap();
+    let v_re = Regex::new(r#"(?s)<(?:v|t)(?:\s[^>]*)?>(.*?)</(?:v|t)>"#).unwrap();
+    let mut cells = Vec::new();
+    for cap in cell_re.captures_iter(xml) {
+        let cell = cap
+            .get(1)
+            .map(|m| m.as_str())
+            .unwrap_or("")
+            .to_ascii_uppercase();
+        let cell_xml = cap.get(2).map(|m| m.as_str()).unwrap_or("");
+        if let Some(formula) = f_re.captures(cell_xml).and_then(|f| f.get(1)) {
+            cells.push((cell, xml_unescape(formula.as_str()), true));
+        } else if let Some(value) = v_re.captures(cell_xml).and_then(|v| v.get(1)) {
+            cells.push((cell, xml_unescape(value.as_str()), false));
+        }
+    }
+    cells
+}
+
 fn inspect_pdf(path: &Path) -> Result<Value> {
     let bytes = fs::read(path)?;
-    let text = String::from_utf8_lossy(&bytes);
-    let preview = text
-        .chars()
-        .filter(|c| !c.is_control() || c.is_whitespace())
-        .take(2000)
-        .collect::<String>();
+    let extracted = extract_pdf_literal_text(&bytes);
+    let preview = extracted.join(" ").chars().take(2000).collect::<String>();
+    let confidence = if preview.is_empty() { "none" } else { "low" };
+    let warnings = if preview.is_empty() {
+        json!([{"code": "PDF_TEXT_EXTRACTION_UNAVAILABLE", "severity": "warning", "message": "Portable PDF inspect did not find uncompressed literal text; raw PDF streams are intentionally not exposed as textPreview."}])
+    } else {
+        json!([{"code": "PDF_TEXT_EXTRACTION_BEST_EFFORT", "severity": "info", "message": "Portable PDF text extraction only reads simple uncompressed literal text operators."}])
+    };
     Ok(json!({
         "schema": "officegen.inspect.result@1.2",
         "format": "pdf",
-        "trusted": {"summary": {"format": "pdf", "bytes": bytes.len(), "sha256": sha256_file(path)?, "textBlocks": if preview.is_empty() { 0 } else { 1 }}},
-        "untrusted": {"textPreview": preview, "extractionConfidence": "low"},
-        "objectMap": if preview.is_empty() { json!([]) } else { json!([{"stableObjectId": stable_id("pdf", "page-1", 0, &preview), "type": "text", "page": 1, "textPreview": preview}])}
+        "trusted": {"summary": {"format": "pdf", "bytes": bytes.len(), "sha256": sha256_file(path)?, "textBlocks": extracted.len(), "extractionConfidence": confidence}},
+        "untrusted": {"textPreview": preview, "extractionConfidence": confidence},
+        "warnings": warnings,
+        "objectMap": extracted.iter().enumerate().map(|(idx, text)| json!({"stableObjectId": stable_id("pdf", "page-1", idx, ""), "type": "text", "page": 1, "textPreview": text, "extractionConfidence": "low"})).collect::<Vec<_>>()
     }))
+}
+
+fn extract_pdf_literal_text(bytes: &[u8]) -> Vec<String> {
+    let text = String::from_utf8_lossy(bytes);
+    let mut out = Vec::new();
+    let literal_re = Regex::new(r#"(?s)\(([^()]*)\)\s*(?:Tj|'|")"#).unwrap();
+    for cap in literal_re.captures_iter(&text) {
+        let decoded = decode_pdf_literal(cap.get(1).map(|m| m.as_str()).unwrap_or(""));
+        if is_useful_pdf_text(&decoded) {
+            out.push(decoded);
+        }
+        if out.len() >= 200 {
+            break;
+        }
+    }
+    let tj_array_re = Regex::new(r#"(?s)\[(.*?)\]\s*TJ"#).unwrap();
+    let inner_literal_re = Regex::new(r#"(?s)\(([^()]*)\)"#).unwrap();
+    for cap in tj_array_re.captures_iter(&text) {
+        let mut chunk = String::new();
+        for inner in inner_literal_re.captures_iter(cap.get(1).map(|m| m.as_str()).unwrap_or("")) {
+            chunk.push_str(&decode_pdf_literal(
+                inner.get(1).map(|m| m.as_str()).unwrap_or(""),
+            ));
+        }
+        if is_useful_pdf_text(&chunk) {
+            out.push(chunk);
+        }
+        if out.len() >= 200 {
+            break;
+        }
+    }
+    out
+}
+
+fn decode_pdf_literal(text: &str) -> String {
+    let mut out = String::new();
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('r') => out.push('\r'),
+                Some('t') => out.push('\t'),
+                Some('b') => out.push('\u{0008}'),
+                Some('f') => out.push('\u{000C}'),
+                Some('(') => out.push('('),
+                Some(')') => out.push(')'),
+                Some('\\') => out.push('\\'),
+                Some(other) => out.push(other),
+                None => {}
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn is_useful_pdf_text(text: &str) -> bool {
+    let trimmed = text.trim();
+    !trimmed.is_empty()
+        && !trimmed.contains("%PDF")
+        && !trimmed.contains("stream")
+        && !trimmed.contains("xref")
+        && trimmed.chars().filter(|ch| !ch.is_control()).count() >= 2
 }
 
 fn apply_edit_ops(input_path: &Path, bytes: &[u8], ops: &[Value]) -> Result<(Vec<u8>, usize)> {
@@ -1431,7 +1928,7 @@ fn validate_supported_edit_op(op: &Value) -> Result<()> {
         | "pdf.annotate"
         | "pdf.textOverlay" => Ok(()),
         "" => bail!("SCHEMA_INVALID: edit operation is missing op"),
-        other => bail!("FEATURE_NOT_IMPLEMENTED: edit op {other} is not implemented in the Rust v4 native runtime"),
+        other => bail!("FEATURE_NOT_IMPLEMENTED: edit op {other} is not implemented in the Rust-native runtime"),
     }
 }
 
@@ -2374,7 +2871,8 @@ fn sha256_text(text: &str) -> String {
 fn read_json(cwd: &Path, input: &str) -> Result<Value> {
     let path = safe_input_path(cwd, input)?;
     let text = fs::read_to_string(path).with_context(|| format!("failed to read {input}"))?;
-    Ok(serde_json::from_str(&text)?)
+    serde_json::from_str(&text)
+        .map_err(|error| anyhow!("SCHEMA_INVALID: failed to parse JSON {input}: {error}"))
 }
 
 fn write_json_file(cwd: &Path, out: &str, value: &Value) -> Result<()> {
@@ -2473,12 +2971,11 @@ fn pdf_escape(text: &str) -> String {
         .replace(')', "\\)")
 }
 
-fn stable_id(format: &str, part: &str, idx: usize, text: &str) -> String {
+fn stable_id(format: &str, part: &str, idx: usize, _text: &str) -> String {
     let mut hash = Sha256::new();
     hash.update(format.as_bytes());
     hash.update(part.as_bytes());
     hash.update(idx.to_string().as_bytes());
-    hash.update(text.as_bytes());
     format!("{format}:{}", &hex::encode(hash.finalize())[..16])
 }
 
@@ -2894,6 +3391,97 @@ fn text_svg(text: &str, width: usize, height: usize) -> String {
     format!("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\"><rect width=\"100%\" height=\"100%\" fill=\"white\"/>{body}</svg>")
 }
 
+fn pptx_slide_sources(inspected: &Value) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    if let Some(objects) = inspected.get("objectMap").and_then(Value::as_array) {
+        for object in objects {
+            let Some(source) = object.get("sourcePath").and_then(Value::as_str) else {
+                continue;
+            };
+            if source.starts_with("ppt/slides/slide") && seen.insert(source.to_string()) {
+                out.push(source.to_string());
+            }
+        }
+    }
+    if out.is_empty() {
+        out.push("ppt/slides/slide1.xml".to_string());
+    }
+    out
+}
+
+fn semantic_svg_page(
+    inspected: &Value,
+    source_filter: Option<&str>,
+    width: usize,
+    height: usize,
+) -> String {
+    let format = inspected
+        .get("format")
+        .and_then(Value::as_str)
+        .unwrap_or("document");
+    let objects = inspected
+        .get("objectMap")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|object| {
+            source_filter
+                .map(|source| object.get("sourcePath").and_then(Value::as_str) == Some(source))
+                .unwrap_or(true)
+        })
+        .collect::<Vec<_>>();
+    let mut body = String::new();
+    body.push_str(&format!(
+        "<text x=\"40\" y=\"52\" font-size=\"22\" font-family=\"Arial, sans-serif\" fill=\"#22313f\">{} semantic preview</text>",
+        html_escape(format)
+    ));
+    if let Some(source) = source_filter {
+        body.push_str(&format!(
+            "<text x=\"40\" y=\"78\" font-size=\"12\" font-family=\"Arial, sans-serif\" fill=\"#66717c\">{}</text>",
+            html_escape(source)
+        ));
+    }
+    let mut y = 112usize;
+    for object in objects.iter().take(14) {
+        let object_type = object.get("type").and_then(Value::as_str).unwrap_or("text");
+        let preview = object
+            .get("textPreview")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if object_type == "table" {
+            body.push_str(&format!("<rect x=\"40\" y=\"{y}\" width=\"840\" height=\"74\" fill=\"#f8fafb\" stroke=\"#c9d1d8\"/>"));
+            body.push_str(&format!("<text x=\"56\" y=\"{}\" font-size=\"14\" font-family=\"Arial, sans-serif\">table: {}</text>", y + 28, html_escape(&preview.chars().take(90).collect::<String>())));
+            y += 92;
+        } else {
+            body.push_str(&format!("<text x=\"48\" y=\"{y}\" font-size=\"17\" font-family=\"Arial, sans-serif\" fill=\"#1f2933\">{}: {}</text>", html_escape(object_type), html_escape(&preview.chars().take(100).collect::<String>())));
+            y += 30;
+        }
+        if y > height.saturating_sub(32) {
+            break;
+        }
+    }
+    if objects.is_empty() {
+        body.push_str("<text x=\"48\" y=\"132\" font-size=\"16\" font-family=\"Arial, sans-serif\">No semantic objects returned for this page.</text>");
+    }
+    format!("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\"><rect width=\"100%\" height=\"100%\" fill=\"white\"/><rect x=\"24\" y=\"24\" width=\"912\" height=\"492\" fill=\"none\" stroke=\"#d9dee3\"/>{body}</svg>")
+}
+
+fn edit_operations(ops: &Value) -> Result<&Vec<Value>> {
+    let operations = ops.get("operations").and_then(Value::as_array);
+    let ops_alias = ops.get("ops").and_then(Value::as_array);
+    if let (Some(left), Some(right)) = (operations, ops_alias) {
+        if left != right {
+            bail!("SCHEMA_INVALID: edit ops payload cannot contain different operations and ops arrays");
+        }
+    }
+    operations
+        .or(ops_alias)
+        .or_else(|| ops.as_array())
+        .ok_or_else(|| anyhow!("SCHEMA_INVALID: edit ops must contain operations or ops array"))
+}
+
 fn selector_contains(op: &Value) -> Option<String> {
     op.pointer("/selector/contains")
         .and_then(Value::as_str)
@@ -3041,6 +3629,10 @@ fn readiness_for(result: &Value) -> String {
 fn mutation_status_for(command: &str, result: &Value) -> &'static str {
     if result.get("planOnly").and_then(Value::as_bool) == Some(true) {
         "plan_only"
+    } else if result.get("dryRun").and_then(Value::as_bool) == Some(true)
+        && result.get("wouldChange").and_then(Value::as_bool) == Some(true)
+    {
+        "planned"
     } else if result.get("changed").and_then(Value::as_bool) == Some(true) {
         "changed"
     } else if is_mutation_command(command)
@@ -3130,6 +3722,8 @@ fn error_category(code: &str) -> &'static str {
         "schema"
     } else if code.starts_with("SECURITY_") {
         "security"
+    } else if code.starts_with("WORKFLOW_") {
+        "workflow"
     } else if code.starts_with("FEATURE_")
         || code == "EXPORT_UNSUPPORTED"
         || code == "UNSUPPORTED_FORMAT"
@@ -3153,13 +3747,60 @@ fn failure_class(ok: bool, error: Option<&Value>) -> &'static str {
         "input" => "input",
         "schema" => "schema",
         "security" => "security",
+        "workflow" => "workflow",
         "unsupported" => "unsupported",
         _ => "runtime",
     }
 }
 
 fn classify_error(message: &str) -> &str {
-    message.split(':').next().unwrap_or("UNKNOWN_COMMAND")
+    let prefix = message.split(':').next().unwrap_or("UNKNOWN_COMMAND");
+    if is_cataloged_error_code(prefix) {
+        return prefix;
+    }
+    if message.contains("invalid Zip archive")
+        || message.contains("unsupported Zip archive")
+        || message.contains("InvalidArchive")
+    {
+        return "SECURITY_ZIP_UNSAFE";
+    }
+    if message.contains("expected value")
+        || message.contains("key must be a string")
+        || message.contains("failed to parse JSON")
+        || message.contains("failed to parse workflow")
+        || message.contains("schema validation failed")
+    {
+        return "SCHEMA_INVALID";
+    }
+    "INTERNAL_ERROR"
+}
+
+fn is_cataloged_error_code(code: &str) -> bool {
+    matches!(
+        code,
+        "UNKNOWN_COMMAND"
+            | "UNKNOWN_OPTION"
+            | "INPUT_REQUIRED"
+            | "OUTPUT_REQUIRED"
+            | "INPUT_NOT_FOUND"
+            | "SCHEMA_INVALID"
+            | "FORMAT_UNSUPPORTED"
+            | "UNSUPPORTED_FORMAT"
+            | "EXPORT_UNSUPPORTED"
+            | "INTERNAL_ERROR"
+            | "OOXML_VALIDATION_FAILED"
+            | "OOXML_PARSE_FAILED"
+            | "SECURITY_PATH_OUTSIDE_ROOT"
+            | "SECURITY_ZIP_UNSAFE"
+            | "SELECTOR_NOT_FOUND"
+            | "SELECTOR_AMBIGUOUS"
+            | "WORKFLOW_STEP_FAILED"
+            | "WORKFLOW_RECURSION_DENIED"
+            | "PDF_UNSUPPORTED_OPERATION"
+            | "FEATURE_NOT_IMPLEMENTED"
+            | "FEATURE_REMOVED_FROM_SCOPE"
+            | "CAPABILITIES_HASH_MISMATCH"
+    )
 }
 
 #[cfg(test)]

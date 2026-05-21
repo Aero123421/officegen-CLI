@@ -31,6 +31,40 @@ function Resolve-OfficegenTarget {
   }
 }
 
+function Set-OfficegenPathPrecedence {
+  param([string]$Directory)
+
+  $currentSession = ($env:PATH -split ";") | Where-Object { $_ -and ($_ -ne $Directory) }
+  $env:PATH = (@($Directory) + $currentSession) -join ";"
+
+  $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+  $userParts = @()
+  if ($userPath) {
+    $userParts = ($userPath -split ";") | Where-Object { $_ -and ($_ -ne $Directory) }
+  }
+  [Environment]::SetEnvironmentVariable("Path", (@($Directory) + $userParts) -join ";", "User")
+}
+
+function Test-OfficegenCommandResolution {
+  param([string]$ExpectedExe, [string]$ExpectedVersion)
+
+  $commands = @(Get-Command officegen -All -ErrorAction SilentlyContinue)
+  $conflicts = @($commands | Where-Object { $_.Source -and ([System.IO.Path]::GetFullPath($_.Source) -ne [System.IO.Path]::GetFullPath($ExpectedExe)) })
+  if ($conflicts.Count -gt 0) {
+    Write-Warning "Detected older or competing officegen commands earlier/on PATH:"
+    $conflicts | ForEach-Object { Write-Warning ("  " + $_.Source) }
+  }
+
+  $resolved = Get-Command officegen -ErrorAction SilentlyContinue
+  if (-not $resolved -or ([System.IO.Path]::GetFullPath($resolved.Source) -ne [System.IO.Path]::GetFullPath($ExpectedExe))) {
+    throw "officegen command still resolves to '$($resolved.Source)' instead of '$ExpectedExe'. Restart the shell or remove the old npm shim (for example AppData\\Roaming\\npm\\officegen.ps1)."
+  }
+  $actualVersion = (& officegen --version).Trim()
+  if ($actualVersion -ne $ExpectedVersion) {
+    throw "officegen --version returned $actualVersion, expected $ExpectedVersion. A stale shim is still winning PATH resolution."
+  }
+}
+
 $resolvedVersion = Resolve-OfficegenVersion -RequestedVersion $Version -Repository $Repo
 $target = Resolve-OfficegenTarget
 $asset = "officegen-v$resolvedVersion-$target.zip"
@@ -62,10 +96,9 @@ try {
   Copy-Item -Force -Path $binary.FullName -Destination $destination
   Write-Host "Installed $destination"
 
-  $pathParts = ($env:PATH -split ";") | Where-Object { $_ }
-  if ($pathParts -notcontains $InstallDir) {
-    Write-Host "Add $InstallDir to PATH to run officegen from any directory."
-  }
+  Set-OfficegenPathPrecedence -Directory $InstallDir
+  Test-OfficegenCommandResolution -ExpectedExe $destination -ExpectedVersion $resolvedVersion
+  Write-Host "officegen v$resolvedVersion is first on PATH for this session and future user sessions."
 }
 finally {
   Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $tempDir

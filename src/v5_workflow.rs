@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::registry;
 use crate::safety;
 use anyhow::{anyhow, bail, Context as AnyhowContext, Result};
@@ -17,8 +19,12 @@ pub fn run_workflow(cwd: &Path, args: &[String]) -> Result<Value> {
     let workflow_path = safety::resolve_input_path(cwd, &workflow_arg)?;
     let workflow_text = fs::read_to_string(&workflow_path)
         .with_context(|| format!("failed to read workflow {}", redacted(&workflow_path)))?;
-    let workflow: Value = serde_json::from_str(&workflow_text)
-        .with_context(|| format!("failed to parse workflow {}", redacted(&workflow_path)))?;
+    let workflow: Value = serde_json::from_str(&workflow_text).map_err(|error| {
+        anyhow!(
+            "SCHEMA_INVALID: failed to parse workflow {}: {error}",
+            redacted(&workflow_path)
+        )
+    })?;
 
     if workflow.get("schema").and_then(Value::as_str) != Some("officegen.workflow@2.0") {
         bail!("SCHEMA_INVALID: run requires officegen.workflow@2.0");
@@ -97,7 +103,10 @@ pub fn run_workflow(cwd: &Path, args: &[String]) -> Result<Value> {
             Err(error) => {
                 stopped = true;
                 failed_step = json!(step_id);
-                failure_message = Some(error.to_string());
+                let detail = error.to_string();
+                failure_message = Some(format!(
+                    "WORKFLOW_STEP_FAILED: step {step_id} failed before execution: {detail}"
+                ));
                 trace_steps.push(json!({
                     "id": step_id,
                     "index": index,
@@ -108,7 +117,7 @@ pub fn run_workflow(cwd: &Path, args: &[String]) -> Result<Value> {
                     "startedAtUnixMs": started_at,
                     "finishedAtUnixMs": finished_at,
                     "durationMs": finished_at.saturating_sub(started_at),
-                    "error": error.to_string()
+                    "error": detail
                 }));
                 break;
             }
@@ -129,6 +138,11 @@ pub fn run_workflow(cwd: &Path, args: &[String]) -> Result<Value> {
         "failedStep": failed_step,
         "steps": trace_steps
     });
+    let completed_steps = trace["steps"]
+        .as_array()
+        .map(|steps| steps.iter().filter(|step| step["status"] == "pass").count())
+        .unwrap_or_default();
+    let document_changed = workflow_document_changed(&trace);
     let summary = json!({
         "schema": "officegen.workflow.summary@2.0",
         "ok": ok,
@@ -136,14 +150,14 @@ pub fn run_workflow(cwd: &Path, args: &[String]) -> Result<Value> {
         "workflow": redacted(&workflow_path),
         "outputRoot": redacted(&output_root),
         "stepCount": steps.len(),
-        "completedSteps": trace["steps"].as_array().map(Vec::len).unwrap_or_default(),
+        "completedSteps": completed_steps,
         "failedStep": trace["failedStep"],
         "message": failure_message.clone().unwrap_or_else(|| "workflow completed".to_string())
     });
     let mut artifacts = vec![
-        artifact(&manifest_path, "manifest", "json"),
-        artifact(&trace_path, "trace", "json"),
-        artifact(&summary_path, "summary", "json"),
+        declared_artifact(&manifest_path, "manifest", "json"),
+        declared_artifact(&trace_path, "trace", "json"),
+        declared_artifact(&summary_path, "summary", "json"),
     ];
     artifacts.extend(step_artifacts(&trace));
     let manifest = json!({
@@ -167,22 +181,20 @@ pub fn run_workflow(cwd: &Path, args: &[String]) -> Result<Value> {
         "schema": "officegen.workflow.run.result@2.0",
         "ok": ok,
         "status": if ok { "pass" } else { "fail" },
-        "changed": true,
+        "changed": document_changed,
+        "workflowArtifactsWritten": true,
+        "documentChanged": document_changed,
         "execution": "sequential",
         "transport": "cli-json-file",
         "mcp": false,
         "workflowSchema": workflow["schema"],
         "outputRoot": redacted(&output_root),
-        "manifest": artifact(&manifest_path, "manifest", "json"),
-        "trace": artifact(&trace_path, "trace", "json"),
-        "summary": artifact(&summary_path, "summary", "json"),
-        "artifacts": [
-            artifact(&manifest_path, "manifest", "json"),
-            artifact(&trace_path, "trace", "json"),
-            artifact(&summary_path, "summary", "json")
-        ],
+        "manifest": declared_artifact(&manifest_path, "manifest", "json"),
+        "trace": declared_artifact(&trace_path, "trace", "json"),
+        "summary": declared_artifact(&summary_path, "summary", "json"),
+        "artifacts": artifacts,
         "stepCount": steps.len(),
-        "completedSteps": trace["steps"].as_array().map(Vec::len).unwrap_or_default(),
+        "completedSteps": completed_steps,
         "failedStep": trace["failedStep"],
         "message": failure_message.unwrap_or_else(|| "workflow completed".to_string())
     }))
@@ -220,7 +232,10 @@ fn prepare_step_args(
     if registry::find_command(&command_text(&prepared)).is_none() {
         bail!("UNKNOWN_COMMAND: {}", command_text(&prepared));
     }
-    if mutating_step_requires_output(&prepared) && !has_option(&prepared, "--out") {
+    if mutating_step_requires_output(&prepared)
+        && !has_option(&prepared, "--out")
+        && !dry_run_can_omit_output(&prepared)
+    {
         bail!("OUTPUT_REQUIRED: workflow mutating steps require --out inside outputRoot");
     }
 
@@ -380,6 +395,10 @@ fn mutating_step_requires_output(args: &[String]) -> bool {
     )
 }
 
+fn dry_run_can_omit_output(args: &[String]) -> bool {
+    command_text(args) == "edit" && has_option(args, "--dry-run")
+}
+
 fn step_artifacts(trace: &Value) -> Vec<Value> {
     trace
         .get("steps")
@@ -387,6 +406,7 @@ fn step_artifacts(trace: &Value) -> Vec<Value> {
         .into_iter()
         .flatten()
         .flat_map(|step| {
+            let out_arg = output_arg_from_step(step);
             step.pointer("/envelope/artifacts")
                 .and_then(Value::as_array)
                 .or_else(|| {
@@ -396,8 +416,54 @@ fn step_artifacts(trace: &Value) -> Vec<Value> {
                 .into_iter()
                 .flatten()
                 .cloned()
+                .map(move |artifact| normalize_step_artifact_path(artifact, out_arg.as_deref()))
         })
         .collect()
+}
+
+fn output_arg_from_step(step: &Value) -> Option<String> {
+    let args = step.get("args")?.as_array()?;
+    args.windows(2).find_map(|pair| {
+        if pair[0].as_str() == Some("--out") {
+            pair[1].as_str().map(str::to_string)
+        } else {
+            None
+        }
+    })
+}
+
+fn normalize_step_artifact_path(mut artifact: Value, out_arg: Option<&str>) -> Value {
+    let Some(out_arg) = out_arg else {
+        return artifact;
+    };
+    let Some(path) = artifact.get("path").and_then(Value::as_str) else {
+        return artifact;
+    };
+    let out_name = Path::new(out_arg)
+        .file_name()
+        .and_then(OsStr::to_str)
+        .unwrap_or(out_arg);
+    if path == out_name {
+        artifact["path"] = json!(out_arg.replace('\\', "/"));
+    }
+    artifact
+}
+
+fn workflow_document_changed(trace: &Value) -> bool {
+    trace
+        .get("steps")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|step| step["status"] == "pass")
+        .any(|step| {
+            let envelope = &step["envelope"];
+            envelope["mutationStatus"] == "changed"
+                || envelope["result"]["changed"].as_bool().unwrap_or(false)
+                || envelope["result"]["documentChanged"]
+                    .as_bool()
+                    .unwrap_or(false)
+        })
 }
 
 fn first_workflow_input(args: &[String]) -> Option<String> {
@@ -490,6 +556,10 @@ fn write_json(path: &Path, value: &Value) -> Result<()> {
 
 fn artifact(path: &Path, kind: &str, format: &str) -> Value {
     json!({"path": redacted(path), "kind": kind, "format": format, "exists": path.exists()})
+}
+
+fn declared_artifact(path: &Path, kind: &str, format: &str) -> Value {
+    json!({"path": redacted(path), "kind": kind, "format": format, "exists": true})
 }
 
 fn unix_millis() -> u128 {

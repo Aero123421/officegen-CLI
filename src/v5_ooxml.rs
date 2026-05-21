@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use anyhow::{anyhow, bail, Result};
 use regex::Regex;
 use serde_json::{json, Value};
@@ -423,22 +425,42 @@ fn docx_document_xml(ir: &Value, fallback_title: &str) -> String {
     body.push_str(&docx_paragraph(fallback_title, "Title"));
     if let Some(blocks) = ir.get("blocks").and_then(Value::as_array) {
         for block in blocks {
+            if block_text(block).trim() == fallback_title.trim()
+                && matches!(
+                    block.get("type").and_then(Value::as_str),
+                    Some("heading" | "title")
+                )
+            {
+                continue;
+            }
             body.push_str(&docx_block_xml(block));
         }
     }
-    for section in ir
+    for (section_index, section) in ir
         .get("sections")
         .and_then(Value::as_array)
         .unwrap_or(&Vec::new())
+        .iter()
+        .enumerate()
     {
         if let Some(title) = section.get("title").and_then(Value::as_str) {
-            body.push_str(&docx_paragraph(title, "Heading1"));
+            if !(section_index == 0 && title.trim() == fallback_title.trim()) {
+                body.push_str(&docx_paragraph(title, "Heading1"));
+            }
         }
         for block in section
             .get("blocks")
             .and_then(Value::as_array)
             .unwrap_or(&Vec::new())
         {
+            if block_text(block).trim() == fallback_title.trim()
+                && matches!(
+                    block.get("type").and_then(Value::as_str),
+                    Some("heading" | "title")
+                )
+            {
+                continue;
+            }
             body.push_str(&docx_block_xml(block));
         }
     }
@@ -666,16 +688,23 @@ fn summarize_ooxml(path: &Path, format: &str) -> Result<OoxmlSummary> {
         if file.read_to_string(&mut xml).is_err() {
             continue;
         }
-        images += xml.matches("<a:blip").count();
-        charts += xml.matches("<c:chart").count();
-        images += xml.matches("[Image:").count();
-        charts += xml.matches("[Chart:").count();
+        let semantic_part = format != "pptx" || name.starts_with("ppt/slides/slide");
+        if semantic_part {
+            images += xml.matches("<a:blip").count();
+            charts += xml.matches("<c:chart").count();
+            images += xml.matches("[Image:").count();
+            charts += xml.matches("[Chart:").count();
+        }
+
+        if !semantic_part {
+            continue;
+        }
 
         for (idx, text) in xml_text_nodes(&xml).iter().enumerate() {
             if text.trim().is_empty() {
                 continue;
             }
-            let id = stable_id(format, &name, idx, text);
+            let id = stable_id(format, &name, idx, "");
             object_map.push(json!({
                 "stableObjectId": id,
                 "type": "text",
@@ -693,7 +722,7 @@ fn summarize_ooxml(path: &Path, format: &str) -> Result<OoxmlSummary> {
                 .collect::<Vec<_>>()
                 .join(" ");
             object_map.push(json!({
-                "stableObjectId": stable_id(format, &name, idx, &preview),
+                "stableObjectId": stable_id(format, &format!("{name}:table"), idx, ""),
                 "type": "table",
                 "sourcePath": name,
                 "rowCount": rows.len(),
@@ -924,12 +953,11 @@ fn html_escape(text: &str) -> String {
     xml_escape(text)
 }
 
-fn stable_id(format: &str, part: &str, idx: usize, text: &str) -> String {
+fn stable_id(format: &str, part: &str, idx: usize, _text: &str) -> String {
     let mut hash = Sha256::new();
     hash.update(format.as_bytes());
     hash.update(part.as_bytes());
     hash.update(idx.to_string().as_bytes());
-    hash.update(text.as_bytes());
     format!("{format}:{}", &hex::encode(hash.finalize())[..16])
 }
 

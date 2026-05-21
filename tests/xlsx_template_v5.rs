@@ -212,6 +212,136 @@ fn edit_xlsx_package_ops_update_real_parts() {
 }
 
 #[test]
+fn xlsx_inspect_stable_cell_id_can_drive_dry_run_and_edit_with_ops_alias() {
+    let dir = tempdir().unwrap();
+    fs::write(
+        dir.path().join("base.json"),
+        serde_json::to_vec_pretty(&json!({
+            "schema": "officegen.ir.document@2.0",
+            "targets": ["xlsx"],
+            "sheets": [{"name": "Sheet1", "rows": [["Name", "Old"]]}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    officegen(
+        dir.path(),
+        &[
+            "render",
+            "base.json",
+            "--target",
+            "xlsx",
+            "--out",
+            "base.xlsx",
+            "--agent",
+            "--strict-json",
+        ],
+    );
+    let inspect = officegen(
+        dir.path(),
+        &["inspect", "base.xlsx", "--agent", "--strict-json"],
+    );
+    let object = inspect["result"]["objectMap"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|object| object["cell"] == "B1")
+        .expect("B1 cell is addressable");
+    let stable_id = object["stableObjectId"].as_str().unwrap();
+    fs::write(
+        dir.path().join("ops.json"),
+        serde_json::to_vec_pretty(&json!({
+            "schema": "officegen.edit.ops@1.2",
+            "ops": [{
+                "op": "xlsx.setCell",
+                "selector": {"stableObjectId": stable_id},
+                "value": "New"
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let dry = officegen(
+        dir.path(),
+        &[
+            "edit",
+            "base.xlsx",
+            "--ops",
+            "ops.json",
+            "--dry-run",
+            "--agent",
+            "--strict-json",
+        ],
+    );
+    assert_eq!(dry["ok"], true);
+    assert_eq!(dry["mutationStatus"], "planned");
+    assert_eq!(dry["result"]["wouldChange"], true);
+    assert!(!dir.path().join("dry-run.xlsx").exists());
+
+    let edited = officegen(
+        dir.path(),
+        &[
+            "edit",
+            "base.xlsx",
+            "--ops",
+            "ops.json",
+            "--out",
+            "edited.xlsx",
+            "--agent",
+            "--strict-json",
+        ],
+    );
+    assert_eq!(edited["ok"], true);
+    assert!(zip_text(&dir.path().join("edited.xlsx"), "xl/worksheets/sheet1.xml").contains("New"));
+}
+
+#[test]
+fn xlsx_scoped_inspect_keeps_summary_and_object_map_consistent() {
+    let dir = tempdir().unwrap();
+    fs::write(
+        dir.path().join("base.json"),
+        serde_json::to_vec_pretty(&json!({
+            "schema": "officegen.ir.document@2.0",
+            "targets": ["xlsx"],
+            "sheets": [{"name": "Sheet1", "rows": [["A", "B", "C"], ["D", "E", "F"]]}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    officegen(
+        dir.path(),
+        &[
+            "render",
+            "base.json",
+            "--target",
+            "xlsx",
+            "--out",
+            "base.xlsx",
+            "--agent",
+            "--strict-json",
+        ],
+    );
+    let scoped = officegen(
+        dir.path(),
+        &[
+            "inspect",
+            "base.xlsx",
+            "--sheet",
+            "1",
+            "--range",
+            "A1:C2",
+            "--agent",
+            "--strict-json",
+        ],
+    );
+    let object_count = scoped["result"]["objectMap"].as_array().unwrap().len();
+    assert_eq!(object_count, 6);
+    assert_eq!(scoped["result"]["trusted"]["summary"]["cells"], 6);
+    assert_eq!(scoped["result"]["trusted"]["summary"]["textObjects"], 6);
+}
+
+#[test]
 fn template_inspect_and_fill_xlsx_placeholders() {
     let dir = tempdir().unwrap();
     fs::write(
@@ -273,6 +403,58 @@ fn template_inspect_and_fill_xlsx_placeholders() {
     let sheet = zip_text(&dir.path().join("filled.xlsx"), "xl/worksheets/sheet1.xml");
     assert!(sheet.contains("Nano"));
     assert!(!sheet.contains("{{name}}"));
+}
+
+#[test]
+fn template_fill_without_placeholders_is_noop_without_artifact() {
+    let dir = tempdir().unwrap();
+    fs::write(
+        dir.path().join("plain.json"),
+        serde_json::to_vec_pretty(&json!({
+            "schema": "officegen.ir.document@2.0",
+            "targets": ["xlsx"],
+            "sheets": [{"name": "Plain", "rows": [["Name", "Ada"]]}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    officegen(
+        dir.path(),
+        &[
+            "render",
+            "plain.json",
+            "--target",
+            "xlsx",
+            "--out",
+            "plain.xlsx",
+            "--agent",
+            "--strict-json",
+        ],
+    );
+    fs::write(
+        dir.path().join("data.json"),
+        serde_json::to_vec_pretty(&json!({"name": "Nano"})).unwrap(),
+    )
+    .unwrap();
+    let fill = officegen(
+        dir.path(),
+        &[
+            "template",
+            "fill",
+            "plain.xlsx",
+            "--data",
+            "data.json",
+            "--out",
+            "filled.xlsx",
+            "--agent",
+            "--strict-json",
+        ],
+    );
+    assert_eq!(fill["ok"], true);
+    assert_eq!(fill["mutationStatus"], "noop");
+    assert_eq!(fill["result"]["changed"], false);
+    assert_eq!(fill["result"]["replacements"], 0);
+    assert!(!dir.path().join("filled.xlsx").exists());
 }
 
 #[test]

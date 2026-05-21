@@ -108,7 +108,32 @@ cp "$bin_path" "$install_dir/officegen"
 chmod 755 "$install_dir/officegen"
 
 log "Installed $install_dir/officegen"
-case ":$PATH:" in
+export PATH="$install_dir:$(printf '%s' "$PATH" | awk -v RS=: -v ORS=: -v d="$install_dir" '$0 != d { print }' | sed 's/:$//')"
+
+profile_hint=""
+case "${SHELL:-}" in
+  */zsh) profile_hint="$HOME/.zshrc" ;;
+  */bash) profile_hint="$HOME/.bashrc" ;;
+  *) profile_hint="$HOME/.profile" ;;
+esac
+
+resolved="$(command -v officegen 2>/dev/null || true)"
+if [ "$resolved" != "$install_dir/officegen" ]; then
+  printf 'officegen install: PATH collision detected. Expected %s but resolved %s\n' "$install_dir/officegen" "${resolved:-<none>}" >&2
+  if command -v -a officegen >/dev/null 2>&1; then
+    command -v -a officegen >&2 || true
+  fi
+  fail "put $install_dir before old npm/homebrew/yarn shims in PATH"
+fi
+
+actual_version="$(officegen --version)"
+[ "$actual_version" = "$version" ] || fail "officegen --version returned $actual_version, expected $version"
+
+case ":$(printf '%s' "${PATH:-}"):" in
   *":$install_dir:"*) ;;
   *) log "Add $install_dir to PATH to run officegen from any directory." ;;
 esac
+
+log "officegen v$version is first on PATH for this installer process."
+log "To persist this in new shells, ensure this appears before npm/yarn/homebrew shims in $profile_hint:"
+log "  export PATH=\"$install_dir:\$PATH\""

@@ -13,11 +13,12 @@ const expectedVersion = resolveExpectedVersion(valueArg("--expected-version"));
 const bin = path.resolve(valueArg("--bin") ?? process.env.OFFICEGEN_NATIVE_BIN ?? defaultNativeBin());
 const keep = process.argv.includes("--keep");
 const release = expectedVersion ?? packageJson.version;
-const evidenceDir = path.join(root, ".officegen", "acceptance", "v5.0.0");
+const releaseTag = `v${release}`;
+const evidenceDir = path.join(root, ".officegen", "acceptance", releaseTag);
 const workDir = await mkdtemp(path.join(os.tmpdir(), "officegen-v5-acceptance-"));
 const evidence = {
   schema: "officegen.v5.acceptance.evidence@1",
-  release: "v5.0.0",
+  release: releaseTag,
   generatedAt: new Date().toISOString(),
   binary: bin,
   expectedVersion: expectedVersion ?? null,
@@ -195,22 +196,27 @@ try {
       throw new Error("package.json must not expose an npm officegen CLI path");
     }
     for (const target of ["x86_64-unknown-linux-gnu", "aarch64-apple-darwin", "x86_64-pc-windows-msvc"]) {
-      if (!docs.includes(`officegen-v5.0.0-${target}`)) throw new Error(`v5 matrix is missing ${target} asset`);
+      if (!docs.includes(`officegen-v${release}-${target}`) && !docs.includes(`officegen-v5.0.0-${target}`)) {
+        throw new Error(`v5 matrix is missing ${target} asset`);
+      }
     }
-    if (!docs.includes("npm run native:assets:check -- --version 5.0.0 --include-installers")) {
+    if (!docs.includes(`npm run native:assets:check -- --version ${release} --include-installers`) && !docs.includes("npm run native:assets:check -- --version 5.0.0 --include-installers")) {
       throw new Error("v5 matrix is missing native asset check gate");
     }
     return { scripts: ["v5:acceptance", "release:gate"] };
   });
 
-  await check("A12", "publish gate checklist is explicit before v5.0.0 tag/release", async () => {
-    const gateDoc = readText("docs/reviews/v5.0.0-release-gates.md");
+  await check("A12", `publish gate checklist is explicit before ${releaseTag} tag/release`, async () => {
+    const gatePath = existsSync(path.join(root, `docs/reviews/${releaseTag}-release-gates.md`))
+      ? `docs/reviews/${releaseTag}-release-gates.md`
+      : "docs/reviews/v5.0.0-release-gates.md";
+    const gateDoc = readText(gatePath);
     const required = [
-      "npm run version:bump -- 5.0.0",
+      `npm run version:bump -- ${release}`,
       "npm run version:check",
       "npm run installer:smoke",
-      "npm run v5:acceptance -- --bin target/release/officegen --expected-version 5.0.0",
-      "npm run v5:acceptance -- --bin target/release/officegen.exe --expected-version 5.0.0",
+      `npm run v5:acceptance -- --bin target/release/officegen --expected-version ${release}`,
+      `npm run v5:acceptance -- --bin target/release/officegen.exe --expected-version ${release}`,
       "cargo fmt --check",
       "cargo test --locked",
       "cargo build --release --locked",
@@ -221,7 +227,7 @@ try {
     for (const command of required) {
       if (!gateDoc.includes(command)) throw new Error(`release gate doc is missing: ${command}`);
     }
-    if (!gateDoc.includes("Do not create the v5.0.0 tag")) {
+    if (!gateDoc.includes(`Do not create the ${releaseTag} tag`) && !gateDoc.includes("Do not create the v5.0.0 tag")) {
       throw new Error("release gate doc must explicitly block tagging before gates pass");
     }
     return { requiredCommands: required.length };

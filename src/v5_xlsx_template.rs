@@ -2,6 +2,7 @@ use crate::safety;
 use anyhow::{anyhow, bail, Result};
 use regex::Regex;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::io::{Cursor, Write};
 use std::path::Path;
@@ -52,14 +53,7 @@ pub fn apply_xlsx_package_op(entries: &mut Vec<(String, Vec<u8>)>, op: &Value) -
                 .get("value")
                 .or_else(|| op.get("text"))
                 .ok_or_else(|| anyhow!("SCHEMA_INVALID: xlsx.setCell requires value"))?;
-            let cell = op
-                .get("cell")
-                .or_else(|| op.pointer("/selector/cell"))
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    anyhow!("SCHEMA_INVALID: xlsx.setCell requires cell or selector.cell")
-                })?;
-            let part = worksheet_part_for_op(entries, op)?;
+            let (part, cell) = worksheet_cell_for_op(entries, op)?;
             let idx = entry_index(entries, &part)
                 .ok_or_else(|| anyhow!("SELECTOR_NOT_FOUND: worksheet {part} was not found"))?;
             let xml = entry_text(entries, idx)?;
@@ -78,18 +72,11 @@ pub fn apply_xlsx_package_op(entries: &mut Vec<(String, Vec<u8>)>, op: &Value) -
                 .and_then(Value::as_str)
                 .ok_or_else(|| anyhow!("SCHEMA_INVALID: xlsx.setFormula requires formula"))?;
             validate_formula_safety(formula)?;
-            let cell = op
-                .get("cell")
-                .or_else(|| op.pointer("/selector/cell"))
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    anyhow!("SCHEMA_INVALID: xlsx.setFormula requires cell or selector.cell")
-                })?;
-            let part = worksheet_part_for_op(entries, op)?;
+            let (part, cell) = worksheet_cell_for_op(entries, op)?;
             let idx = entry_index(entries, &part)
                 .ok_or_else(|| anyhow!("SELECTOR_NOT_FOUND: worksheet {part} was not found"))?;
             let xml = entry_text(entries, idx)?;
-            let next = set_xlsx_cell_xml(&xml, cell, formula, true);
+            let next = set_xlsx_cell_xml(&xml, &cell, formula, true);
             if next == xml {
                 return Ok(false);
             }
@@ -239,7 +226,7 @@ fn xlsx_sheet_from_value(value: &Value, idx: usize) -> Result<XlsxSheet> {
         .map(|charts| charts.len() > 1)
         .unwrap_or(false)
     {
-        bail!("FEATURE_NOT_IMPLEMENTED: XLSX render supports one chart per sheet in v5.0.0");
+        bail!("FEATURE_NOT_IMPLEMENTED: XLSX render currently supports one chart per sheet");
     }
     Ok(XlsxSheet {
         name,
@@ -681,7 +668,7 @@ fn add_chart(entries: &mut Vec<(String, Vec<u8>)>, op: &Value) -> Result<bool> {
     let idx = entry_index(entries, &part)
         .ok_or_else(|| anyhow!("SELECTOR_NOT_FOUND: worksheet {part} was not found"))?;
     if entry_text(entries, idx)?.contains("<drawing ") {
-        bail!("FEATURE_NOT_IMPLEMENTED: XLSX addChart supports one drawing per sheet in v5.0.0");
+        bail!("FEATURE_NOT_IMPLEMENTED: XLSX addChart currently supports one drawing per sheet");
     }
     let chart_id = next_chart_id(entries);
     entries.push((
@@ -999,6 +986,13 @@ fn worksheet_part_for_op(entries: &[(String, Vec<u8>)], op: &Value) -> Result<St
     {
         return sheet_part_by_name(entries, sheet);
     }
+    if let Some(sheet_index) = op
+        .get("sheet")
+        .or_else(|| op.pointer("/selector/sheet"))
+        .and_then(Value::as_u64)
+    {
+        return sheet_part_by_index(entries, sheet_index as usize);
+    }
     let worksheets = entries
         .iter()
         .map(|(name, _)| name)
@@ -1010,6 +1004,56 @@ fn worksheet_part_for_op(entries: &[(String, Vec<u8>)], op: &Value) -> Result<St
         1 => Ok(worksheets[0].clone()),
         _ => bail!("SELECTOR_AMBIGUOUS: provide selector.sheet or selector.sourcePath"),
     }
+}
+
+fn worksheet_cell_for_op(entries: &[(String, Vec<u8>)], op: &Value) -> Result<(String, String)> {
+    if let Some(cell) = op
+        .get("cell")
+        .or_else(|| op.pointer("/selector/cell"))
+        .and_then(Value::as_str)
+    {
+        return Ok((
+            worksheet_part_for_op(entries, op)?,
+            cell.to_ascii_uppercase(),
+        ));
+    }
+    if let Some(stable_id) = op
+        .pointer("/selector/stableObjectId")
+        .and_then(Value::as_str)
+    {
+        for (part, data) in entries
+            .iter()
+            .filter(|(name, _)| name.starts_with("xl/worksheets/") && name.ends_with(".xml"))
+        {
+            let xml = String::from_utf8_lossy(data);
+            for cell in worksheet_cell_refs(&xml) {
+                if stable_id_xlsx(part, &cell) == stable_id {
+                    return Ok((part.clone(), cell));
+                }
+            }
+        }
+        bail!("SELECTOR_NOT_FOUND: XLSX stableObjectId did not match any worksheet cell");
+    }
+    bail!("SCHEMA_INVALID: xlsx cell edit requires cell, selector.cell, or selector.stableObjectId")
+}
+
+fn worksheet_cell_refs(xml: &str) -> Vec<String> {
+    let cell_re = Regex::new(r#"<c\b[^>]*\br="([A-Za-z]+[0-9]+)""#).unwrap();
+    cell_re
+        .captures_iter(xml)
+        .filter_map(|cap| cap.get(1))
+        .map(|m| m.as_str().to_ascii_uppercase())
+        .collect()
+}
+
+fn stable_id_xlsx(part: &str, cell: &str) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"xlsx");
+    hash.update(part.as_bytes());
+    hash.update(b":");
+    hash.update(cell.to_ascii_uppercase().as_bytes());
+    hash.update(b"0");
+    format!("xlsx:{}", &hex::encode(hash.finalize())[..16])
 }
 
 fn sheet_part_by_name(entries: &[(String, Vec<u8>)], sheet: &str) -> Result<String> {
@@ -1041,7 +1085,30 @@ fn sheet_part_by_name(entries: &[(String, Vec<u8>)], sheet: &str) -> Result<Stri
         .and_then(|cap| cap.get(1))
         .map(|m| m.as_str())
         .ok_or_else(|| anyhow!("SELECTOR_NOT_FOUND: workbook relationship for {sheet}"))?;
-    Ok(format!("xl/{}", target.trim_start_matches('/')))
+    Ok(normalize_workbook_rel_target(target))
+}
+
+fn sheet_part_by_index(entries: &[(String, Vec<u8>)], sheet_index: usize) -> Result<String> {
+    let one_based = sheet_index.max(1);
+    let worksheets = entries
+        .iter()
+        .map(|(name, _)| name)
+        .filter(|name| name.starts_with("xl/worksheets/sheet") && name.ends_with(".xml"))
+        .cloned()
+        .collect::<Vec<_>>();
+    worksheets
+        .get(one_based - 1)
+        .cloned()
+        .ok_or_else(|| anyhow!("SELECTOR_NOT_FOUND: worksheet index {one_based}"))
+}
+
+fn normalize_workbook_rel_target(target: &str) -> String {
+    let trimmed = target.trim_start_matches('/');
+    if trimmed.starts_with("xl/") {
+        trimmed.to_string()
+    } else {
+        format!("xl/{trimmed}")
+    }
 }
 
 fn add_sheet_relationship(

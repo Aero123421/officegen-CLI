@@ -32,12 +32,12 @@ irm https://github.com/Aero123421/officegen-CLI/releases/latest/download/install
 
 Manual GitHub Release assets are also published with SHA-256 checksum files:
 
-- `officegen-v5.0.0-x86_64-unknown-linux-gnu.tar.gz`
-- `officegen-v5.0.0-aarch64-unknown-linux-gnu.tar.gz`
-- `officegen-v5.0.0-x86_64-apple-darwin.tar.gz`
-- `officegen-v5.0.0-aarch64-apple-darwin.tar.gz`
-- `officegen-v5.0.0-x86_64-pc-windows-msvc.zip`
-- `officegen-v5.0.0-aarch64-pc-windows-msvc.zip`
+- `officegen-v5.1.0-x86_64-unknown-linux-gnu.tar.gz`
+- `officegen-v5.1.0-aarch64-unknown-linux-gnu.tar.gz`
+- `officegen-v5.1.0-x86_64-apple-darwin.tar.gz`
+- `officegen-v5.1.0-aarch64-apple-darwin.tar.gz`
+- `officegen-v5.1.0-x86_64-pc-windows-msvc.zip`
+- `officegen-v5.1.0-aarch64-pc-windows-msvc.zip`
 
 GitHub Release native assets are the supported v5 install path. This repository no longer exposes an npm `bin` entry for `officegen`, and `npm install` is not a supported runtime installation method.
 
@@ -178,7 +178,7 @@ officegen asset replace deck.pptx --asset ppt/media/image1.png logo.png --out de
 
 ## Current Capability Level
 
-Officegen v5.0.0 is the Rust-native Office/PDF automation release. It keeps the v4.5 safety contract, removes Node from the runtime path, and adds practical authoring/editing flows for PPTX, DOCX, XLSX, PDF, templates, workflow manifests, semantic diff, and scoped previews. It is still intentionally not a full Office clone; unsupported surfaces fail closed instead of pretending to work.
+Officegen v5.1.0 is the Rust-native Office/PDF automation release. It keeps the v4.5 safety contract, removes Node from the runtime path, and adds practical authoring/editing flows for PPTX, DOCX, XLSX, PDF, templates, workflow manifests, semantic diff, and scoped previews. It is still intentionally not a full Office clone; unsupported surfaces fail closed instead of pretending to work.
 
 PPTX:
 
@@ -223,7 +223,7 @@ Use `--strict-json` for machine-readable agent output. Responses use the `office
   "ok": true,
   "command": "capabilities",
   "runId": "...",
-  "cliVersion": "5.0.0",
+  "cliVersion": "5.1.0",
   "capabilitiesHash": "sha256:...",
   "pathsRedacted": true,
   "result": {},
@@ -300,7 +300,7 @@ npm install
 cargo fmt --check
 cargo test --locked
 cargo build --release --locked
-npm run v5:acceptance -- --bin target/release/officegen --expected-version 5.0.0
+npm run v5:acceptance -- --bin target/release/officegen --expected-version 5.1.0
 ```
 
 Release checks:
@@ -312,11 +312,11 @@ cargo fmt --check
 cargo test --locked
 cargo build --release --locked
 # macOS/Linux
-node scripts/native-release-smoke.mjs --bin target/release/officegen --expected-version 5.0.0
-npm run v5:acceptance -- --bin target/release/officegen --expected-version 5.0.0
+node scripts/native-release-smoke.mjs --bin target/release/officegen --expected-version 5.1.0
+npm run v5:acceptance -- --bin target/release/officegen --expected-version 5.1.0
 # Windows
-node scripts/native-release-smoke.mjs --bin target/release/officegen.exe --expected-version 5.0.0
-npm run v5:acceptance -- --bin target/release/officegen.exe --expected-version 5.0.0
+node scripts/native-release-smoke.mjs --bin target/release/officegen.exe --expected-version 5.1.0
+npm run v5:acceptance -- --bin target/release/officegen.exe --expected-version 5.1.0
 npm run typecheck
 npm test
 npm run build
@@ -332,7 +332,7 @@ npm run release:gate
 Post-tag checks:
 
 ```bash
-npm run native:assets:check -- --version 5.0.0 --dist-dir dist --include-installers
+npm run native:assets:check -- --version 5.1.0 --dist-dir dist --include-installers
 ```
 
 The release workflow packages native binaries plus `install.sh` and `install.ps1`, checks the v5 acceptance evidence, verifies native asset completeness, and smoke-tests the curl/irm installers.
@@ -357,7 +357,7 @@ Version bump:
 ```bash
 npm run version:bump -- patch
 npm run version:bump -- minor
-npm run version:bump -- 5.0.0
+npm run version:bump -- 5.1.0
 npm run version:check
 ```
 

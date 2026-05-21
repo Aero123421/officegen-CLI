@@ -1,6 +1,6 @@
 {
   "name": "officegen-release-tools",
-  "version": "5.0.0",
+  "version": "5.1.0",
   "private": true,
   "description": "Development and release tooling for the Officegen Rust-native CLI",
   "license": "MIT",
@@ -15,7 +15,7 @@
     "native:assets:check": "node scripts/check-native-release-assets.mjs",
     "installer:smoke": "node scripts/installer-smoke.mjs",
     "v5:acceptance": "node scripts/v5-acceptance.mjs",
-    "release:gate": "npm run version:check && npm run installer:smoke && node scripts/run-cargo.mjs fmt --check && npm test && npm run build && npm run v5:acceptance -- --expected-version 5.0.0 && npm run native:smoke -- --expected-version 5.0.0 && npm run typecheck && npm run remediation:check",
+    "release:gate": "npm run version:check && npm run installer:smoke && node scripts/run-cargo.mjs fmt --check && npm test && npm run build && npm run v5:acceptance -- --expected-version current && npm run native:smoke -- --expected-version current && npm run typecheck && npm run remediation:check",
     "benchmark:fetch": "node scripts/benchmark-fetch.mjs",
     "benchmark:review": "node scripts/benchmark-review.mjs",
     "remediation:check": "node scripts/check-remediation-matrix.mjs",

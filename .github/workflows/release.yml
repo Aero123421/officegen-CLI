@@ -39,6 +39,7 @@ jobs:
             version="${GITHUB_REF_NAME#v}"
           fi
           echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${version}" >> "$GITHUB_OUTPUT"
 
       - name: Check manifest version
         shell: bash
@@ -99,7 +100,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: officegen-v5-acceptance-evidence
-          path: .officegen/acceptance/v5.0.0/**
+          path: .officegen/acceptance/${{ steps.version.outputs.tag }}/**
           if-no-files-found: error
 
   native:
@@ -257,13 +258,13 @@ jobs:
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           name: officegen-v5-acceptance-evidence
-          path: .officegen/acceptance/v5.0.0
+          path: .officegen/acceptance/${{ steps.version.outputs.tag }}
 
       - name: Check v5 acceptance evidence
         shell: bash
         run: |
-          test -s .officegen/acceptance/v5.0.0/manifest.json
-          node -e "const m=require('./.officegen/acceptance/v5.0.0/manifest.json'); if (m.release !== 'v5.0.0' || !Array.isArray(m.checks) || !m.checks.every(c => c.ok === true || c.status === 'pass')) process.exit(1)"
+          test -s ".officegen/acceptance/${{ steps.version.outputs.tag }}/manifest.json"
+          node -e "const m=require('./.officegen/acceptance/${{ steps.version.outputs.tag }}/manifest.json'); if (m.release !== '${{ steps.version.outputs.tag }}' || !Array.isArray(m.checks) || !m.checks.every(c => c.ok === true || c.status === 'pass')) process.exit(1)"
 
       - name: Release asset completeness check
         run: npm run native:assets:check -- --version "${{ steps.version.outputs.version }}" --dist-dir dist --include-installers
@@ -285,6 +286,9 @@ jobs:
           curl -fsSL "https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.tag }}/install.sh" \
             | OFFICEGEN_VERSION="${{ steps.version.outputs.version }}" OFFICEGEN_REPO="${{ github.repository }}" OFFICEGEN_INSTALL_DIR="$install_dir" sh
           test "$("$install_dir/officegen" --version)" = "${{ steps.version.outputs.version }}"
+          export PATH="$install_dir:$PATH"
+          test "$(command -v officegen)" = "$install_dir/officegen"
+          test "$(officegen --version)" = "${{ steps.version.outputs.version }}"
 
   windows-installer-smoke:
     name: Release Windows irm installer smoke
@@ -316,4 +320,12 @@ jobs:
           $actual = & (Join-Path $installDir "officegen.exe") --version
           if ($actual -ne "${{ steps.version.outputs.version }}") {
             throw "officegen.exe --version returned $actual"
+          }
+          $resolved = (Get-Command officegen).Source
+          if ([System.IO.Path]::GetFullPath($resolved) -ne [System.IO.Path]::GetFullPath((Join-Path $installDir "officegen.exe"))) {
+            throw "officegen resolved to $resolved instead of installed binary"
+          }
+          $actualCommand = (& officegen --version).Trim()
+          if ($actualCommand -ne "${{ steps.version.outputs.version }}") {
+            throw "officegen --version returned $actualCommand"
           }

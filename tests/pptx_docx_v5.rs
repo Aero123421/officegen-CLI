@@ -198,6 +198,140 @@ fn pptx_v5_table_edit_diff_and_svg_view_are_semantic() {
         dir.path(),
     );
     let svg = fs::read_to_string(dir.path().join("view").join("page-001.svg")).unwrap();
-    assert!(svg.contains("Tables: 1"));
-    assert!(svg.contains("Charts: 1"));
+    assert!(svg.contains("semantic preview"));
+    assert!(svg.contains("OOXML runtime"));
+    assert!(svg.contains("table:"));
+}
+
+#[test]
+fn inspect_controls_bound_object_map_and_json_budget() {
+    let dir = tempdir().unwrap();
+    fs::write(
+        dir.path().join("deck.json"),
+        serde_json::to_vec_pretty(&json!({
+            "schema": "officegen.ir.document@2.0",
+            "targets": ["pptx"],
+            "slides": [{
+                "title": "Budgeted Deck",
+                "blocks": (0..20).map(|i| json!({"type": "paragraph", "text": format!("Line {i}")})).collect::<Vec<_>>()
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    officegen(
+        &[
+            "render",
+            "deck.json",
+            "--target",
+            "pptx",
+            "--out",
+            "deck.pptx",
+            "--agent",
+            "--strict-json",
+        ],
+        dir.path(),
+    );
+
+    let limited = officegen(
+        &[
+            "inspect",
+            "deck.pptx",
+            "--object-map-limit",
+            "2",
+            "--agent",
+            "--strict-json",
+        ],
+        dir.path(),
+    );
+    assert_eq!(limited["result"]["objectMap"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        limited["result"]["truncated"]["objectMap"]["returnedCount"],
+        2
+    );
+
+    let budgeted = officegen(
+        &[
+            "inspect",
+            "deck.pptx",
+            "--json-budget-bytes",
+            "4000",
+            "--agent",
+            "--strict-json",
+        ],
+        dir.path(),
+    );
+    assert_eq!(budgeted["partial"], true);
+    assert_eq!(budgeted["readiness"], "partial");
+    assert!(serde_json::to_string(&budgeted).unwrap().len() <= 4000);
+
+    let tiny_budget = officegen(
+        &[
+            "inspect",
+            "deck.pptx",
+            "--json-budget-bytes",
+            "50",
+            "--agent",
+            "--strict-json",
+        ],
+        dir.path(),
+    );
+    assert_eq!(tiny_budget["partial"], true);
+    assert_eq!(tiny_budget["result"]["fullResultOmitted"], true);
+    assert!(serde_json::to_string(&tiny_budget).unwrap().len() > 50);
+}
+
+#[test]
+fn pdf_inspect_does_not_expose_raw_pdf_structure() {
+    let dir = tempdir().unwrap();
+    fs::write(
+        dir.path().join("doc.json"),
+        serde_json::to_vec_pretty(&json!({
+            "schema": "officegen.ir.document@1.2",
+            "title": "PDF Safe Preview",
+            "targets": ["pdf"],
+            "sections": [{"blocks": [{"type": "paragraph", "text": "Visible PDF text"}]}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    officegen(
+        &[
+            "render",
+            "doc.json",
+            "--target",
+            "pdf",
+            "--out",
+            "doc.pdf",
+            "--agent",
+            "--strict-json",
+        ],
+        dir.path(),
+    );
+    let inspect = officegen(
+        &["inspect", "doc.pdf", "--agent", "--strict-json"],
+        dir.path(),
+    );
+    let preview = inspect["result"]["untrusted"]["textPreview"]
+        .as_str()
+        .unwrap();
+    assert!(preview.contains("Visible PDF text"));
+    for raw in ["%PDF", "stream", "xref", "trailer"] {
+        assert!(!preview.contains(raw), "preview leaked {raw}");
+    }
+
+    fs::write(
+        dir.path().join("raw.pdf"),
+        b"%PDF-1.7\n1 0 obj\n<</Length 4>>stream\n\x00\x01\x02\x03\nendstream\nxref\n%%EOF",
+    )
+    .unwrap();
+    let raw = officegen(
+        &["inspect", "raw.pdf", "--agent", "--strict-json"],
+        dir.path(),
+    );
+    assert_eq!(raw["result"]["untrusted"]["textPreview"], "");
+    assert_eq!(
+        raw["result"]["trusted"]["summary"]["extractionConfidence"],
+        "none"
+    );
 }

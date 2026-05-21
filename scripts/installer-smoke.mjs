@@ -12,7 +12,7 @@ for (const file of files) {
 }
 
 const sh = readFileSync("install/install.sh", "utf8");
-for (const required of ["OFFICEGEN_VERSION", "OFFICEGEN_INSTALL_DIR", "unknown-linux-gnu", "aarch64", "x86_64", ".sha256", "releases/download"]) {
+for (const required of ["OFFICEGEN_VERSION", "OFFICEGEN_INSTALL_DIR", "unknown-linux-gnu", "aarch64", "x86_64", ".sha256", "releases/download", "PATH collision", "officegen --version"]) {
   if (!sh.includes(required)) {
     console.error(`install/install.sh does not include ${required}`);
     process.exit(1);
@@ -21,7 +21,7 @@ for (const required of ["OFFICEGEN_VERSION", "OFFICEGEN_INSTALL_DIR", "unknown-l
 runOptional("bash", ["-n", process.platform === "win32" ? "install/install.sh" : path.resolve("install/install.sh")]);
 
 const ps1 = readFileSync("install/install.ps1", "utf8");
-for (const required of ["OFFICEGEN_VERSION", "OFFICEGEN_INSTALL_DIR", "x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc", "Get-FileHash", "Expand-Archive", "releases/download"]) {
+for (const required of ["OFFICEGEN_VERSION", "OFFICEGEN_INSTALL_DIR", "x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc", "Get-FileHash", "Expand-Archive", "releases/download", "Set-OfficegenPathPrecedence", "Test-OfficegenCommandResolution", "stale shim"]) {
   if (!ps1.includes(required)) {
     console.error(`install/install.ps1 does not include ${required}`);
     process.exit(1);

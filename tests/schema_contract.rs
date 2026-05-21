@@ -224,3 +224,50 @@ fn reports_missing_schema_mismatch_and_type_errors() {
         .iter()
         .any(|error| error.instance_path == "/operations/0/op"));
 }
+
+#[test]
+fn edit_ops_schema_accepts_ops_alias_but_rejects_empty_operation_payloads() {
+    let missing_ops = validate_minimal_required_fields(
+        "ops",
+        &json!({
+            "schema": "officegen.edit.ops@1.2"
+        }),
+    );
+    assert!(!missing_ops.ok);
+    assert!(missing_ops
+        .errors
+        .iter()
+        .any(|error| error.message.contains("anyOf")));
+
+    let alias_ops = validate_minimal_required_fields(
+        "ops",
+        &json!({
+            "schema": "officegen.edit.ops@1.2",
+            "ops": [{"op": "docx.setText"}]
+        }),
+    );
+    assert!(alias_ops.ok, "{:?}", alias_ops.errors);
+
+    let canonical_ops = validate_minimal_required_fields(
+        "ops",
+        &json!({
+            "schema": "officegen.edit.ops@1.2",
+            "operations": [{"op": "docx.setText"}]
+        }),
+    );
+    assert!(canonical_ops.ok, "{:?}", canonical_ops.errors);
+
+    let conflicting_aliases = validate_minimal_required_fields(
+        "ops",
+        &json!({
+            "schema": "officegen.edit.ops@1.2",
+            "operations": [{"op": "docx.setText"}],
+            "ops": [{"op": "pptx.setText"}]
+        }),
+    );
+    assert!(!conflicting_aliases.ok);
+    assert!(conflicting_aliases
+        .errors
+        .iter()
+        .any(|error| error.message.contains("operations and ops")));
+}
