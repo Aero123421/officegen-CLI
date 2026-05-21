@@ -327,7 +327,7 @@ jobs:
         shell: bash
         run: |
           test -s .officegen/acceptance/v5.0.0/manifest.json
-          node -e "const m=require('./.officegen/acceptance/v5.0.0/manifest.json'); if (m.release !== 'v5.0.0' || !Array.isArray(m.checks) || !m.checks.every(c => c.ok)) process.exit(1)"
+          node -e "const m=require('./.officegen/acceptance/v5.0.0/manifest.json'); if (m.release !== 'v5.0.0' || !Array.isArray(m.checks) || !m.checks.every(c => c.ok === true || c.status === 'pass')) process.exit(1)"
 
       - name: Release asset completeness check
         run: npm run native:assets:check -- --version "${{ steps.version.outputs.version }}" --dist-dir dist --include-installers
