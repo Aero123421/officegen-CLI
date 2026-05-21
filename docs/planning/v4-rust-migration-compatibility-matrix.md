@@ -4,6 +4,8 @@ Baseline: v3.1.8.
 
 Scope: map the v3.1.8 command surface, compatibility features, and regression tests to the planned Rust module ownership and release gates. This is a planning matrix, not an implementation status report.
 
+v4.5.0 update: this older parity matrix is superseded by the v4.5 contract-freeze plan for release decisions. MCP and plugin runtime support are removed from the built-in CLI scope, not policy-enabled optional surfaces. Keep this file only as a historical v3.1.8 parity reference.
+
 Status values: `not-started`, `ported`, `parity-tested`, `deferred`, `removed-by-policy`.
 
 ## Gate Vocabulary
@@ -14,7 +16,7 @@ Status values: `not-started`, `ported`, `parity-tested`, `deferred`, `removed-by
 | RG-1 Contract parity | Golden JSON envelope tests pass for success, warning, partial, blocked, unsupported, and unknown-command outcomes. |
 | RG-2 Read-only format parity | Inspect, view, verify, diff, critique, asset inspect, chart render, diagram render, and benchmark read paths match v3.1.8 fixtures within documented tolerances. |
 | RG-3 Mutation safety parity | Edit, render, export, repair, asset replace/extract, template/design/layout mutations preserve output policy, rollback, OOXML validation, risky-package blocking, and post-mutation verify warnings. |
-| RG-4 Optional/external gating | Native renderer, plugin, MCP, and external-process commands remain disabled unless policy enables them; discovery-only commands stay safe. |
+| RG-4 Optional/external boundary | Native renderer and external-process commands remain disabled unless policy enables them; MCP/plugin runtime support is outside the built-in CLI scope. |
 | RG-5 Release packaging | Version check, type/build equivalent, tests, pack smoke, schema coverage, contract check, remediation check, security fixtures, benchmark local fixtures, perfect-spec evidence, and release tarball smoke all pass for the v4 artifact. |
 
 Before a v4 tag, run the v3 baseline gates as compatibility controls until Rust replacements exist: `npm run version:check`, `npm run typecheck`, `npm test`, `npm run build`, `npm run pack:smoke`, `npm run remediation:check`, `npm run contract:check`, `npm run schema:coverage`, `npm run security:fixtures`, `npm run benchmark:local-fixtures`, `npm run perfect-spec:evidence`, `npm run perfect-spec:check -- --gate=publish`, and release tarball smoke for the target artifact.
@@ -29,7 +31,7 @@ Before a v4 tag, run the v3 baseline gates as compatibility controls until Rust 
 | `officegen_ooxml` | OPC/ZIP graph, relationships, XML token index, patch engine, transaction, validator, PPTX/DOCX/XLSX semantic readers | `packages/formats/src/ooxml/*.ts` |
 | `officegen_formats` | Inspect, view, edit, render, export, verify, diagnose, repair, diff, assets, charts, diagrams | `packages/formats/src/*.ts` |
 | `officegen_pdf` | PDF object graph, PDF preview, PDF overlay/annotation safety, CJK font handling | `packages/formats/src/pdf/*`, `packages/formats/src/pdfFonts.ts` |
-| `officegen_optional` | Template, design, layout, renderer, plugin, MCP, agent adapters | `packages/optional/src/*.ts` |
+| `officegen_optional` | Historical v3 template/design/layout/renderer/agent references; plugin and MCP are removed from built-in v4.5 scope | `packages/optional/src/*.ts` |
 | `officegen_benchmark` | Benchmark manifest policy, corpus run/compare reports | `scripts/benchmark-*.mjs`, `benchmarks/office-corpus/manifest.json` |
 | `officegen_release` | Pack, smoke, install, perfect-spec evidence adapters for Rust artifact | `scripts/*smoke*.mjs`, `scripts/check-*.mjs` |
 
@@ -73,8 +75,8 @@ Before a v4 tag, run the v3 baseline gates as compatibility controls until Rust 
 | `layout apply` | `officegen_optional::layout`, `officegen_formats::diff` | `packages/optional/src/layout.test.ts`, `packages/cli/test/program.test.ts` | RG-3 |
 | `agent install/refresh` | `officegen_optional::agent` | `packages/cli/test/program.test.ts` command-surface coverage | RG-0, RG-4 |
 | `renderer list/inspect/trust/doctor` | `officegen_optional::renderer` | `packages/cli/test/program.test.ts` renderer policy cases | RG-4 |
-| `plugin list/inspect/install/trust` | `officegen_optional::plugin` | `packages/cli/test/program.test.ts` enterprise command registration | RG-4 |
-| `mcp serve` | `officegen_optional::mcp` | `packages/cli/test/program.test.ts` enterprise command registration | RG-4 |
+| `plugin list/inspect/install/trust` | removed from built-in runtime scope | Removal/negative smoke; historical v3 command registration only | RG-4 |
+| `mcp serve` | removed from built-in runtime scope | Removal/negative smoke; historical v3 command registration only | RG-4 |
 
 ## v3.1.8 Compatibility Fix Matrix
 
@@ -144,4 +146,3 @@ Before a v4 tag, run the v3 baseline gates as compatibility controls until Rust 
 | v4 alpha | RG-0 and RG-1 for all command groups; RG-4 for renderer/plugin/MCP/agent surfaces; no package/source manifest edits outside the approved release workflow. |
 | v4 beta | RG-2 for all read-only commands; RG-3 for edit/render/export/repair/asset/template/design/layout; benchmark local fixtures pass. |
 | v4 release candidate | Full RG-5, perfect-spec evidence regenerated, release tarball smoke passes, and post-tag smoke plan names the exact `vX.Y.Z` artifact. |
-

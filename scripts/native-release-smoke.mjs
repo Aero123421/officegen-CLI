@@ -30,6 +30,15 @@ for (const args of [["--version"], ["--help"], ["capabilities", "--agent", "--js
       console.error("native binary capabilities smoke did not emit a valid capabilities envelope.");
       process.exit(1);
     }
+    if (envelope.runtime?.nodeRequired !== false || envelope.result?.nodeRequired !== false) {
+      console.error("native binary capabilities did not report nodeRequired=false.");
+      process.exit(1);
+    }
+    const capabilityText = JSON.stringify(envelope.result);
+    if (capabilityText.includes("mcp serve")) {
+      console.error("native binary capabilities exposed mcp serve.");
+      process.exit(1);
+    }
   }
 }
 
@@ -48,6 +57,41 @@ try {
   const envelope = JSON.parse(inspect.stdout);
   if (!envelope.ok || envelope.result?.format !== "docx") {
     console.error("native binary render/inspect smoke failed.");
+    process.exit(1);
+  }
+  const rasterOut = path.join(temp, "raster-view");
+  const raster = runAllowFailure(binPath, ["view", "smoke.docx", "--format", "png", "--out", "raster-view", "--agent", "--strict-json"], temp);
+  if (raster.status === 0) {
+    console.error("native binary returned success for portable PNG raster preview.");
+    process.exit(1);
+  }
+  const rasterEnvelope = JSON.parse(raster.stdout);
+  if (rasterEnvelope.ok !== false || rasterEnvelope.error?.code !== "FEATURE_NOT_IMPLEMENTED") {
+    console.error("native binary did not fail closed for unsupported PNG raster preview.");
+    process.exit(1);
+  }
+  if (existsSync(path.join(rasterOut, "page-001.png"))) {
+    console.error("native binary wrote a placeholder PNG despite failing closed.");
+    process.exit(1);
+  }
+  const mcp = runAllowFailure(binPath, ["mcp", "serve", "--agent", "--strict-json"], temp);
+  if (mcp.status === 0) {
+    console.error("native binary returned success for mcp serve.");
+    process.exit(1);
+  }
+  const mcpEnvelope = JSON.parse(mcp.stdout);
+  if (mcpEnvelope.ok !== false || mcpEnvelope.error?.code !== "FEATURE_REMOVED_FROM_SCOPE") {
+    console.error("native binary did not report FEATURE_REMOVED_FROM_SCOPE for mcp serve.");
+    process.exit(1);
+  }
+  const plugin = runAllowFailure(binPath, ["plugin", "install", "--agent", "--strict-json"], temp);
+  if (plugin.status === 0 || JSON.parse(plugin.stdout).error?.code !== "FEATURE_REMOVED_FROM_SCOPE") {
+    console.error("native binary did not fail closed for plugin install.");
+    process.exit(1);
+  }
+  const agent = runAllowFailure(binPath, ["agent", "install", "--agent", "--strict-json"], temp);
+  if (agent.status === 0 || JSON.parse(agent.stdout).error?.code !== "FEATURE_NOT_IMPLEMENTED") {
+    console.error("native binary did not fail closed for agent install.");
     process.exit(1);
   }
   const unsupported = runAllowFailure(binPath, ["definitely-unknown", "--agent", "--strict-json"], temp);

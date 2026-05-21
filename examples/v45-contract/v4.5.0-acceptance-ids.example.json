@@ -1,0 +1,111 @@
+{
+  "schema": "officegen.v45.acceptance-ids@1",
+  "release": "4.5.0",
+  "documents": {
+    "acceptanceMatrix": "docs/planning/v4.5.0-acceptance-matrix.md",
+    "roadmapSummary": "docs/planning/v4.5.0-v5-roadmap-summary.md",
+    "reviewChecklist": "docs/reviews/v4.5.0-review-checklist.md"
+  },
+  "blockingPolicy": {
+    "mustPass": "All required V45 acceptance IDs must pass before tagging unless explicitly waived in the v4.5.0 review checklist.",
+    "manualEvidenceAllowed": "Manual evidence is allowed only for environment-dependent native renderer disclosure and post-tag release asset checks.",
+    "knownLimitationRule": "Known limitations must be visible in structured CLI output and mapped to a v5 roadmap item."
+  },
+  "acceptanceIds": [
+    {
+      "id": "V45-CMD-001",
+      "area": "command-registry",
+      "title": "Command metadata, help, capabilities, and dispatch agree",
+      "blocking": true
+    },
+    {
+      "id": "V45-MCP-001",
+      "area": "mcp-exclusion",
+      "title": "MCP is excluded from default/substrate runnable capability",
+      "blocking": true
+    },
+    {
+      "id": "V45-CAP-001",
+      "area": "compact-capabilities",
+      "title": "Agent capabilities provide compact summary and limitations",
+      "blocking": true
+    },
+    {
+      "id": "V45-ENV-001",
+      "area": "envelope",
+      "title": "Agent JSON responses preserve officegen.envelope@1.2",
+      "blocking": true
+    },
+    {
+      "id": "V45-SAFE-001",
+      "area": "path-safety",
+      "title": "Unsafe output paths fail closed",
+      "blocking": true
+    },
+    {
+      "id": "V45-SAFE-003",
+      "area": "zip-safety",
+      "title": "OOXML ZIP metadata is checked before XML parse",
+      "blocking": true
+    },
+    {
+      "id": "V45-SMOKE-001",
+      "area": "inspect-smoke",
+      "title": "Inspect smoke covers PPTX, DOCX, XLSX, and PDF",
+      "blocking": true
+    },
+    {
+      "id": "V45-SMOKE-002",
+      "area": "render-smoke",
+      "title": "Render smoke creates Office, PDF, chart SVG, and diagram SVG artifacts",
+      "blocking": true
+    },
+    {
+      "id": "V45-SMOKE-003",
+      "area": "edit-smoke",
+      "title": "Supported edits prove dry-run, output, and package diff evidence",
+      "blocking": true
+    },
+    {
+      "id": "V45-SMOKE-004",
+      "area": "view-smoke",
+      "title": "View smoke writes preview artifacts and metadata",
+      "blocking": true
+    },
+    {
+      "id": "V45-SMOKE-005",
+      "area": "verify-smoke",
+      "title": "Verify smoke reports portable readiness without implying native proof",
+      "blocking": true
+    },
+    {
+      "id": "V45-SMOKE-006",
+      "area": "diff-smoke",
+      "title": "Diff smoke reports semantic/package changes truthfully",
+      "blocking": true
+    },
+    {
+      "id": "V45-SMOKE-007",
+      "area": "manifest-smoke",
+      "title": "Manifest smoke records artifacts, hashes, warnings, and replay hints",
+      "blocking": true
+    },
+    {
+      "id": "V45-REL-001",
+      "area": "release-dod",
+      "title": "Version surfaces are synchronized by version scripts and checked",
+      "blocking": true
+    }
+  ],
+  "v5RoadmapIds": [
+    "V5-R01",
+    "V5-R02",
+    "V5-R03",
+    "V5-R04",
+    "V5-R05",
+    "V5-R06",
+    "V5-R07",
+    "V5-R08",
+    "V5-R09"
+  ]
+}

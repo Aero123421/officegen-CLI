@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "officegen.manifest@1.2",
+  "title": "Officegen manifest",
+  "type": "object",
+  "required": [
+    "schema",
+    "version",
+    "artifacts"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "schema": { "const": "officegen.manifest@1.2" },
+    "version": { "type": "string" },
+    "createdAt": { "type": "string" },
+    "artifacts": {
+      "type": "array",
+      "items": { "type": "object" }
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  }
+}

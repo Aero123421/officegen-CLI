@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "officegen.capabilities@1.2",
+  "title": "Officegen capabilities",
+  "type": "object",
+  "required": [
+    "schema",
+    "ok",
+    "profile",
+    "capabilitiesHash",
+    "visibleCommands",
+    "formatCapabilities",
+    "featureContracts",
+    "unsupportedNow",
+    "nextSuggestedCommands"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "schema": { "const": "officegen.capabilities@1.2" },
+    "ok": { "type": "boolean" },
+    "officegenVersion": { "type": "string" },
+    "runtime": { "type": "string" },
+    "nodeRequired": { "type": "boolean" },
+    "profile": { "type": "string" },
+    "capabilitiesHash": { "type": "string" },
+    "visibleCommands": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "agentCommands": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "formatCapabilities": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "featureContracts": {
+      "type": "array",
+      "items": { "type": "object" }
+    },
+    "unsupportedNow": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "nextSuggestedCommands": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  }
+}

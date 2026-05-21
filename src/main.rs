@@ -1,4 +1,7 @@
+mod registry;
 mod runtime;
+mod safety;
+mod schemas;
 
 fn main() {
     if let Err(error) = runtime::run(

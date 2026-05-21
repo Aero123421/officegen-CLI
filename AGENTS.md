@@ -26,7 +26,10 @@ npm run version:bump -- 1.2.7
 ```bash
 npm run version:check
 npm run installer:smoke
+# macOS/Linux
 npm run native:smoke -- --bin target/release/officegen --expected-version <version>
+# Windows
+npm run native:smoke -- --bin target/release/officegen.exe --expected-version <version>
 cargo fmt --check
 cargo test --locked
 cargo build --release --locked

@@ -6,6 +6,8 @@ Baseline: v3.1.8 compatibility matrix in `docs/planning/v4-rust-migration-compat
 
 Scope: docs/test evidence only. No Rust implementation, package manifest, release workflow, installer, or version script files were edited for this review.
 
+v4.5.0 update: this is historical v4.0.0 evidence. It is superseded by `docs/reviews/v4.5.0-review-checklist.md` for release decisions. MCP and plugin runtime support are now removed from the built-in CLI scope rather than optional policy-gated surfaces.
+
 Status values: `pass`, `warning`, `blocked`, `not-run`, `planned`.
 
 ## Compatibility Evidence

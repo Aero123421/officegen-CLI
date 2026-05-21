@@ -1,3 +1,6 @@
+use crate::registry;
+use crate::safety;
+use crate::schemas;
 use anyhow::{anyhow, bail, Context as AnyhowContext, Result};
 use regex::Regex;
 use serde_json::{json, Map, Value};
@@ -11,84 +14,6 @@ use zip::{ZipArchive, ZipWriter};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const ENVELOPE_SCHEMA: &str = "officegen.envelope@1.2";
-
-const COMMANDS: &[&str] = &[
-    "capabilities",
-    "help",
-    "help workflow",
-    "help error",
-    "config show",
-    "config set",
-    "doctor",
-    "inspect",
-    "view",
-    "edit",
-    "render",
-    "scaffold",
-    "export",
-    "validate",
-    "verify",
-    "diagnose",
-    "repair",
-    "diff",
-    "prepare",
-    "prepare reference",
-    "manifest",
-    "manifest inspect",
-    "manifest verify",
-    "select",
-    "plan",
-    "rollback",
-    "lock",
-    "merge",
-    "run",
-    "run prepare-reference",
-    "run office-edit",
-    "run office-agent",
-    "critique",
-    "improve",
-    "benchmark run",
-    "benchmark compare",
-    "asset inspect",
-    "asset extract",
-    "asset replace",
-    "chart render",
-    "diagram render",
-    "schema list",
-    "schema get",
-    "schema fetch",
-    "schema validate",
-    "schema migrate",
-    "errors list",
-    "errors inspect",
-    "template list",
-    "template inspect",
-    "template candidates",
-    "template create",
-    "template apply-map",
-    "template validate",
-    "template fill",
-    "design list",
-    "design inspect",
-    "design init",
-    "design edit",
-    "design update",
-    "design validate",
-    "design capture",
-    "design apply",
-    "layout apply",
-    "agent install",
-    "agent refresh",
-    "mcp serve",
-    "renderer list",
-    "renderer inspect",
-    "renderer trust",
-    "renderer doctor",
-    "plugin list",
-    "plugin inspect",
-    "plugin install",
-    "plugin trust",
-];
 
 #[derive(Clone, Debug)]
 struct Context {
@@ -134,12 +59,7 @@ fn command_envelope(ctx: &Context) -> Value {
             let error = if ok {
                 None
             } else {
-                Some(error_payload(
-                    ctx,
-                    payload.get("message").and_then(Value::as_str).unwrap_or(
-                        "OBJECTIVE_FAILED: command completed but objective checks failed",
-                    ),
-                ))
+                Some(error_payload(ctx, objective_failure_message(&payload)))
             };
             envelope(ctx, ok, payload, error)
         }
@@ -154,6 +74,19 @@ fn result_execution_ok(payload: &Value) -> bool {
     payload.get("ok").and_then(Value::as_bool).unwrap_or(true)
         && payload.get("status").and_then(Value::as_str) != Some("fail")
         && payload.get("readiness").and_then(Value::as_str) != Some("blocked")
+}
+
+fn objective_failure_message(payload: &Value) -> &str {
+    if payload.get("schema").and_then(Value::as_str) == Some("officegen.schema.validate.result@1.2")
+        || payload.get("schema").and_then(Value::as_str) == Some("officegen.validate.result@1.2")
+    {
+        "SCHEMA_INVALID: schema validation failed"
+    } else {
+        payload
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("OBJECTIVE_FAILED: command completed but objective checks failed")
+    }
 }
 
 impl Context {
@@ -227,20 +160,17 @@ fn dispatch(ctx: &Context) -> Result<Value> {
         "template" => template_payload(ctx, words.get(1).map(String::as_str)),
         "design" => design_payload(ctx, words.get(1).map(String::as_str)),
         "layout" => layout_payload(ctx, words.get(1).map(String::as_str)),
-        "agent" => Ok(management_payload(
-            "officegen.agent.result@4.0",
-            words.get(1),
-            false,
-        )),
+        "agent" => bail!(
+            "FEATURE_NOT_IMPLEMENTED: agent {} is not implemented in the Rust v4.5 native runtime",
+            words.get(1).map(String::as_str).unwrap_or("install")
+        ),
         "mcp" => bail!(
-            "FEATURE_NOT_IMPLEMENTED: mcp serve is not yet implemented in the Rust v4 native runtime"
+            "FEATURE_REMOVED_FROM_SCOPE: MCP is intentionally outside the officegen CLI scope"
         ),
         "renderer" => renderer_payload(ctx, words.get(1).map(String::as_str)),
-        "plugin" => Ok(management_payload(
-            "officegen.plugin.result@4.0",
-            words.get(1),
-            false,
-        )),
+        "plugin" => bail!(
+            "FEATURE_REMOVED_FROM_SCOPE: plugins are intentionally outside the officegen CLI scope"
+        ),
         other => bail!("UNKNOWN_COMMAND: {other}"),
     }
 }
@@ -305,15 +235,132 @@ fn envelope(ctx: &Context, ok: bool, result: Value, error: Option<Value>) -> Val
     );
     payload.insert("nextActions".into(), json!(next_actions(&ctx.command, ok)));
     if let Some(error) = error {
-        payload.insert("availableCommands".into(), json!(COMMANDS));
+        payload.insert(
+            "availableCommands".into(),
+            json!(available_commands_for(ctx)),
+        );
         payload.insert("error".into(), error);
     }
     payload.insert("result".into(), result);
     Value::Object(payload)
 }
 
+fn available_commands_for(ctx: &Context) -> Vec<&'static str> {
+    if ctx.agent || ctx.strict_json {
+        core_agent_command_specs()
+            .into_iter()
+            .map(|entry| entry.command)
+            .collect()
+    } else {
+        registry::human_visible_commands()
+            .into_iter()
+            .map(|entry| entry.command)
+            .collect()
+    }
+}
+
+fn core_agent_command_specs() -> Vec<registry::CompactCommandSpec> {
+    registry::compact_agent_visible_commands()
+}
+
+fn command_spec_json(spec: &registry::CommandSpec) -> Value {
+    json!({
+        "name": spec.command,
+        "status": command_status_name(spec.status),
+        "visibleToHumans": spec.human_visible,
+        "visibleToAgents": spec.agent_visible,
+        "mutatesFiles": spec.mutates_files,
+        "supportsDryRun": spec.supports_dry_run,
+        "supportedFormats": spec.supported_formats.iter().map(|format| office_format_name(*format)).collect::<Vec<_>>(),
+        "summary": spec.summary
+    })
+}
+
+fn compact_command_json(spec: registry::CompactCommandSpec) -> Value {
+    json!({
+        "name": spec.command,
+        "status": command_status_name(spec.status),
+        "mutatesFiles": spec.mutates_files,
+        "supportsDryRun": spec.supports_dry_run,
+        "supportedFormats": spec.supported_formats.iter().map(|format| office_format_name(*format)).collect::<Vec<_>>(),
+        "summary": spec.summary
+    })
+}
+
+fn command_status_name(status: registry::CommandStatus) -> &'static str {
+    match status {
+        registry::CommandStatus::Supported => "supported",
+        registry::CommandStatus::Limited => "limited",
+        registry::CommandStatus::PlanOnly => "plan-only",
+        registry::CommandStatus::DiscoveryOnly => "discovery-only",
+        registry::CommandStatus::Deferred => "deferred",
+        registry::CommandStatus::RemovedFromScope => "removed-from-scope",
+    }
+}
+
+fn office_format_name(format: registry::OfficeFormat) -> &'static str {
+    match format {
+        registry::OfficeFormat::Pptx => "pptx",
+        registry::OfficeFormat::Docx => "docx",
+        registry::OfficeFormat::Xlsx => "xlsx",
+        registry::OfficeFormat::Pdf => "pdf",
+        registry::OfficeFormat::Json => "json",
+        registry::OfficeFormat::Svg => "svg",
+        registry::OfficeFormat::Html => "html",
+        registry::OfficeFormat::Png => "png",
+        registry::OfficeFormat::Jpeg => "jpeg",
+        registry::OfficeFormat::Markdown => "markdown",
+        registry::OfficeFormat::Text => "text",
+    }
+}
+
 fn capabilities(ctx: &Context) -> Value {
-    let visible = COMMANDS.iter().map(|s| json!(s)).collect::<Vec<_>>();
+    let full = has_flag(&ctx.args, "--full");
+    if ctx.agent && !full {
+        let compact = core_agent_command_specs()
+            .into_iter()
+            .map(compact_command_json)
+            .collect::<Vec<_>>();
+        let supported = core_agent_command_specs()
+            .into_iter()
+            .map(|entry| entry.command)
+            .collect::<Vec<_>>();
+        return json!({
+            "schema": "officegen.capabilities@1.2",
+            "ok": true,
+            "officegenVersion": VERSION,
+            "runtime": "rust-native",
+            "nodeRequired": false,
+            "profile": "substrate",
+            "compact": true,
+            "capabilitiesHash": capabilities_hash(),
+            "supportedCommands": supported.clone(),
+            "agentCommands": supported,
+            "commandDetails": compact,
+            "recommendedLoop": ["inspect", "edit --dry-run", "edit", "diff", "verify"],
+            "unsupportedInScope": [
+                "native Office fidelity proof",
+                "PDF true redaction",
+                "Excel recalculation",
+                "portable PNG/JPEG raster preview"
+            ],
+            "nextSuggestedCommands": [
+                "officegen inspect <input> --agent --strict-json",
+                "officegen edit <input> --ops ops.json --dry-run --agent --strict-json",
+                "officegen schema list --agent --strict-json"
+            ]
+        });
+    }
+
+    let visible_specs = registry::human_visible_commands();
+    let visible = visible_specs
+        .iter()
+        .map(|entry| json!(entry.command))
+        .collect::<Vec<_>>();
+    let command_registry = visible_specs
+        .into_iter()
+        .map(command_spec_json)
+        .collect::<Vec<_>>();
     json!({
         "schema": "officegen.capabilities@1.2",
         "ok": true,
@@ -323,7 +370,8 @@ fn capabilities(ctx: &Context) -> Value {
         "profile": "substrate",
         "capabilitiesHash": capabilities_hash(),
         "visibleCommands": visible,
-        "agentCommands": COMMANDS.iter().filter_map(|command| command.split(' ').next()).collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>(),
+        "agentCommands": core_agent_command_specs().into_iter().map(|entry| entry.command).collect::<Vec<_>>(),
+        "commandRegistry": command_registry,
         "formatCapabilities": {
             "pptx": {"text": true, "lists": true, "tables": "scoped XML edits", "charts": "single-series chart assets and package inspection", "smartArt": "inspect-only"},
             "docx": {"text": "scoped paragraph/run replacement", "tables": "inspect and scoped text replacement", "comments": "inspect count"},
@@ -339,20 +387,19 @@ fn capabilities(ctx: &Context) -> Value {
             "PDF physical redaction remains unsupported.",
             "Complete SmartArt authoring remains unsupported.",
             "Rust v4 does not preserve OOXML digital signatures or ZIP metadata during edits.",
-            "Mutation-heavy optional surfaces that are not ported fail closed instead of claiming success.",
-            "mcp serve, plugin install/trust, manifest verification, and real lock persistence are not implemented in the Rust v4 native runtime."
+            "Mutation-heavy optional surfaces that are not ported fail closed instead of claiming success."
         ],
         "nextSuggestedCommands": if ctx.agent { json!(["officegen inspect input.pptx --agent --strict-json", "officegen schema list --agent --strict-json"]) } else { json!(["officegen help --json"]) }
     })
 }
 
-fn help_payload(_ctx: &Context, topic: &[&str]) -> Value {
+fn help_payload(ctx: &Context, topic: &[&str]) -> Value {
     let topic_text = topic.join(" ");
     json!({
         "schema": "officegen.help@1.2",
         "topic": if topic_text.is_empty() { "index" } else { &topic_text },
-        "commands": COMMANDS,
-        "workflows": ["inspect-edit-export", "template-plan-fill", "native-verify-export"],
+        "commands": available_commands_for(ctx),
+        "workflows": ["inspect-edit-verify", "render-view-verify"],
         "agentGuidance": {
             "firstCommand": "officegen capabilities --agent --strict-json",
             "dryRunBeforeEdit": "Run edit --dry-run --resolve-selectors before writing.",
@@ -364,7 +411,11 @@ fn help_payload(_ctx: &Context, topic: &[&str]) -> Value {
 fn native_help() -> String {
     format!(
         "officegen - AI-friendly Office/PDF runtime\n\nUsage:\n  officegen <command> [options]\n\nRuntime:\n  Rust native v{VERSION}; Node is not required.\n\nCommands:\n  {}\n\nInstall:\n  macOS/Linux: curl -fsSL https://github.com/Aero123421/officegen-CLI/releases/latest/download/install.sh | sh\n  Windows:     irm https://github.com/Aero123421/officegen-CLI/releases/latest/download/install.ps1 | iex\n",
-        COMMANDS.join("\n  ")
+        registry::human_visible_commands()
+            .into_iter()
+            .map(|entry| entry.command)
+            .collect::<Vec<_>>()
+            .join("\n  ")
     )
 }
 
@@ -384,26 +435,54 @@ fn doctor() -> Value {
 
 fn schema_payload(ctx: &Context, sub: Option<&str>) -> Result<Value> {
     match sub.unwrap_or("list") {
-        "list" => Ok(
-            json!({"schema": "officegen.schemas.list@1.2", "schemas": schema_ids(), "count": schema_ids().len()}),
-        ),
+        "list" => {
+            let entries = schemas::list_schemas()
+                .into_iter()
+                .map(|entry| {
+                    json!({
+                        "id": entry.id,
+                        "aliases": entry.aliases,
+                        "path": entry.path
+                    })
+                })
+                .collect::<Vec<_>>();
+            Ok(json!({
+                "schema": "officegen.schemas.list@1.2",
+                "schemas": entries,
+                "count": entries.len()
+            }))
+        }
         "get" | "fetch" => {
             let id = positionals(&ctx.args)
                 .get(2)
                 .cloned()
                 .or_else(|| option_value(&ctx.args, "--schema"))
                 .unwrap_or_else(|| "officegen.envelope@1.2".into());
-            Ok(
-                json!({"schema": "officegen.schema.get@1.2", "id": id, "jsonSchema": schema_doc(&id)}),
-            )
+            let document =
+                schemas::fetch_schema(&id).map_err(|error| anyhow!("SCHEMA_INVALID: {error}"))?;
+            Ok(json!({
+                "schema": "officegen.schema.get@1.2",
+                "id": document.id,
+                "path": document.path,
+                "jsonSchema": document.schema
+            }))
         }
         "validate" => {
             let input = positional_after(&ctx.args, "validate")
                 .ok_or_else(|| anyhow!("INPUT_REQUIRED: schema validate requires input.json"))?;
             let data = read_json(&ctx.cwd, &input)?;
-            Ok(
-                json!({"schema": "officegen.schema.validate.result@1.2", "ok": validate_known_schema(option_value(&ctx.args, "--schema").as_deref(), &data), "schemaId": option_value(&ctx.args, "--schema"), "errors": []}),
-            )
+            let schema_id = option_value(&ctx.args, "--schema")
+                .unwrap_or_else(|| "officegen.envelope@1.2".into());
+            let report = schemas::validate_minimal_required_fields(&schema_id, &data);
+            Ok(json!({
+                "schema": "officegen.schema.validate.result@1.2",
+                "ok": report.ok,
+                "schemaId": report.schema_id,
+                "errors": report.errors.into_iter().map(|error| json!({
+                    "instancePath": error.instance_path,
+                    "message": error.message
+                })).collect::<Vec<_>>()
+            }))
         }
         "migrate" => Ok(
             json!({"schema": "officegen.schema.migrate.result@1.2", "changed": false, "summary": "No schema migration is required by the Rust v4 compatibility layer."}),
@@ -418,7 +497,8 @@ fn errors_payload(ctx: &Context, sub: Option<&str>) -> Result<Value> {
         {"code": "INPUT_NOT_FOUND", "category": "input", "severity": "error"},
         {"code": "SCHEMA_INVALID", "category": "schema", "severity": "error"},
         {"code": "OOXML_VALIDATION_FAILED", "category": "runtime", "severity": "error"},
-        {"code": "FEATURE_NOT_IMPLEMENTED", "category": "unsupported", "severity": "error"}
+        {"code": "FEATURE_NOT_IMPLEMENTED", "category": "unsupported", "severity": "error"},
+        {"code": "FEATURE_REMOVED_FROM_SCOPE", "category": "unsupported", "severity": "error", "nextSuggestedCommands": ["officegen capabilities --agent --strict-json"]}
     ]);
     if sub.unwrap_or("list") == "inspect" {
         let code = positionals(&ctx.args)
@@ -523,6 +603,11 @@ fn view_payload(ctx: &Context) -> Result<Value> {
     let path = safe_input_path(&ctx.cwd, &input)?;
     let inspected = inspect_path(&path)?;
     let format = option_value(&ctx.args, "--format").unwrap_or_else(|| "svg".into());
+    if matches!(format.as_str(), "png" | "jpg" | "jpeg") {
+        bail!(
+            "FEATURE_NOT_IMPLEMENTED: portable PNG/JPEG raster preview is not available in the Rust v4.5 runtime; use --format svg or --format html"
+        );
+    }
     let out = option_value(&ctx.args, "--out").unwrap_or_else(|| ".officegen/view".into());
     let out_path = safe_output_path(&ctx.cwd, &out)?;
     fs::create_dir_all(&out_path)?;
@@ -537,10 +622,6 @@ fn view_payload(ctx: &Context) -> Result<Value> {
             .as_bytes(),
         )?;
         file
-    } else if format == "png" {
-        let file = out_path.join("page-001.png");
-        atomic_write(&file, png_1x1())?;
-        file
     } else {
         let file = out_path.join("page-001.svg");
         atomic_write(
@@ -554,9 +635,9 @@ fn view_payload(ctx: &Context) -> Result<Value> {
         "ok": true,
         "format": format,
         "out": out,
-        "artifactUsable": format != "png",
-        "readiness": if format == "png" { "warning" } else { "pass" },
-        "qualityWarnings": if format == "png" { json!([{"code": "RASTER_PREVIEW_MINIMAL", "message": "Rust v4 portable preview wrote a placeholder PNG; use SVG/HTML or native renderer for detailed raster proof."}]) } else { json!([]) },
+        "artifactUsable": true,
+        "readiness": "pass",
+        "qualityWarnings": [],
         "artifacts": [artifact(&artifact_path, "view", &format)]
     }))
 }
@@ -568,18 +649,25 @@ fn verify_payload(ctx: &Context) -> Result<Value> {
         bail!("FEATURE_NOT_IMPLEMENTED: verify --native is not implemented in the Rust v4 native runtime");
     }
     let path = safe_input_path(&ctx.cwd, &input)?;
-    let inspected = inspect_path(&path)?;
-    let issues = structural_issues(&path).unwrap_or_default();
+    let issues = structural_issues(&path)?;
     let status = if issues.iter().any(|i| i["severity"] == "error") {
         "fail"
     } else {
         "pass"
     };
+    let summary = if status == "fail" && is_zip_path(&path) {
+        json!({"summary": {"format": extension_path(&path), "packageSafety": "blocked"}})
+    } else {
+        inspect_path(&path)?
+            .get("trusted")
+            .cloned()
+            .unwrap_or_else(|| json!({}))
+    };
     Ok(json!({
         "schema": "officegen.verify.result@1.2",
         "status": status,
         "readiness": if status == "pass" { "pass_with_environment_gap" } else { "blocked" },
-        "summary": inspected.get("trusted").cloned().unwrap_or_else(|| json!({})),
+        "summary": summary,
         "issues": issues,
         "warnings": [{"code": "NATIVE_PROOF_NOT_RUN", "message": "Rust portable verify did not run PowerPoint/Word/Excel native proof."}]
     }))
@@ -633,8 +721,8 @@ fn edit_payload(ctx: &Context) -> Result<Value> {
         .ok_or_else(|| anyhow!("SCHEMA_INVALID: edit ops must contain operations array"))?;
     let inspected = inspect_path(&input_path)?;
     let candidate = fs::read(&input_path)?;
-    let before_parts = zip_part_hashes_bytes(&candidate).unwrap_or_default();
     let (edited, applied) = apply_edit_ops(&input_path, &candidate, operations)?;
+    let before_parts = zip_part_hashes_bytes_checked(&input_path, &candidate).unwrap_or_default();
     let changed = edited != candidate;
     if !dry_run && changed {
         let out_path = safe_output_path(&ctx.cwd, &out)?;
@@ -643,7 +731,7 @@ fn edit_payload(ctx: &Context) -> Result<Value> {
     let after_parts = if dry_run {
         before_parts.clone()
     } else {
-        zip_part_hashes_bytes(&edited).unwrap_or_default()
+        zip_part_hashes_bytes_checked(&input_path, &edited).unwrap_or_default()
     };
     Ok(json!({
         "schema": "officegen.edit.result@1.2",
@@ -790,9 +878,18 @@ fn validate_payload(ctx: &Context) -> Result<Value> {
         .ok_or_else(|| anyhow!("INPUT_REQUIRED: validate requires input"))?;
     if input.ends_with(".json") {
         let data = read_json(&ctx.cwd, &input)?;
-        return Ok(
-            json!({"schema": "officegen.validate.result@1.2", "ok": validate_known_schema(option_value(&ctx.args, "--schema").as_deref(), &data), "errors": []}),
-        );
+        let schema_id = option_value(&ctx.args, "--schema")
+            .unwrap_or_else(|| "officegen.ir.document@1.2".into());
+        let report = schemas::validate_minimal_required_fields(&schema_id, &data);
+        return Ok(json!({
+            "schema": "officegen.validate.result@1.2",
+            "ok": report.ok,
+            "schemaId": report.schema_id,
+            "errors": report.errors.into_iter().map(|error| json!({
+                "instancePath": error.instance_path,
+                "message": error.message
+            })).collect::<Vec<_>>()
+        }));
     }
     let inspected = inspect_path(&safe_input_path(&ctx.cwd, &input)?)?;
     Ok(
@@ -901,6 +998,9 @@ fn renderer_payload(_ctx: &Context, sub: Option<&str>) -> Result<Value> {
             json!({"schema": "officegen.renderer.doctor.result@1.2", "renderers": [], "nativeProof": {"available": false, "reason": "Native renderer policy is opt-in."}, "nextActions": ["officegen config show --agent --strict-json"]}),
         );
     }
+    if sub == Some("trust") {
+        bail!("FEATURE_NOT_IMPLEMENTED: renderer trust is not implemented in the Rust v4.5 native runtime");
+    }
     Ok(management_payload(
         "officegen.renderer.result@1.2",
         sub.map(str::to_string).as_ref(),
@@ -930,6 +1030,7 @@ fn inspect_path(path: &Path) -> Result<Value> {
 }
 
 fn inspect_ooxml(path: &Path, format: &str) -> Result<Value> {
+    enforce_zip_safety(path)?;
     let mut zip = ZipArchive::new(File::open(path)?)?;
     let mut texts = Vec::new();
     let mut object_map = Vec::new();
@@ -999,6 +1100,7 @@ fn apply_edit_ops(input_path: &Path, bytes: &[u8], ops: &[Value]) -> Result<(Vec
     if !is_zip_path(input_path) {
         bail!("UNSUPPORTED_FORMAT: edit currently supports OOXML packages");
     }
+    enforce_zip_safety_bytes(input_path, bytes)?;
     for op in ops {
         validate_supported_edit_op(op)?;
     }
@@ -1322,40 +1424,6 @@ fn rels(rel_type: &str, target: &str) -> String {
     )
 }
 
-fn schema_ids() -> Vec<&'static str> {
-    vec![
-        "officegen.envelope@1.2",
-        "officegen.capabilities@1.2",
-        "officegen.ir.document@1.2",
-        "officegen.edit.ops@1.2",
-        "officegen.objectGraph@2",
-        "officegen.selectorResolution@2",
-        "officegen.editPlan@2",
-        "officegen.patchPlan@2",
-        "officegen.verify@2",
-        "officegen.packageDiff@1",
-        "officegen.office-agent.manifest@3.1",
-        "officegen.office-agent.workflow@3.1",
-        "officegen.office-agent.result@3.1",
-    ]
-}
-
-fn schema_doc(id: &str) -> Value {
-    json!({"$schema": "https://json-schema.org/draft/2020-12/schema", "$id": id, "type": "object", "additionalProperties": true})
-}
-
-fn validate_known_schema(schema_id: Option<&str>, data: &Value) -> bool {
-    match schema_id {
-        Some("officegen.edit.ops@1.2") => {
-            data.get("operations").and_then(Value::as_array).is_some()
-        }
-        Some("officegen.ir.document@1.2") => {
-            data.get("sections").and_then(Value::as_array).is_some()
-        }
-        _ => data.is_object() || data.is_array(),
-    }
-}
-
 fn command_text(args: &[String]) -> String {
     let pos = positionals(args);
     if pos.is_empty() {
@@ -1368,7 +1436,7 @@ fn command_text(args: &[String]) -> String {
         let first = pos[0].as_str();
         let second = pos.get(1).map(String::as_str).unwrap_or("");
         let two = format!("{first} {second}");
-        if COMMANDS.contains(&two.as_str()) {
+        if registry::find_command(&two).is_some() {
             two
         } else {
             first.into()
@@ -1445,7 +1513,11 @@ fn option_takes_value(arg: &str) -> bool {
 fn capabilities_hash() -> String {
     let mut hash = Sha256::new();
     hash.update(VERSION.as_bytes());
-    hash.update(COMMANDS.join("|").as_bytes());
+    for spec in registry::command_registry() {
+        hash.update(spec.command.as_bytes());
+        hash.update(command_status_name(spec.status).as_bytes());
+        hash.update([spec.human_visible as u8, spec.agent_visible as u8]);
+    }
     format!("sha256:{}", hex::encode(hash.finalize()))
 }
 
@@ -1474,67 +1546,15 @@ fn write_text_file(cwd: &Path, out: &str, text: &str) -> Result<()> {
 }
 
 fn safe_input_path(cwd: &Path, value: &str) -> Result<PathBuf> {
-    let candidate = resolve_user_path(cwd, value)?;
-    if !candidate.exists() {
-        bail!("INPUT_NOT_FOUND: {}", redacted(&candidate));
-    }
-    Ok(candidate)
+    safety::resolve_input_path(cwd, value)
 }
 
 fn safe_output_path(cwd: &Path, value: &str) -> Result<PathBuf> {
-    let candidate = resolve_user_path(cwd, value)?;
-    let root = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
-    let mut probe = candidate
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| cwd.to_path_buf());
-    while !probe.exists() {
-        if !probe.pop() {
-            break;
-        }
-    }
-    if probe.exists() {
-        let canonical_parent = probe.canonicalize()?;
-        if !canonical_parent.starts_with(&root) {
-            bail!("SECURITY_PATH_OUTSIDE_ROOT: output parent resolves outside project");
-        }
-    }
-    if candidate.exists() {
-        let metadata = fs::symlink_metadata(&candidate)?;
-        if metadata.file_type().is_symlink() {
-            bail!("SECURITY_PATH_OUTSIDE_ROOT: symlink outputs are not allowed");
-        }
-    }
-    Ok(candidate)
-}
-
-fn resolve_user_path(cwd: &Path, value: &str) -> Result<PathBuf> {
-    let raw = Path::new(value);
-    if raw.is_absolute() {
-        bail!("SECURITY_PATH_OUTSIDE_ROOT: absolute paths are not allowed");
-    }
-    if raw
-        .components()
-        .any(|component| matches!(component, std::path::Component::ParentDir))
-    {
-        bail!("SECURITY_PATH_OUTSIDE_ROOT: parent directory traversal is not allowed");
-    }
-    Ok(cwd.join(raw))
+    safety::resolve_output_path(cwd, value)
 }
 
 fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
-    fs::create_dir_all(path.parent().unwrap_or_else(|| Path::new(".")))?;
-    let temp = path.with_extension(format!(
-        "{}tmp-{}",
-        path.extension()
-            .and_then(|value| value.to_str())
-            .map(|value| format!("{value}."))
-            .unwrap_or_default(),
-        std::process::id()
-    ));
-    fs::write(&temp, data)?;
-    fs::rename(&temp, path)?;
-    Ok(())
+    safety::atomic_write(path, data)
 }
 
 fn artifact(path: &Path, kind: &str, format: &str) -> Value {
@@ -1613,6 +1633,7 @@ fn is_zip_path(path: &Path) -> bool {
 }
 
 fn zip_entries(path: &Path) -> Result<Vec<String>> {
+    enforce_zip_safety(path)?;
     let mut zip = ZipArchive::new(File::open(path)?)?;
     let mut entries = Vec::new();
     for i in 0..zip.len() {
@@ -1635,7 +1656,13 @@ fn zip_part_hashes_bytes(bytes: &[u8]) -> Result<BTreeMap<String, String>> {
     Ok(map)
 }
 
+fn zip_part_hashes_bytes_checked(path: &Path, bytes: &[u8]) -> Result<BTreeMap<String, String>> {
+    enforce_zip_safety_bytes(path, bytes)?;
+    zip_part_hashes_bytes(bytes)
+}
+
 fn zip_part_hashes(path: &Path) -> Result<BTreeMap<String, String>> {
+    enforce_zip_safety(path)?;
     zip_part_hashes_bytes(&fs::read(path)?)
 }
 
@@ -1669,25 +1696,19 @@ fn package_issues(path: &Path) -> Result<Vec<Value>> {
     if !is_zip_path(path) {
         return Ok(Vec::new());
     }
-    let entries = zip_entries(path)?;
-    let mut issues = Vec::new();
-    for entry in entries {
-        if entry.contains("vbaProject.bin") {
-            issues.push(json!({"code": "ZIP_MACRO_PART", "severity": "error", "part": entry}));
-        } else if entry.contains("/embeddings/") && !entry.ends_with(".xlsx") {
-            issues
-                .push(json!({"code": "ZIP_EMBEDDED_OBJECT", "severity": "warning", "part": entry}));
-        } else if entry.contains("/embeddings/") && entry.ends_with(".xlsx") {
-            issues.push(
-                json!({"code": "ZIP_CHART_EMBEDDED_WORKBOOK", "severity": "info", "part": entry}),
-            );
-        }
-    }
-    Ok(issues)
+    let report = safety::scan_zip_file(path)?;
+    Ok(report
+        .issues
+        .into_iter()
+        .map(zip_safety_issue_json)
+        .collect())
 }
 
 fn structural_issues(path: &Path) -> Result<Vec<Value>> {
     let mut issues = package_issues(path)?;
+    if issues.iter().any(|issue| issue["severity"] == "error") {
+        return Ok(issues);
+    }
     if is_zip_path(path) {
         let entries = zip_entries(path)?.into_iter().collect::<BTreeSet<_>>();
         if !entries.contains("[Content_Types].xml") {
@@ -1743,11 +1764,54 @@ fn structural_issues(path: &Path) -> Result<Vec<Value>> {
     Ok(issues)
 }
 
+fn enforce_zip_safety(path: &Path) -> Result<()> {
+    let report = safety::scan_zip_file(path)?;
+    enforce_zip_safety_report(&report)
+}
+
+fn enforce_zip_safety_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
+    let report = safety::scan_zip_bytes(bytes, safety::OpcPackageKind::from_path(path))?;
+    enforce_zip_safety_report(&report)
+}
+
+fn enforce_zip_safety_report(report: &safety::ZipSafetyReport) -> Result<()> {
+    if let Some(issue) = report
+        .issues
+        .iter()
+        .find(|issue| issue.severity == safety::SafetySeverity::Error)
+    {
+        bail!(
+            "SECURITY_ZIP_UNSAFE: {}{}",
+            issue.code,
+            issue
+                .part
+                .as_ref()
+                .map(|part| format!(" in {part}"))
+                .unwrap_or_default()
+        );
+    }
+    Ok(())
+}
+
+fn zip_safety_issue_json(issue: safety::ZipSafetyIssue) -> Value {
+    json!({
+        "code": issue.code,
+        "severity": match issue.severity {
+            safety::SafetySeverity::Info => "info",
+            safety::SafetySeverity::Warning => "warning",
+            safety::SafetySeverity::Error => "error",
+        },
+        "part": issue.part,
+        "message": issue.message
+    })
+}
+
 fn extract_media(path: &Path, out_dir: &Path) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     if !is_zip_path(path) {
         return Ok(files);
     }
+    enforce_zip_safety(path)?;
     let mut zip = ZipArchive::new(File::open(path)?)?;
     for i in 0..zip.len() {
         let mut file = zip.by_index(i)?;
@@ -1893,10 +1957,6 @@ fn text_svg(text: &str, width: usize, height: usize) -> String {
     format!("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\"><rect width=\"100%\" height=\"100%\" fill=\"white\"/>{body}</svg>")
 }
 
-fn png_1x1() -> &'static [u8] {
-    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc\xf8\xff\xff?\x00\x05\xfe\x02\xfeA\xe2!\xbc\x00\x00\x00\x00IEND\xaeB`\x82"
-}
-
 fn selector_contains(op: &Value) -> Option<String> {
     op.pointer("/selector/contains")
         .and_then(Value::as_str)
@@ -2014,7 +2074,7 @@ fn error_payload(ctx: &Context, message: &str) -> Value {
         "severity": "error",
         "message": message,
         "command": ctx.command,
-        "availableCommands": COMMANDS,
+        "availableCommands": available_commands_for(ctx),
     })
 }
 
@@ -2118,6 +2178,124 @@ mod tests {
             .as_array()
             .unwrap()
             .contains(&json!("help")));
+    }
+
+    #[test]
+    fn mcp_is_removed_from_scope_and_hidden_from_agent_capabilities() {
+        let dir = tempdir().unwrap();
+        let caps_ctx = Context::new(
+            args(&["officegen", "capabilities", "--agent", "--strict-json"]),
+            dir.path().to_path_buf(),
+        );
+
+        let caps = command_envelope(&caps_ctx);
+        let caps_text = serde_json::to_string(&caps["result"]).unwrap();
+
+        assert_eq!(caps["ok"], true);
+        assert!(!caps_text.contains("mcp serve"));
+
+        let mcp_ctx = Context::new(
+            args(&["officegen", "mcp", "serve", "--agent", "--strict-json"]),
+            dir.path().to_path_buf(),
+        );
+        let mcp = command_envelope(&mcp_ctx);
+
+        assert_eq!(mcp["ok"], false);
+        assert_eq!(mcp["failureClass"], "unsupported");
+        assert_eq!(mcp["error"]["code"], "FEATURE_REMOVED_FROM_SCOPE");
+    }
+
+    #[test]
+    fn removed_and_deferred_management_commands_fail_closed() {
+        let dir = tempdir().unwrap();
+        let plugin_ctx = Context::new(
+            args(&["officegen", "plugin", "install", "--agent", "--strict-json"]),
+            dir.path().to_path_buf(),
+        );
+        let plugin = command_envelope(&plugin_ctx);
+
+        assert_eq!(plugin["ok"], false);
+        assert_eq!(plugin["error"]["code"], "FEATURE_REMOVED_FROM_SCOPE");
+
+        let agent_ctx = Context::new(
+            args(&["officegen", "agent", "install", "--agent", "--strict-json"]),
+            dir.path().to_path_buf(),
+        );
+        let agent = command_envelope(&agent_ctx);
+
+        assert_eq!(agent["ok"], false);
+        assert_eq!(agent["error"]["code"], "FEATURE_NOT_IMPLEMENTED");
+    }
+
+    #[test]
+    fn png_view_fails_closed_without_writing_placeholder() {
+        let dir = tempdir().unwrap();
+        write_minimal_docx(&dir.path().join("input.docx"), "Title", "Body").unwrap();
+        let ctx = Context::new(
+            args(&[
+                "officegen",
+                "view",
+                "input.docx",
+                "--format",
+                "png",
+                "--out",
+                "view",
+                "--agent",
+                "--strict-json",
+            ]),
+            dir.path().to_path_buf(),
+        );
+
+        let payload = command_envelope(&ctx);
+
+        assert_eq!(payload["ok"], false);
+        assert_eq!(payload["error"]["code"], "FEATURE_NOT_IMPLEMENTED");
+        assert!(!dir.path().join("view").join("page-001.png").exists());
+    }
+
+    #[test]
+    fn unsafe_zip_is_blocked_before_inspect_and_reported_by_verify() {
+        let dir = tempdir().unwrap();
+        let bad = dir.path().join("bad.docx");
+        {
+            let file = File::create(&bad).unwrap();
+            let mut zip = ZipWriter::new(file);
+            let options = SimpleFileOptions::default();
+            zip.start_file("../evil.xml", options).unwrap();
+            zip.write_all(b"<evil/>").unwrap();
+            zip.finish().unwrap();
+        }
+
+        let inspect_ctx = Context::new(
+            args(&[
+                "officegen",
+                "inspect",
+                "bad.docx",
+                "--agent",
+                "--strict-json",
+            ]),
+            dir.path().to_path_buf(),
+        );
+        let inspect = command_envelope(&inspect_ctx);
+
+        assert_eq!(inspect["ok"], false);
+        assert_eq!(inspect["error"]["code"], "SECURITY_ZIP_UNSAFE");
+
+        let verify_ctx = Context::new(
+            args(&[
+                "officegen",
+                "verify",
+                "bad.docx",
+                "--agent",
+                "--strict-json",
+            ]),
+            dir.path().to_path_buf(),
+        );
+        let verify = command_envelope(&verify_ctx);
+
+        assert_eq!(verify["ok"], false);
+        assert_eq!(verify["result"]["status"], "fail");
+        assert_eq!(verify["result"]["issues"][0]["code"], "ZIP_SLIP_ENTRY");
     }
 
     #[test]

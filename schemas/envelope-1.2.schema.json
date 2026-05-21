@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "officegen.envelope@1.2",
+  "title": "Officegen runtime envelope",
+  "type": "object",
+  "required": [
+    "schema",
+    "ok",
+    "cliVersion",
+    "pathsRedacted",
+    "warnings",
+    "diagnostics",
+    "artifacts",
+    "nextSuggestedCommands"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "schema": { "const": "officegen.envelope@1.2" },
+    "runtimeEnvelope": { "type": "string" },
+    "ok": { "type": "boolean" },
+    "command": { "type": "string" },
+    "cliVersion": { "type": "string" },
+    "version": { "type": "string" },
+    "runtime": {},
+    "pathsRedacted": { "type": "boolean" },
+    "warnings": { "type": "array" },
+    "diagnostics": { "type": "array" },
+    "artifacts": { "type": "array" },
+    "nextSuggestedCommands": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "result": {},
+    "error": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  }
+}

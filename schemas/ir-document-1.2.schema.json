@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "officegen.ir.document@1.2",
+  "title": "Officegen document IR",
+  "type": "object",
+  "required": [
+    "schema",
+    "targets",
+    "sections"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "schema": { "const": "officegen.ir.document@1.2" },
+    "title": { "type": "string" },
+    "targets": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string" }
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "sections": {
+      "type": "array",
+      "items": { "type": "object" }
+    }
+  }
+}

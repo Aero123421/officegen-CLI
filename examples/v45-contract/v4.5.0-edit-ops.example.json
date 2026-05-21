@@ -1,0 +1,12 @@
+{
+  "schema": "officegen.edit.ops@1.2",
+  "ops": [
+    {
+      "op": "setText",
+      "selector": {
+        "stableObjectId": "pptx:slide:1:shape:1"
+      },
+      "text": "v4.5.0 acceptance smoke"
+    }
+  ]
+}
