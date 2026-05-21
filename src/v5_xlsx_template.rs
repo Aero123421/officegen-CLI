@@ -48,7 +48,7 @@ pub fn apply_xlsx_package_op(entries: &mut Vec<(String, Vec<u8>)>, op: &Value) -
         .and_then(Value::as_str)
         .unwrap_or("");
     match op_name {
-        "xlsx.setCell" => {
+        "set" | "xlsx.setCell" if op.get("formula").is_none() => {
             let value = op
                 .get("value")
                 .or_else(|| op.get("text"))
@@ -66,7 +66,7 @@ pub fn apply_xlsx_package_op(entries: &mut Vec<(String, Vec<u8>)>, op: &Value) -
             entries[idx].1 = next.into_bytes();
             Ok(true)
         }
-        "xlsx.setFormula" => {
+        "set" | "xlsx.setFormula" => {
             let formula = op
                 .get("formula")
                 .and_then(Value::as_str)
@@ -976,6 +976,9 @@ fn chart_data(spec: &Value) -> Result<(Vec<String>, Vec<f64>)> {
 }
 
 fn worksheet_part_for_op(entries: &[(String, Vec<u8>)], op: &Value) -> Result<String> {
+    if let Some((Some(sheet), _cell)) = selector_cell_uri(op) {
+        return sheet_part_by_name(entries, &sheet);
+    }
     if let Some(source_path) = op.pointer("/selector/sourcePath").and_then(Value::as_str) {
         return Ok(source_path.to_string());
     }
@@ -1007,11 +1010,21 @@ fn worksheet_part_for_op(entries: &[(String, Vec<u8>)], op: &Value) -> Result<St
 }
 
 fn worksheet_cell_for_op(entries: &[(String, Vec<u8>)], op: &Value) -> Result<(String, String)> {
+    if let Some((sheet, cell)) = selector_cell_uri(op) {
+        split_cell_ref(&cell)?;
+        let part = if let Some(sheet) = sheet {
+            sheet_part_by_name(entries, &sheet)?
+        } else {
+            worksheet_part_for_op(entries, op)?
+        };
+        return Ok((part, cell.to_ascii_uppercase()));
+    }
     if let Some(cell) = op
         .get("cell")
         .or_else(|| op.pointer("/selector/cell"))
         .and_then(Value::as_str)
     {
+        split_cell_ref(cell)?;
         return Ok((
             worksheet_part_for_op(entries, op)?,
             cell.to_ascii_uppercase(),
@@ -1035,6 +1048,21 @@ fn worksheet_cell_for_op(entries: &[(String, Vec<u8>)], op: &Value) -> Result<(S
         bail!("SELECTOR_NOT_FOUND: XLSX stableObjectId did not match any worksheet cell");
     }
     bail!("SCHEMA_INVALID: xlsx cell edit requires cell, selector.cell, or selector.stableObjectId")
+}
+
+fn selector_cell_uri(op: &Value) -> Option<(Option<String>, String)> {
+    let selector = op.get("selector").and_then(Value::as_str)?;
+    let body = selector.strip_prefix("cell://")?;
+    let mut parts = body.rsplitn(2, '!');
+    let cell = parts.next()?.trim();
+    if cell.is_empty() {
+        return None;
+    }
+    let sheet = parts
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    Some((sheet.map(str::to_string), cell.to_string()))
 }
 
 fn worksheet_cell_refs(xml: &str) -> Vec<String> {
@@ -1062,30 +1090,37 @@ fn sheet_part_by_name(entries: &[(String, Vec<u8>)], sheet: &str) -> Result<Stri
         .find(|(name, _)| name == "xl/workbook.xml")
         .map(|(_, data)| String::from_utf8_lossy(data).to_string())
         .ok_or_else(|| anyhow!("SELECTOR_NOT_FOUND: xl/workbook.xml"))?;
-    let re = Regex::new(&format!(
-        r#"<sheet\b[^>]*\bname="{}"[^>]*\br:id="([^"]+)""#,
-        regex::escape(&xml_escape(sheet))
-    ))?;
-    let rid = re
-        .captures(&workbook)
-        .and_then(|cap| cap.get(1))
-        .map(|m| m.as_str().to_string())
+    let sheet_tag_re = Regex::new(r#"<sheet\b[^>]*/?>"#)?;
+    let rid = sheet_tag_re
+        .find_iter(&workbook)
+        .find_map(|tag| {
+            let tag = tag.as_str();
+            let name = xml_attr_value(tag, "name")?;
+            if xml_unescape(&name) == sheet {
+                xml_attr_value(tag, "r:id")
+            } else {
+                None
+            }
+        })
         .ok_or_else(|| anyhow!("SELECTOR_NOT_FOUND: sheet {sheet}"))?;
     let rels = entries
         .iter()
         .find(|(name, _)| name == "xl/_rels/workbook.xml.rels")
         .map(|(_, data)| String::from_utf8_lossy(data).to_string())
         .ok_or_else(|| anyhow!("SELECTOR_NOT_FOUND: xl/_rels/workbook.xml.rels"))?;
-    let re = Regex::new(&format!(
-        r#"<Relationship\b[^>]*\bId="{}"[^>]*\bTarget="([^"]+)""#,
-        regex::escape(&rid)
-    ))?;
-    let target = re
-        .captures(&rels)
-        .and_then(|cap| cap.get(1))
-        .map(|m| m.as_str())
+    let rel_tag_re = Regex::new(r#"<Relationship\b[^>]*/?>"#)?;
+    let target = rel_tag_re
+        .find_iter(&rels)
+        .find_map(|tag| {
+            let tag = tag.as_str();
+            if xml_attr_value(tag, "Id").as_deref() == Some(rid.as_str()) {
+                xml_attr_value(tag, "Target")
+            } else {
+                None
+            }
+        })
         .ok_or_else(|| anyhow!("SELECTOR_NOT_FOUND: workbook relationship for {sheet}"))?;
-    Ok(normalize_workbook_rel_target(target))
+    Ok(normalize_workbook_rel_target(&target))
 }
 
 fn sheet_part_by_index(entries: &[(String, Vec<u8>)], sheet_index: usize) -> Result<String> {
@@ -1109,6 +1144,15 @@ fn normalize_workbook_rel_target(target: &str) -> String {
     } else {
         format!("xl/{trimmed}")
     }
+}
+
+fn xml_attr_value(tag: &str, name: &str) -> Option<String> {
+    let pattern = format!(r#"\b{}\s*=\s*(?:"([^"]*)"|'([^']*)')"#, regex::escape(name));
+    let re = Regex::new(&pattern).ok()?;
+    let cap = re.captures(tag)?;
+    cap.get(1)
+        .or_else(|| cap.get(2))
+        .map(|m| m.as_str().to_string())
 }
 
 fn add_sheet_relationship(
@@ -1338,4 +1382,12 @@ fn xml_escape(text: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+fn xml_unescape(text: &str) -> String {
+    text.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&")
 }

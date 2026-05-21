@@ -350,14 +350,20 @@ fn apply_json_budget(ctx: &Context, mut payload: Value) -> Result<Value> {
 }
 
 fn mark_payload_partial(payload: &mut Value, code: &str, message: &str) {
-    payload["readiness"] = json!("partial");
+    let original_ok = payload.get("ok").and_then(Value::as_bool).unwrap_or(false);
+    if original_ok {
+        payload["readiness"] = json!("partial");
+        payload["partial"] = json!(true);
+        payload["objectiveOk"] = json!(true);
+    }
     payload["partial"] = json!(true);
     payload["responseTruncated"] = json!(true);
-    payload["objectiveOk"] = json!(true);
     let warning = json!({"code": code, "severity": "warning", "message": message});
     push_array_value(payload, "/warnings", warning.clone());
     if let Some(result) = payload.get_mut("result") {
-        result["readiness"] = json!("partial");
+        if original_ok {
+            result["readiness"] = json!("partial");
+        }
         result["partial"] = json!(true);
         result["responseTruncated"] = json!(true);
         push_array_value(result, "/warnings", warning);
@@ -771,6 +777,7 @@ fn schema_payload(ctx: &Context, sub: Option<&str>) -> Result<Value> {
                 .ok_or_else(|| anyhow!("INPUT_REQUIRED: schema validate requires input.json"))?;
             let data = read_json(&ctx.cwd, &input)?;
             let schema_id = option_value(&ctx.args, "--schema")
+                .or_else(|| option_value(&ctx.args, "--schema-id"))
                 .unwrap_or_else(|| "officegen.envelope@1.2".into());
             let report = schemas::validate_minimal_required_fields(&schema_id, &data);
             Ok(json!({
@@ -1084,6 +1091,7 @@ fn edit_payload(ctx: &Context) -> Result<Value> {
     let inspected = inspect_path(&input_path)?;
     let candidate = fs::read(&input_path)?;
     let is_pdf_edit = extension_path(&input_path).eq_ignore_ascii_case("pdf");
+    validate_ops_match_input_format(&extension_path(&input_path), operations)?;
     let (edited, applied) = if is_pdf_edit {
         apply_pdf_edit_ops(&candidate, operations)?
     } else {
@@ -1123,7 +1131,7 @@ fn edit_payload(ctx: &Context) -> Result<Value> {
         "inputSummary": inspected.get("trusted").cloned().unwrap_or_else(|| json!({})),
         "out": if dry_run { Value::Null } else { json!(out) },
         "packageDiff": part_hash_diff(&before_parts, &after_parts),
-        "warnings": [{"code": "OOXML_ZIP_METADATA_NOT_PRESERVED", "severity": "warning", "message": "Rust native edit preserves part names/content semantics but rewrites ZIP metadata and invalidates digital signatures."}],
+        "warnings": if is_pdf_edit { json!([]) } else { json!([{"code": "OOXML_ZIP_METADATA_NOT_PRESERVED", "severity": "warning", "message": "Rust native edit preserves part names/content semantics but rewrites ZIP metadata and invalidates digital signatures."}]) },
         "artifacts": artifacts
     }))
 }
@@ -1167,18 +1175,26 @@ fn chart_render(ctx: &Context) -> Result<Value> {
     let input = first_input(&ctx.args, 2)
         .ok_or_else(|| anyhow!("INPUT_REQUIRED: chart render requires chart spec JSON"))?;
     let spec = read_json(&ctx.cwd, &input)?;
+    let chart_kind = chart_kind(&spec)?;
     let (labels, values) = chart_data(&spec)?;
     let svg = chart_svg(
         spec.get("title").and_then(Value::as_str).unwrap_or("Chart"),
         &labels,
         &values,
+        &chart_kind,
     );
     let out = option_value(&ctx.args, "--out");
+    let mut artifacts = Vec::new();
     if let Some(ref out_path) = out {
         write_text_file(&ctx.cwd, out_path, &svg)?;
+        artifacts.push(artifact(
+            &safe_output_path(&ctx.cwd, out_path)?,
+            "chart",
+            "svg",
+        ));
     }
     Ok(
-        json!({"schema": "officegen.chart.render.result@1.2", "svg": svg, "out": out, "data": {"labels": labels, "values": values}}),
+        json!({"schema": "officegen.chart.render.result@1.2", "changed": out.is_some(), "svg": svg, "out": out, "chartType": chart_kind, "data": {"labels": labels, "values": values}, "artifacts": artifacts}),
     )
 }
 
@@ -1186,14 +1202,20 @@ fn diagram_render(ctx: &Context) -> Result<Value> {
     let input = first_input(&ctx.args, 2)
         .ok_or_else(|| anyhow!("INPUT_REQUIRED: diagram render requires diagram text"))?;
     let text = fs::read_to_string(safe_input_path(&ctx.cwd, &input)?)?;
-    let nodes = parse_mermaid_nodes(&text);
-    let svg = diagram_svg(&nodes);
+    let (nodes, edges) = parse_diagram_spec(&text)?;
+    let svg = diagram_svg(&nodes, &edges);
     let out = option_value(&ctx.args, "--out");
+    let mut artifacts = Vec::new();
     if let Some(ref out_path) = out {
         write_text_file(&ctx.cwd, out_path, &svg)?;
+        artifacts.push(artifact(
+            &safe_output_path(&ctx.cwd, out_path)?,
+            "diagram",
+            "svg",
+        ));
     }
     Ok(
-        json!({"schema": "officegen.diagram.render.result@1.2", "svg": svg, "nodes": nodes, "out": out}),
+        json!({"schema": "officegen.diagram.render.result@1.2", "changed": out.is_some(), "svg": svg, "nodes": nodes, "edges": edges.iter().map(|(from, to)| json!({"from": from, "to": to})).collect::<Vec<_>>(), "out": out, "artifacts": artifacts}),
     )
 }
 
@@ -1211,8 +1233,39 @@ fn diagnose_payload(ctx: &Context) -> Result<Value> {
 
 fn repair_payload(ctx: &Context) -> Result<Value> {
     let dry_run = has_flag(&ctx.args, "--dry-run") || has_flag(&ctx.args, "--plan");
+    let input = first_input(&ctx.args, 1);
+    let mut artifacts = Vec::new();
+    let mut out = Value::Null;
+    if !dry_run {
+        if let Some(out_arg) = option_value(&ctx.args, "--out") {
+            let input_arg =
+                input.ok_or_else(|| anyhow!("INPUT_REQUIRED: repair requires input file"))?;
+            let input_path = safe_input_path(&ctx.cwd, &input_arg)?;
+            if is_zip_path(&input_path) || extension_path(&input_path).eq_ignore_ascii_case("pdf") {
+                let issues = structural_issues(&input_path)?;
+                if issues.iter().any(|issue| issue["severity"] == "error") {
+                    if issues.iter().any(|issue| {
+                        issue
+                            .get("code")
+                            .and_then(Value::as_str)
+                            .map(|code| code.starts_with("ZIP_") || code.starts_with("SECURITY_"))
+                            .unwrap_or(false)
+                    }) {
+                        bail!("SECURITY_ZIP_UNSAFE: repair input did not pass package safety scan");
+                    }
+                    bail!(
+                        "OOXML_VALIDATION_FAILED: repair input did not pass package verification"
+                    );
+                }
+            }
+            let out_path = safe_output_path(&ctx.cwd, &out_arg)?;
+            atomic_write(&out_path, &fs::read(&input_path)?)?;
+            artifacts.push(artifact(&out_path, "repair", extension(&out_arg)));
+            out = json!(out_arg);
+        }
+    }
     Ok(
-        json!({"schema": "officegen.repair.result@1.2", "changed": false, "dryRun": dry_run, "repairPlan": {"wouldWrite": !dry_run && option_value(&ctx.args, "--out").is_some(), "planOnly": dry_run}, "recommendedRepairs": []}),
+        json!({"schema": "officegen.repair.result@1.2", "changed": false, "dryRun": dry_run, "out": out, "artifacts": artifacts, "repairPlan": {"wouldWrite": !dry_run && option_value(&ctx.args, "--out").is_some(), "planOnly": dry_run}, "recommendedRepairs": []}),
     )
 }
 
@@ -1415,18 +1468,26 @@ fn template_payload(ctx: &Context, sub: Option<&str>) -> Result<Value> {
             }
             let after_parts = zip_part_hashes_bytes_checked(&template_path, &filled)?;
             let package_diff = part_hash_diff(&before_parts, &after_parts);
-            let content_changed = package_diff.as_array().map(|items| !items.is_empty()).unwrap_or(false);
-            if replacements == 0 && !content_changed {
+            let content_changed = package_diff_changed(&package_diff);
+            if !content_changed {
                 let mut warnings = warnings;
-                warnings.push(json!({
-                    "code": "NO_PLACEHOLDERS_FOUND",
-                    "severity": "warning",
-                    "message": "No template placeholders were found or replaced; no output artifact was written."
-                }));
+                warnings.push(if replacements == 0 {
+                    json!({
+                        "code": "NO_PLACEHOLDERS_FOUND",
+                        "severity": "warning",
+                        "message": "No template placeholders were found or replaced; no output artifact was written."
+                    })
+                } else {
+                    json!({
+                        "code": "TEMPLATE_NO_EFFECT",
+                        "severity": "warning",
+                        "message": "Template placeholders resolved to their original values; no output artifact was written."
+                    })
+                });
                 return Ok(json!({
                     "schema": "officegen.template.fill.result@5.0",
                     "changed": false,
-                    "replacements": 0,
+                    "replacements": replacements,
                     "missingFields": missing,
                     "warnings": warnings,
                     "packageDiff": package_diff,
@@ -1542,6 +1603,8 @@ fn apply_scope_filters(inspected: &mut Value, control: &OutputControl) {
         if control.sheet.is_none() && control.range.is_none() {
             return;
         }
+        let mut scoped_count = None;
+        let mut scoped_preview = None;
         if let Some(objects) = inspected.get_mut("objectMap").and_then(Value::as_array_mut) {
             let sheet = control.sheet.as_deref();
             let range = control.range.as_deref().and_then(parse_cell_range);
@@ -1567,10 +1630,22 @@ fn apply_scope_filters(inspected: &mut Value, control: &OutputControl) {
                 sheet_ok && range_ok
             });
             let count = objects.len();
+            let preview = objects
+                .iter()
+                .filter_map(|object| object.get("textPreview").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join(" ");
+            scoped_count = Some(count);
+            scoped_preview = Some(preview);
+        }
+        if let Some(count) = scoped_count {
             inspected["trusted"]["summary"]["textObjects"] = json!(count);
             inspected["trusted"]["summary"]["cells"] = json!(count);
             inspected["trusted"]["summary"]["scope"] =
                 json!({"sheet": control.sheet.clone(), "range": control.range.clone()});
+            let scoped_preview = scoped_preview.unwrap_or_default();
+            inspected["untrusted"]["textPreview"] =
+                json!(scoped_preview.chars().take(2000).collect::<String>());
         }
     }
 }
@@ -1586,9 +1661,89 @@ fn xlsx_object_matches_sheet(object: &Value, wanted: &str) -> bool {
     source.ends_with(&format!("{normalized}.xml"))
         || (normalized.eq_ignore_ascii_case("sheet1") && source.ends_with("sheet1.xml"))
         || object
+            .get("sheetName")
+            .and_then(Value::as_str)
+            .map(|name| name.eq_ignore_ascii_case(normalized))
+            .unwrap_or(false)
+        || object
             .pointer("/selectorHints/sheet")
             .and_then(Value::as_str)
-            == Some(normalized)
+            .map(|name| name.eq_ignore_ascii_case(normalized))
+            .unwrap_or(false)
+        || object
+            .pointer("/selectorHints/sheetName")
+            .and_then(Value::as_str)
+            .map(|name| name.eq_ignore_ascii_case(normalized))
+            .unwrap_or(false)
+}
+
+fn xlsx_sheet_name_map(path: &Path) -> Result<BTreeMap<String, String>> {
+    enforce_zip_safety(path)?;
+    let mut zip = ZipArchive::new(File::open(path)?)?;
+    let workbook = read_zip_text(&mut zip, "xl/workbook.xml")?.unwrap_or_default();
+    let rels = read_zip_text(&mut zip, "xl/_rels/workbook.xml.rels")?.unwrap_or_default();
+    let rel_map = xlsx_workbook_relationship_targets(&rels);
+    let sheet_re = Regex::new(r#"<sheet\b[^>]*/?>"#).unwrap();
+    let mut out = BTreeMap::new();
+    for tag in sheet_re.find_iter(&workbook) {
+        let tag = tag.as_str();
+        let Some(sheet_name) = xml_attr_value(tag, "name").map(|name| xml_unescape(&name)) else {
+            continue;
+        };
+        let Some(rid) = xml_attr_value(tag, "r:id") else {
+            continue;
+        };
+        if let Some(target) = rel_map.get(&rid) {
+            out.insert(target.clone(), sheet_name);
+        }
+    }
+    Ok(out)
+}
+
+fn xlsx_workbook_relationship_targets(xml: &str) -> BTreeMap<String, String> {
+    let rel_re = Regex::new(r#"<Relationship\b[^>]*/?>"#).unwrap();
+    let mut out = BTreeMap::new();
+    for tag in rel_re.find_iter(xml) {
+        let tag = tag.as_str();
+        let id = xml_attr_value(tag, "Id").unwrap_or_default();
+        let target = xml_attr_value(tag, "Target").unwrap_or_default();
+        if id.is_empty() || target.is_empty() || target.contains("://") {
+            continue;
+        }
+        let normalized = if target.starts_with('/') {
+            target.trim_start_matches('/').to_string()
+        } else if target.starts_with("xl/") {
+            target.to_string()
+        } else {
+            format!("xl/{target}")
+        }
+        .replace('\\', "/");
+        out.insert(id, normalized);
+    }
+    out
+}
+
+fn xml_attr_value(tag: &str, name: &str) -> Option<String> {
+    let pattern = format!(r#"\b{}\s*=\s*(?:"([^"]*)"|'([^']*)')"#, regex::escape(name));
+    let re = Regex::new(&pattern).ok()?;
+    let cap = re.captures(tag)?;
+    cap.get(1)
+        .or_else(|| cap.get(2))
+        .map(|m| m.as_str().to_string())
+}
+
+fn read_zip_text<R: Read + Seek>(zip: &mut ZipArchive<R>, name: &str) -> Result<Option<String>> {
+    match zip.by_name(name) {
+        Ok(mut file) => {
+            let mut text = String::new();
+            if file.read_to_string(&mut text).is_ok() {
+                Ok(Some(text))
+            } else {
+                Ok(None)
+            }
+        }
+        Err(_) => Ok(None),
+    }
 }
 
 fn parse_cell_range(range: &str) -> Option<(usize, usize, usize, usize)> {
@@ -1622,6 +1777,11 @@ fn inspect_ooxml(path: &Path, format: &str) -> Result<Value> {
     let mut texts = Vec::new();
     let mut object_map = Vec::new();
     let mut parts = Vec::new();
+    let xlsx_sheet_names = if format == "xlsx" {
+        xlsx_sheet_name_map(path).unwrap_or_default()
+    } else {
+        BTreeMap::new()
+    };
     for i in 0..zip.len() {
         let mut file = zip.by_index(i)?;
         let name = file.name().to_string();
@@ -1635,6 +1795,13 @@ fn inspect_ooxml(path: &Path, format: &str) -> Result<Value> {
         }
         let part_texts = xml_text_nodes(&xml);
         if format == "xlsx" && name.starts_with("xl/worksheets/") {
+            let sheet_name = xlsx_sheet_names.get(&name).cloned().unwrap_or_else(|| {
+                Path::new(&name)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("sheet")
+                    .to_string()
+            });
             for (cell, text, is_formula) in xlsx_cells_from_sheet_xml(&xml) {
                 if text.trim().is_empty() {
                     continue;
@@ -1644,10 +1811,11 @@ fn inspect_ooxml(path: &Path, format: &str) -> Result<Value> {
                     "stableObjectId": id,
                     "type": "cell",
                     "sourcePath": name,
+                    "sheetName": sheet_name,
                     "cell": cell,
                     "textPreview": text,
                     "formula": is_formula,
-                    "selectorHints": {"cell": cell, "sourcePath": name, "stableObjectId": id}
+                    "selectorHints": {"cell": cell, "sheet": sheet_name, "sheetName": sheet_name, "sourcePath": name, "stableObjectId": id}
                 }));
                 texts.push(text.clone());
             }
@@ -1863,7 +2031,8 @@ fn is_xlsx_package_op(op: &Value) -> bool {
             .or_else(|| op.get("type"))
             .and_then(Value::as_str)
             .unwrap_or(""),
-        "xlsx.setCell"
+        "set"
+            | "xlsx.setCell"
             | "xlsx.setRange"
             | "xlsx.setFormula"
             | "xlsx.addSheet"
@@ -1876,8 +2045,6 @@ fn is_xlsx_package_op(op: &Value) -> bool {
 }
 
 fn apply_pdf_edit_ops(bytes: &[u8], ops: &[Value]) -> Result<(Vec<u8>, usize)> {
-    let mut out = bytes.to_vec();
-    let mut applied = 0usize;
     for op in ops {
         validate_supported_edit_op(op)?;
         let op_name = op
@@ -1886,21 +2053,13 @@ fn apply_pdf_edit_ops(bytes: &[u8], ops: &[Value]) -> Result<(Vec<u8>, usize)> {
             .and_then(Value::as_str)
             .unwrap_or("");
         match op_name {
-            "pdf.annotate" | "pdf.textOverlay" => {
-                let text = op
-                    .get("text")
-                    .or_else(|| op.get("comment"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                out.extend_from_slice(
-                    format!("\n% officegen:{op_name}: {}\n", text.replace('\n', " ")).as_bytes(),
-                );
-                applied += 1;
-            }
+            "pdf.annotate" | "pdf.textOverlay" => bail!(
+                "PDF_UNSUPPORTED_OPERATION: portable PDF annotation/overlay editing is not implemented; use PDF inspect/view only"
+            ),
             other => bail!("FEATURE_NOT_IMPLEMENTED: edit op {other} is not implemented for PDF"),
         }
     }
-    Ok((out, applied))
+    Ok((bytes.to_vec(), 0))
 }
 
 fn validate_supported_edit_op(op: &Value) -> Result<()> {
@@ -1911,6 +2070,7 @@ fn validate_supported_edit_op(op: &Value) -> Result<()> {
         .unwrap_or("");
     match op_name {
         "setText"
+        | "set"
         | "pptx.setText"
         | "docx.setText"
         | "setTableCell"
@@ -1930,6 +2090,29 @@ fn validate_supported_edit_op(op: &Value) -> Result<()> {
         "" => bail!("SCHEMA_INVALID: edit operation is missing op"),
         other => bail!("FEATURE_NOT_IMPLEMENTED: edit op {other} is not implemented in the Rust-native runtime"),
     }
+}
+
+fn validate_ops_match_input_format(format: &str, ops: &[Value]) -> Result<()> {
+    let format = format.to_ascii_lowercase();
+    for op in ops {
+        let op_name = op
+            .get("op")
+            .or_else(|| op.get("type"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if op_name == "set" && format != "xlsx" {
+            bail!("FORMAT_UNSUPPORTED: edit op set is only supported for XLSX cell selectors");
+        }
+        if let Some((prefix, _)) = op_name.split_once('.') {
+            match prefix {
+                "pptx" | "docx" | "xlsx" | "pdf" if prefix != format => bail!(
+                    "FORMAT_UNSUPPORTED: edit op {op_name} requires {prefix} input, got {format}"
+                ),
+                _ => {}
+            }
+        }
+    }
+    Ok(())
 }
 
 fn apply_single_xml_op(format: &str, part: &str, xml: &str, op: &Value) -> Result<Option<String>> {
@@ -2900,7 +3083,7 @@ fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
 }
 
 fn artifact(path: &Path, kind: &str, format: &str) -> Value {
-    json!({"path": redacted(path), "kind": kind, "format": format, "exists": path.exists()})
+    json!({"path": artifact_path(path), "kind": kind, "format": format, "exists": path.exists()})
 }
 
 fn redacted(path: &Path) -> String {
@@ -2908,6 +3091,21 @@ fn redacted(path: &Path) -> String {
         .and_then(|s| s.to_str())
         .unwrap_or("<path>")
         .to_string()
+}
+
+fn artifact_path(path: &Path) -> String {
+    let cwd = std::env::current_dir()
+        .ok()
+        .and_then(|path| path.canonicalize().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let display = canonical.strip_prefix(&cwd).unwrap_or(path);
+    let value = display.to_string_lossy().replace('\\', "/");
+    if value.starts_with("..") || Path::new(&value).is_absolute() {
+        redacted(path)
+    } else {
+        value
+    }
 }
 
 fn extension(input: &str) -> &str {
@@ -3045,6 +3243,23 @@ fn part_hash_diff(before: &BTreeMap<String, String>, after: &BTreeMap<String, St
         .cloned()
         .collect::<Vec<_>>();
     json!({"schema": "officegen.packageDiff@1", "beforeParts": before.len(), "afterParts": after.len(), "addedParts": added, "removedParts": removed, "changedParts": changed, "changedPartCount": changed.len()})
+}
+
+fn package_diff_changed(diff: &Value) -> bool {
+    diff.get("changedPartCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        > 0
+        || diff
+            .get("addedParts")
+            .and_then(Value::as_array)
+            .map(|items| !items.is_empty())
+            .unwrap_or(false)
+        || diff
+            .get("removedParts")
+            .and_then(Value::as_array)
+            .map(|items| !items.is_empty())
+            .unwrap_or(false)
 }
 
 fn package_diff(before: &Path, after: &Path) -> Result<Value> {
@@ -3206,16 +3421,45 @@ fn scaffold_blocks(kind: &str, title: &str) -> Vec<Value> {
 
 fn ir_text(ir: &Value) -> String {
     let mut out = Vec::new();
-    collect_text(ir, &mut out);
+    collect_document_text(ir, &mut out);
     out.join(" ")
 }
 
-fn collect_text(value: &Value, out: &mut Vec<String>) {
+fn collect_document_text(value: &Value, out: &mut Vec<String>) {
     match value {
         Value::String(s) => out.push(s.clone()),
-        Value::Array(items) => items.iter().for_each(|v| collect_text(v, out)),
-        Value::Object(map) => map.values().for_each(|v| collect_text(v, out)),
+        Value::Array(items) => items.iter().for_each(|v| collect_document_text(v, out)),
+        Value::Object(map) => {
+            for key in ["title", "heading", "subtitle", "text", "caption", "label"] {
+                if let Some(text) = map.get(key).and_then(Value::as_str) {
+                    out.push(text.to_string());
+                }
+            }
+            for key in [
+                "sections", "slides", "blocks", "items", "bullets", "rows", "cells", "tables",
+            ] {
+                if let Some(child) = map.get(key) {
+                    collect_document_text(child, out);
+                }
+            }
+        }
         _ => {}
+    }
+}
+
+fn chart_kind(spec: &Value) -> Result<String> {
+    let kind = spec
+        .get("chartType")
+        .or_else(|| spec.get("type"))
+        .and_then(Value::as_str)
+        .unwrap_or("bar")
+        .to_ascii_lowercase();
+    match kind.as_str() {
+        "bar" | "column" => Ok("bar".to_string()),
+        "line" => Ok("line".to_string()),
+        other => bail!(
+            "SCHEMA_INVALID: unsupported chart type {other}; supported types are bar and line"
+        ),
     }
 }
 
@@ -3265,16 +3509,40 @@ fn chart_data(spec: &Value) -> Result<(Vec<String>, Vec<f64>)> {
     bail!("SCHEMA_INVALID: chart render requires labels/values or data entries");
 }
 
-fn chart_svg(title: &str, labels: &[String], values: &[f64]) -> String {
-    let max = values.iter().copied().fold(1.0_f64, f64::max);
+fn chart_svg(title: &str, labels: &[String], values: &[f64], kind: &str) -> String {
+    let max = values.iter().copied().fold(1.0_f64, f64::max).max(1.0);
+    let min = values.iter().copied().fold(0.0_f64, f64::min).min(0.0);
+    let span = (max - min).max(1.0);
+    let baseline = 330.0 - ((0.0 - min) / span * 240.0);
+    if kind == "line" {
+        let points = labels
+            .iter()
+            .zip(values)
+            .enumerate()
+            .map(|(i, (_label, value))| {
+                let x = 80 + i * 90;
+                let y = 330.0 - ((*value - min) / span * 240.0);
+                format!("{x},{y:.1}")
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut labels_svg = String::new();
+        for (i, (label, value)) in labels.iter().zip(values).enumerate() {
+            let x = 80 + i * 90;
+            let y = 330.0 - ((*value - min) / span * 240.0);
+            labels_svg.push_str(&format!("<circle cx=\"{x}\" cy=\"{y:.1}\" r=\"4\" fill=\"#2f6f9f\"/><text x=\"{x}\" y=\"360\" font-size=\"14\">{}</text>", html_escape(label)));
+        }
+        return format!("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"720\" height=\"420\"><rect width=\"100%\" height=\"100%\" fill=\"white\"/><text x=\"40\" y=\"40\" font-size=\"24\" font-family=\"Arial\">{}</text><line x1=\"70\" y1=\"{baseline:.1}\" x2=\"660\" y2=\"{baseline:.1}\" stroke=\"#c8d0d8\"/><polyline points=\"{points}\" fill=\"none\" stroke=\"#2f6f9f\" stroke-width=\"3\"/>{labels_svg}</svg>", html_escape(title));
+    }
     let mut bars = String::new();
     for (i, (label, value)) in labels.iter().zip(values).enumerate() {
         let x = 80 + i * 90;
-        let h = ((*value / max) * 240.0).round() as usize;
-        let y = 330usize.saturating_sub(h);
+        let value_y = 330.0 - ((*value - min) / span * 240.0);
+        let y = baseline.min(value_y).round().max(80.0) as usize;
+        let h = (baseline - value_y).abs().round().max(1.0) as usize;
         bars.push_str(&format!("<rect x=\"{x}\" y=\"{y}\" width=\"52\" height=\"{h}\" fill=\"#2f6f9f\"/><text x=\"{x}\" y=\"360\" font-size=\"14\">{}</text><text x=\"{x}\" y=\"{}\" font-size=\"12\">{}</text>", html_escape(label), y.saturating_sub(8), value));
     }
-    format!("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"720\" height=\"420\"><rect width=\"100%\" height=\"100%\" fill=\"white\"/><text x=\"40\" y=\"40\" font-size=\"24\" font-family=\"Arial\">{}</text>{}</svg>", html_escape(title), bars)
+    format!("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"720\" height=\"420\"><rect width=\"100%\" height=\"100%\" fill=\"white\"/><text x=\"40\" y=\"40\" font-size=\"24\" font-family=\"Arial\">{}</text><line x1=\"70\" y1=\"{baseline:.1}\" x2=\"660\" y2=\"{baseline:.1}\" stroke=\"#c8d0d8\"/>{}</svg>", html_escape(title), bars)
 }
 
 fn workflow_step_args(command: &str, step: &Value) -> Result<Vec<String>> {
@@ -3349,28 +3617,99 @@ fn workflow_summary_markdown(ok: bool, manifest: &Value) -> String {
     out
 }
 
-fn parse_mermaid_nodes(text: &str) -> Vec<Value> {
+fn parse_diagram_spec(text: &str) -> Result<(Vec<Value>, Vec<(String, String)>)> {
+    if let Ok(spec) = serde_json::from_str::<Value>(text) {
+        let nodes = spec
+            .get("nodes")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|node| {
+                        if let Some(id) = node.get("id").and_then(Value::as_str) {
+                            let label = node
+                                .get("label")
+                                .and_then(Value::as_str)
+                                .unwrap_or(id)
+                                .to_string();
+                            Some(json!({"id": id, "label": label}))
+                        } else {
+                            node.as_str().map(|id| json!({"id": id, "label": id}))
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let edges = spec
+            .get("edges")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|edge| {
+                        let from = edge.get("from").and_then(Value::as_str)?;
+                        let to = edge.get("to").and_then(Value::as_str)?;
+                        Some((from.to_string(), to.to_string()))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        return Ok((nodes, edges));
+    }
+    Ok(parse_mermaid_diagram(text))
+}
+
+fn parse_mermaid_diagram(text: &str) -> (Vec<Value>, Vec<(String, String)>) {
     let re = Regex::new(r#"([A-Za-z0-9_]+)(?:\[([^\]]+)\])?"#).unwrap();
+    let edge_re =
+        Regex::new(r#"([A-Za-z0-9_]+)(?:\[[^\]]+\])?\s*[-=.]*>\s*([A-Za-z0-9_]+)(?:\[[^\]]+\])?"#)
+            .unwrap();
     let mut seen = BTreeSet::new();
     let mut nodes = Vec::new();
     for cap in re.captures_iter(text) {
         let id = cap.get(1).unwrap().as_str();
-        if matches!(id, "graph" | "flowchart" | "TD" | "LR") || !seen.insert(id.to_string()) {
+        if matches!(id, "graph" | "flowchart" | "TD" | "TB" | "BT" | "LR" | "RL")
+            || !seen.insert(id.to_string())
+        {
             continue;
         }
         let label = cap.get(2).map(|m| m.as_str()).unwrap_or(id);
         nodes.push(json!({"id": id, "label": label}));
     }
-    nodes
+    let edges = edge_re
+        .captures_iter(text)
+        .filter_map(|cap| {
+            Some((
+                cap.get(1)?.as_str().to_string(),
+                cap.get(2)?.as_str().to_string(),
+            ))
+        })
+        .collect::<Vec<_>>();
+    (nodes, edges)
 }
 
-fn diagram_svg(nodes: &[Value]) -> String {
-    let mut out = String::from("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"900\" height=\"220\"><rect width=\"100%\" height=\"100%\" fill=\"white\"/>");
+fn diagram_svg(nodes: &[Value], edges: &[(String, String)]) -> String {
+    let width = (nodes.len().max(1) * 180 + 80).max(900);
+    let mut out = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"220\"><rect width=\"100%\" height=\"100%\" fill=\"white\"/>");
+    let positions = nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(i, node)| {
+            node.get("id")
+                .and_then(Value::as_str)
+                .map(|id| (id.to_string(), 40 + i * 180))
+        })
+        .collect::<BTreeMap<_, _>>();
+    for (from, to) in edges {
+        if let (Some(from_x), Some(to_x)) = (positions.get(from), positions.get(to)) {
+            out.push_str(&format!("<line x1=\"{}\" y1=\"97\" x2=\"{}\" y2=\"97\" stroke=\"#38546b\" marker-end=\"url(#a)\"/>", from_x + 130, to_x));
+        }
+    }
     for (i, node) in nodes.iter().enumerate() {
         let x = 40 + i * 180;
         let label = node.get("label").and_then(Value::as_str).unwrap_or("Node");
         out.push_str(&format!("<rect x=\"{x}\" y=\"70\" width=\"130\" height=\"54\" rx=\"6\" fill=\"#eef5f8\" stroke=\"#38546b\"/><text x=\"{}\" y=\"103\" text-anchor=\"middle\" font-size=\"16\">{}</text>", x + 65, html_escape(label)));
-        if i + 1 < nodes.len() {
+        if edges.is_empty() && i + 1 < nodes.len() {
             out.push_str(&format!("<line x1=\"{}\" y1=\"97\" x2=\"{}\" y2=\"97\" stroke=\"#38546b\" marker-end=\"url(#a)\"/>", x + 130, x + 180));
         }
     }
@@ -3633,7 +3972,9 @@ fn mutation_status_for(command: &str, result: &Value) -> &'static str {
         && result.get("wouldChange").and_then(Value::as_bool) == Some(true)
     {
         "planned"
-    } else if result.get("changed").and_then(Value::as_bool) == Some(true) {
+    } else if is_mutation_command(command)
+        && result.get("changed").and_then(Value::as_bool) == Some(true)
+    {
         "changed"
     } else if is_mutation_command(command)
         && result.get("changed").and_then(Value::as_bool) == Some(false)
@@ -3655,6 +3996,9 @@ fn is_mutation_command(command: &str) -> bool {
             | "template fill"
             | "design apply"
             | "layout apply"
+            | "chart render"
+            | "diagram render"
+            | "schema fetch"
     )
 }
 
@@ -3727,6 +4071,7 @@ fn error_category(code: &str) -> &'static str {
     } else if code.starts_with("FEATURE_")
         || code == "EXPORT_UNSUPPORTED"
         || code == "UNSUPPORTED_FORMAT"
+        || code == "FORMAT_UNSUPPORTED"
     {
         "unsupported"
     } else {
@@ -4068,7 +4413,7 @@ mod tests {
 
         assert_eq!(payload["ok"], false);
         assert_eq!(payload["failureClass"], "unsupported");
-        assert_eq!(payload["error"]["code"], "FEATURE_NOT_IMPLEMENTED");
+        assert_eq!(payload["error"]["code"], "FORMAT_UNSUPPORTED");
         assert!(!dir.path().join("out.docx").exists());
     }
 

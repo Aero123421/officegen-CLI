@@ -1,10 +1,12 @@
 use serde_json::json;
 use std::fs;
-use std::io::Read;
+use std::io::{Cursor, Read, Write};
 use std::path::Path;
 use std::process::Command;
 use tempfile::tempdir;
+use zip::write::SimpleFileOptions;
 use zip::ZipArchive;
+use zip::ZipWriter;
 
 fn officegen(dir: &Path, args: &[&str]) -> serde_json::Value {
     let output = Command::new(env!("CARGO_BIN_EXE_officegen"))
@@ -36,6 +38,34 @@ fn zip_text(path: &Path, part: &str) -> String {
     let mut text = String::new();
     entry.read_to_string(&mut text).expect("part is text");
     text
+}
+
+fn rewrite_zip_parts(path: &Path, replacements: &[(&str, String)]) {
+    let file = fs::File::open(path).expect("open package");
+    let mut zip = ZipArchive::new(file).expect("zip opens");
+    let mut entries = Vec::new();
+    for i in 0..zip.len() {
+        let mut entry = zip.by_index(i).expect("entry");
+        let name = entry.name().to_string();
+        let mut data = Vec::new();
+        entry.read_to_end(&mut data).expect("read entry");
+        if let Some((_, replacement)) = replacements.iter().find(|(part, _)| *part == name) {
+            data = replacement.as_bytes().to_vec();
+        }
+        entries.push((name, data));
+    }
+    let mut out = Cursor::new(Vec::new());
+    {
+        let mut writer = ZipWriter::new(&mut out);
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        for (name, data) in entries {
+            writer.start_file(name, options).expect("start file");
+            writer.write_all(&data).expect("write file");
+        }
+        writer.finish().expect("finish zip");
+    }
+    fs::write(path, out.into_inner()).expect("rewrite package");
 }
 
 #[test]
@@ -297,6 +327,196 @@ fn xlsx_inspect_stable_cell_id_can_drive_dry_run_and_edit_with_ops_alias() {
 }
 
 #[test]
+fn xlsx_cell_uri_set_alias_updates_named_sheet_cells_and_formulas() {
+    let dir = tempdir().unwrap();
+    fs::write(
+        dir.path().join("base.json"),
+        serde_json::to_vec_pretty(&json!({
+            "schema": "officegen.ir.document@2.0",
+            "targets": ["xlsx"],
+            "sheets": [{"name": "Data", "rows": [["Name", "Old"], ["Total", 1]]}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    officegen(
+        dir.path(),
+        &[
+            "render",
+            "base.json",
+            "--target",
+            "xlsx",
+            "--out",
+            "base.xlsx",
+            "--agent",
+            "--strict-json",
+        ],
+    );
+    fs::write(
+        dir.path().join("ops.json"),
+        serde_json::to_vec_pretty(&json!([
+            {"op": "set", "selector": "cell://Data!B1", "value": "New"},
+            {"op": "set", "selector": "cell://Data!B2", "formula": "SUM(B1:B1)"}
+        ]))
+        .unwrap(),
+    )
+    .unwrap();
+    let edited = officegen(
+        dir.path(),
+        &[
+            "edit",
+            "base.xlsx",
+            "--ops",
+            "ops.json",
+            "--out",
+            "edited.xlsx",
+            "--agent",
+            "--strict-json",
+        ],
+    );
+    assert_eq!(edited["ok"], true);
+    assert_eq!(edited["result"]["applied"], 2);
+    let sheet = zip_text(&dir.path().join("edited.xlsx"), "xl/worksheets/sheet1.xml");
+    assert!(sheet.contains("New"));
+    assert!(sheet.contains("SUM(B1:B1)"));
+}
+
+#[test]
+fn xlsx_sheet_name_resolution_is_not_attribute_order_dependent() {
+    let dir = tempdir().unwrap();
+    fs::write(
+        dir.path().join("base.json"),
+        serde_json::to_vec_pretty(&json!({
+            "schema": "officegen.ir.document@2.0",
+            "targets": ["xlsx"],
+            "sheets": [{"name": "Data", "rows": [["Name", "Old"]]}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    officegen(
+        dir.path(),
+        &[
+            "render",
+            "base.json",
+            "--target",
+            "xlsx",
+            "--out",
+            "base.xlsx",
+            "--agent",
+            "--strict-json",
+        ],
+    );
+    let xlsx = dir.path().join("base.xlsx");
+    rewrite_zip_parts(
+        &xlsx,
+        &[
+            (
+                "xl/workbook.xml",
+                r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet r:id="rId1" sheetId="1" name="Data"/></sheets></workbook>"#
+                    .to_string(),
+            ),
+            (
+                "xl/_rels/workbook.xml.rels",
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Target="worksheets/sheet1.xml" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Id="rId1"/></Relationships>"#
+                    .to_string(),
+            ),
+        ],
+    );
+    let scoped = officegen(
+        dir.path(),
+        &[
+            "inspect",
+            "base.xlsx",
+            "--sheet",
+            "Data",
+            "--agent",
+            "--strict-json",
+        ],
+    );
+    assert_eq!(scoped["ok"], true);
+    assert_eq!(scoped["result"]["trusted"]["summary"]["cells"], 2);
+
+    fs::write(
+        dir.path().join("ops.json"),
+        serde_json::to_vec_pretty(&json!([
+            {"op": "set", "selector": "cell://Data!B1", "value": "New"}
+        ]))
+        .unwrap(),
+    )
+    .unwrap();
+    let edited = officegen(
+        dir.path(),
+        &[
+            "edit",
+            "base.xlsx",
+            "--ops",
+            "ops.json",
+            "--out",
+            "edited.xlsx",
+            "--agent",
+            "--strict-json",
+        ],
+    );
+    assert_eq!(edited["ok"], true);
+    assert!(zip_text(&dir.path().join("edited.xlsx"), "xl/worksheets/sheet1.xml").contains("New"));
+}
+
+#[test]
+fn xlsx_cell_uri_rejects_invalid_cell_references() {
+    let dir = tempdir().unwrap();
+    fs::write(
+        dir.path().join("base.json"),
+        serde_json::to_vec_pretty(&json!({
+            "schema": "officegen.ir.document@2.0",
+            "targets": ["xlsx"],
+            "sheets": [{"name": "Data", "rows": [["Name", "Old"]]}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    officegen(
+        dir.path(),
+        &[
+            "render",
+            "base.json",
+            "--target",
+            "xlsx",
+            "--out",
+            "base.xlsx",
+            "--agent",
+            "--strict-json",
+        ],
+    );
+    fs::write(
+        dir.path().join("ops.json"),
+        serde_json::to_vec_pretty(&json!([
+            {"op": "set", "selector": "cell://Data!NOTCELL", "value": "bad"}
+        ]))
+        .unwrap(),
+    )
+    .unwrap();
+    let output = officegen_raw(
+        dir.path(),
+        &[
+            "edit",
+            "base.xlsx",
+            "--ops",
+            "ops.json",
+            "--out",
+            "edited.xlsx",
+            "--agent",
+            "--strict-json",
+        ],
+    );
+    let payload: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("strict-json output");
+    assert!(!output.status.success());
+    assert_eq!(payload["error"]["code"], "SCHEMA_INVALID");
+    assert!(!dir.path().join("edited.xlsx").exists());
+}
+
+#[test]
 fn xlsx_scoped_inspect_keeps_summary_and_object_map_consistent() {
     let dir = tempdir().unwrap();
     fs::write(
@@ -339,6 +559,22 @@ fn xlsx_scoped_inspect_keeps_summary_and_object_map_consistent() {
     assert_eq!(object_count, 6);
     assert_eq!(scoped["result"]["trusted"]["summary"]["cells"], 6);
     assert_eq!(scoped["result"]["trusted"]["summary"]["textObjects"], 6);
+
+    let by_name = officegen(
+        dir.path(),
+        &[
+            "inspect",
+            "base.xlsx",
+            "--sheet",
+            "Sheet1",
+            "--range",
+            "A1:C2",
+            "--agent",
+            "--strict-json",
+        ],
+    );
+    assert_eq!(by_name["result"]["objectMap"].as_array().unwrap().len(), 6);
+    assert_eq!(by_name["result"]["trusted"]["summary"]["cells"], 6);
 }
 
 #[test]
@@ -400,6 +636,10 @@ fn template_inspect_and_fill_xlsx_placeholders() {
     );
 
     assert_eq!(fill["ok"], true);
+    assert_eq!(fill["mutationStatus"], "changed");
+    assert_eq!(fill["result"]["changed"], true);
+    assert_eq!(fill["result"]["replacements"], 1);
+    assert_eq!(fill["result"]["artifacts"][0]["path"], "filled.xlsx");
     let sheet = zip_text(&dir.path().join("filled.xlsx"), "xl/worksheets/sheet1.xml");
     assert!(sheet.contains("Nano"));
     assert!(!sheet.contains("{{name}}"));

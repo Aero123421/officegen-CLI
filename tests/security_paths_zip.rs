@@ -53,6 +53,27 @@ fn rejects_symlink_output_when_platform_allows_symlink_creation() -> Result<()> 
 }
 
 #[test]
+fn rejects_dangling_symlink_output_when_platform_allows_symlink_creation() -> Result<()> {
+    let temp = tempdir()?;
+    let target = temp.path().join("missing-target.txt");
+    let link = temp.path().join("dangling-link.txt");
+
+    if create_file_symlink(&target, &link).is_err() {
+        return Ok(());
+    }
+
+    let resolve_error = safety::resolve_output_path(temp.path(), "dangling-link.txt")
+        .expect_err("dangling symlink output should be rejected");
+    assert!(resolve_error.to_string().contains("symlink outputs"));
+
+    let write_error = safety::atomic_write(&link, b"replacement")
+        .expect_err("atomic write should reject dangling symlink");
+    assert!(write_error.to_string().contains("symlink outputs"));
+
+    Ok(())
+}
+
+#[test]
 fn scan_zip_flags_zip_slip_entry() -> Result<()> {
     let bytes = zip_bytes(&[("../evil.txt", b"bad".as_slice())])?;
     let report = scan_zip_bytes(&bytes, OpcPackageKind::Unknown)?;

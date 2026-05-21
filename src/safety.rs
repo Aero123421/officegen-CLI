@@ -154,7 +154,7 @@ pub fn resolve_output_path(root: &Path, value: &str) -> Result<PathBuf> {
         }
     }
 
-    if candidate.exists() && is_symlink(&candidate)? {
+    if is_existing_symlink(&candidate)? {
         bail!("SECURITY_PATH_OUTSIDE_ROOT: symlink outputs are not allowed");
     }
 
@@ -162,7 +162,7 @@ pub fn resolve_output_path(root: &Path, value: &str) -> Result<PathBuf> {
 }
 
 pub fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
-    if path.exists() && is_symlink(path)? {
+    if is_existing_symlink(path)? {
         bail!("SECURITY_PATH_OUTSIDE_ROOT: symlink outputs are not allowed");
     }
 
@@ -306,15 +306,19 @@ fn deny_existing_symlink_components(root: &Path, value: &Path) -> Result<()> {
             continue;
         }
         current.push(component);
-        if current.exists() && is_symlink(&current)? {
+        if is_existing_symlink(&current)? {
             bail!("SECURITY_PATH_OUTSIDE_ROOT: symlink outputs are not allowed");
         }
     }
     Ok(())
 }
 
-fn is_symlink(path: &Path) -> Result<bool> {
-    Ok(fs::symlink_metadata(path)?.file_type().is_symlink())
+fn is_existing_symlink(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(metadata.file_type().is_symlink()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn temporary_sibling_path(path: &Path) -> PathBuf {

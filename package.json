@@ -1,6 +1,6 @@
 {
   "name": "officegen-release-tools",
-  "version": "5.1.0",
+  "version": "5.2.0",
   "private": true,
   "description": "Development and release tooling for the Officegen Rust-native CLI",
   "license": "MIT",

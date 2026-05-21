@@ -570,10 +570,21 @@ fn unix_millis() -> u128 {
 }
 
 fn redacted(path: &Path) -> String {
-    path.file_name()
-        .and_then(OsStr::to_str)
-        .unwrap_or("<path>")
-        .to_string()
+    let cwd = std::env::current_dir()
+        .ok()
+        .and_then(|path| path.canonicalize().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let display = canonical.strip_prefix(&cwd).unwrap_or(path);
+    let value = display.to_string_lossy().replace('\\', "/");
+    if value.starts_with("..") || Path::new(&value).is_absolute() {
+        path.file_name()
+            .and_then(OsStr::to_str)
+            .unwrap_or("<path>")
+            .to_string()
+    } else {
+        value
+    }
 }
 
 fn display_exe(path: &PathBuf) -> String {
