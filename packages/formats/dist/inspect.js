@@ -379,6 +379,8 @@ async function inspectDocx(input, options) {
     const headerPaths = paths.filter((path) => /^word\/header\d+\.xml$/i.test(path));
     const footerPaths = paths.filter((path) => /^word\/footer\d+\.xml$/i.test(path));
     const commentPaths = paths.filter((path) => /^word\/comments\.xml$/i.test(path));
+    const commentsXml = commentPaths.length ? (await readZipText(zip, "word/comments.xml")) ?? "" : "";
+    const commentCount = countDocxComments(commentsXml);
     const stylePaths = paths.filter((path) => /^word\/styles\.xml$/i.test(path));
     const macros = paths.filter((path) => /vbaProject\.bin$/i.test(path));
     const summaryDepth = options.depth === "summary";
@@ -393,7 +395,9 @@ async function inspectDocx(input, options) {
             assets: mediaPaths.length,
             headers: headerPaths.length,
             footers: footerPaths.length,
-            comments: commentPaths.length,
+            comments: commentCount,
+            commentParts: commentPaths.length,
+            commentsPartExists: commentPaths.length > 0,
             styles: stylePaths.length,
             macros: macros.length,
             zipEntries: paths.length
@@ -406,6 +410,8 @@ async function inspectDocx(input, options) {
                 headers: headerPaths,
                 footers: footerPaths,
                 comments: commentPaths,
+                commentsPartExists: commentPaths.length > 0,
+                commentCount,
                 styles: stylePaths
             },
             ...(structureMap ? { structureMap } : {}),
@@ -430,7 +436,7 @@ async function inspectXlsx(input, options) {
     const sheetNames = readWorkbookSheetNames(workbookXml);
     const namedSheets = sheets.map((sheet, index) => ({
         ...sheet,
-        name: sheetNames[index] ?? `Sheet${index + 1}`
+        name: sheet.name ?? sheetNames[index] ?? `Sheet${index + 1}`
     }));
     const namedObjectMap = objectMap.map((entry) => {
         const sheetIndex = typeof entry.selectorHints?.sheet === "number"
@@ -442,29 +448,34 @@ async function inspectXlsx(input, options) {
             ...entry,
             selectorHints: {
                 ...entry.selectorHints,
-                sheetName: sheetNames[sheetIndex - 1] ?? `Sheet${sheetIndex}`
+                sheetName: entry.selectorHints?.sheetName ?? sheetNames[sheetIndex - 1] ?? `Sheet${sheetIndex}`
             }
         };
     });
     const scopedSheets = scopeSheets(namedSheets, options.sheet, options.range);
     const scopedObjectMap = scopeObjectMap(namedObjectMap, options.sheet, options.range);
+    const scopedCellEntries = scopedObjectMap.filter((entry) => entry.kind === "cell");
+    const scopedSheetsForOutput = scopedSheets.length || !scopedCellEntries.length
+        ? scopedSheets
+        : sheetsFromScopedObjectMap(scopedCellEntries);
     const macros = paths.filter((path) => /vbaProject\.bin$/i.test(path));
     const summaryDepth = options.depth === "summary";
     const worksheetXml = await Promise.all(paths
         .filter((path) => /^xl\/worksheets\/sheet\d+\.xml$/i.test(path))
         .map(async (path) => (await readZipText(zip, path)) ?? ""));
-    const formulaCount = worksheetXml.reduce((count, xml) => count + (xml.match(/<f\b/g) ?? []).length, 0);
+    const formulaCount = scopedCellEntries.filter((entry) => typeof entry.selectorHints?.formula === "string").length;
     const tablePaths = paths.filter((path) => /^xl\/tables\//i.test(path));
     const chartPaths = paths.filter((path) => /^xl\/charts\//i.test(path));
     const pivotPaths = paths.filter((path) => /^xl\/pivotTables\//i.test(path));
     const slicerPaths = paths.filter((path) => /^xl\/slicers\//i.test(path) || /^xl\/slicerCaches\//i.test(path));
     const definedNames = await readDefinedNames(zip);
     const workbookMap = await inspectWorkbookMap(zip, paths, worksheetXml, definedNames);
-    const cellCount = scopedSheets.reduce((count, sheet) => count + sheet.cells.length, 0);
+    const cellCount = scopedCellEntries.length;
     const sheetSummaries = summaryDepth
-        ? scopedSheets.map((sheet) => ({
+        ? scopedSheetsForOutput.map((sheet) => ({
             stableObjectId: sheet.stableObjectId,
             index: sheet.index,
+            name: sheet.name,
             sourcePath: sheet.sourcePath,
             cellCount: sheet.cells.length,
             usedRange: usedRangeFromCells(sheet.cells.map((cell) => cell.ref)),
@@ -476,7 +487,7 @@ async function inspectXlsx(input, options) {
                 untrusted: true
             }))
         }))
-        : namedSheets;
+        : scopedSheetsForOutput;
     return withObjectGraph({
         schema: "officegen.inspect.result@1.2",
         trusted: trustedMeta("officegen.inspect.result@1.2", input, {
@@ -709,7 +720,7 @@ function decodePdfLiteral(value) {
 function scopeSheets(sheets, sheetName, range) {
     const bounds = parseA1Range(range);
     return sheets
-        .filter((sheet) => !sheetName || String(sheet.name ?? sheet.sourcePath ?? "").toLowerCase().includes(sheetName.toLowerCase()))
+        .filter((sheet) => !sheetName || xlsxSheetMatches(sheet, sheetName))
         .map((sheet) => ({
         ...sheet,
         cells: Array.isArray(sheet.cells)
@@ -731,9 +742,44 @@ function scopeObjectMap(objectMap, sheetName, range) {
         }
         if (!bounds)
             return true;
-        const ref = String(entry.selectorHints?.ref ?? entry.label ?? "");
+        const ref = String(entry.selectorHints?.cell ?? entry.selectorHints?.ref ?? entry.label ?? "");
         return cellInRange(ref, bounds);
     });
+}
+function xlsxSheetMatches(sheet, sheetName) {
+    const expected = sheetName.toLowerCase();
+    const candidates = [
+        sheet.name,
+        sheet.sourcePath,
+        typeof sheet.index === "number" ? `sheet${sheet.index}` : undefined
+    ].map((value) => String(value ?? "").toLowerCase());
+    return candidates.some((value) => value === expected || value.includes(expected));
+}
+function sheetsFromScopedObjectMap(cellEntries) {
+    const bySheet = new Map();
+    for (const entry of cellEntries) {
+        const sourcePath = entry.sourcePath ?? entry.xmlPath ?? "";
+        const sheetIndex = Number(entry.selectorHints?.sheet ?? sheetIndexFromWorksheetPath(sourcePath) ?? bySheet.size + 1);
+        const key = `${sheetIndex}:${sourcePath}`;
+        const sheet = bySheet.get(key) ?? {
+            stableObjectId: makeStableObjectId("xlsx", "workbook", "sheet", sheetIndex),
+            index: sheetIndex,
+            name: typeof entry.selectorHints?.sheetName === "string" ? entry.selectorHints.sheetName : `Sheet${sheetIndex}`,
+            sourcePath,
+            cells: [],
+            untrusted: true
+        };
+        sheet.cells.push({
+            stableObjectId: entry.stableObjectId,
+            ref: String(entry.selectorHints?.cell ?? entry.label ?? ""),
+            value: String(entry.text ?? ""),
+            sourcePath,
+            untrusted: true,
+            ...(typeof entry.selectorHints?.formula === "string" ? { formula: entry.selectorHints.formula } : {})
+        });
+        bySheet.set(key, sheet);
+    }
+    return [...bySheet.values()];
 }
 function readWorkbookSheetNames(workbookXml) {
     return [...workbookXml.matchAll(/<sheet\b([^>]*)/g)].map((match, index) => decodeXmlAttr(/\bname="([^"]+)"/.exec(match[1] ?? "")?.[1] ?? `Sheet${index + 1}`));
@@ -873,6 +919,9 @@ function inferSheetRole(index, xml) {
 }
 function extractDocxText(xml) {
     return [...xml.matchAll(/<w:t\b[^>]*>([\s\S]*?)<\/w:t>/g)].map((match) => decodeXmlEntities(match[1] ?? "")).join("").replace(/\s+/g, " ").trim();
+}
+function countDocxComments(xml) {
+    return (xml.match(/<w:comment(?=[\s>])/g) ?? []).length;
 }
 function decodeXmlAttr(value) {
     return decodeXmlEntities(value);

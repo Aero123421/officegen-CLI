@@ -88,6 +88,7 @@ export interface TemplateCandidate {
   artifactPaths?: PptxDesignSignals["artifactPaths"];
   trust?: PptxDesignSignals["trust"];
   generatedFromSource?: boolean;
+  generatedFromSourceOnly?: boolean;
 }
 
 export interface TemplateCreateOptions extends OptionalContext {
@@ -100,6 +101,7 @@ export interface TemplateQueryOptions extends OptionalContext {
   tags?: string[];
   fields?: string[];
   sourcePath?: string;
+  sourceOnly?: boolean;
 }
 
 export interface TemplateIdOptions extends OptionalContext {
@@ -195,7 +197,8 @@ export async function inspectTemplate(options: TemplateIdOptions): Promise<Templ
 }
 
 export async function templateCandidates(options: TemplateQueryOptions = {}): Promise<TemplateCandidate[]> {
-  const templates = await listTemplates(options);
+  requireFeature(options, "template", "template candidates");
+  const templates = options.sourceOnly ? [] : await listTemplates(options);
   const query = options.query?.trim().toLowerCase();
   const tags = new Set((options.tags ?? []).map((tag) => tag.toLowerCase()));
   const fields = new Set((options.fields ?? []).map((field) => field.toLowerCase()));
@@ -274,7 +277,9 @@ export async function templateCandidates(options: TemplateQueryOptions = {}): Pr
     })
     .filter((candidate) => candidate.score > 0);
 
-  const sourceDerivedCandidate = sourceSignals && resolvedSourcePath ? makeSourceDerivedTemplateCandidate(resolvedSourcePath, sourceSignals) : undefined;
+  const sourceDerivedCandidate = sourceSignals && resolvedSourcePath
+    ? makeSourceDerivedTemplateCandidate(resolvedSourcePath, sourceSignals, options.sourceOnly)
+    : undefined;
 
   return [...(sourceDerivedCandidate ? [sourceDerivedCandidate] : []), ...registryCandidates]
     .sort((left, right) => right.score - left.score || left.template.id.localeCompare(right.template.id));
@@ -665,7 +670,7 @@ function matchTemplateMapCandidates(
   return matched;
 }
 
-function makeSourceDerivedTemplateCandidate(sourcePath: string, sourceSignals: PptxDesignSignals): TemplateCandidate {
+function makeSourceDerivedTemplateCandidate(sourcePath: string, sourceSignals: PptxDesignSignals, sourceOnly = false): TemplateCandidate {
   const name = path.basename(sourcePath, path.extname(sourcePath));
   const fields = sourceSignals.schemaCandidates.map((field) => ({
     name: field.name,
@@ -717,7 +722,8 @@ function makeSourceDerivedTemplateCandidate(sourcePath: string, sourceSignals: P
     templateMapSuggested: sourceSignals.templateMapSuggested,
     artifactPaths: sourceSignals.artifactPaths,
     trust: sourceSignals.trust,
-    generatedFromSource: true
+    generatedFromSource: true,
+    ...(sourceOnly ? { generatedFromSourceOnly: true } : {})
   };
 }
 

@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import JSZip from "jszip";
 import { PDFDocument, rgb } from "pdf-lib";
+import { mkdtemp, stat } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { getBuiltinConfig, validateSchema } from "@officegen/core";
 import { DEFAULT_NATIVE_RENDERER_TIMEOUT_MS, MIN_NATIVE_RENDERER_TIMEOUT_MS, diagnoseRasterArtifactQuality, diffDocuments, diagnose, edit, exportDocument, extractAssets, inspect, inspectEmbeddedAssets, inspectInputZipSafety, render, renderChart, renderDiagram, repair, replaceAsset, resolveEditSelectors, resolveNativeRendererTimeoutMs, validateOoxml, verify, view } from "../src/index.js";
 
@@ -77,6 +80,30 @@ describe("@officegen/formats MVP", () => {
     expect(viewed.objectMap.some((entry) => entry.kind === "chart" && entry.editableOps?.includes("pptx.updateChartData"))).toBe(true);
     expect(viewed.pages[0]?.content).toContain('data-kind="chart"');
     expect(rendered.caveats[0]).toContain("Office charts");
+  });
+
+  it("classifies rendered PPTX chart workbooks separately from embedded objects", async () => {
+    const rendered = await render(
+      {
+        title: "Chart Deck",
+        targets: ["pptx"],
+        sections: [{
+          title: "Revenue",
+          blocks: [
+            { type: "chart", title: "Revenue", chartType: "bar", categories: ["Q1", "Q2"], values: [10, 15] }
+          ]
+        }]
+      },
+      { target: "pptx" }
+    );
+    const safety = await inspectInputZipSafety({ bytes: rendered.bytes as Uint8Array, format: "pptx", trusted: false }, { throwOnError: false });
+    const embedded = await inspectEmbeddedAssets({ data: rendered.bytes, format: "pptx" });
+
+    expect(safety?.warnings.map((warning) => warning.code)).toContain("ZIP_CHART_EMBEDDED_WORKBOOK");
+    expect(safety?.warnings.map((warning) => warning.code)).not.toContain("ZIP_EMBEDDED_OBJECT");
+    expect(embedded.trusted.summary.chartEmbeddedWorkbooks).toBe(1);
+    expect(embedded.trusted.summary.embeddedObjects).toBe(0);
+    expect(embedded.assets.find((asset) => asset.zipPath.startsWith("ppt/embeddings/"))?.usages[0]?.kind).toBe("chartEmbeddedWorkbook");
   });
 
   it("updates PPTX chart caches and the embedded chart workbook together", async () => {
@@ -216,6 +243,32 @@ describe("@officegen/formats MVP", () => {
     expect(chart.svg).toContain("Revenue");
     expect(diagram.svg).toContain("marker");
     expect(diagram.svg).toContain("Flow");
+  });
+
+  it("maps common chart data shapes and rejects unsupported chart schemas", async () => {
+    const labelValueChart = await renderChart({
+      title: "Bookings",
+      labels: ["North", "South"],
+      values: [4, 9]
+    });
+    const rowChart = await renderChart({
+      title: "Pipeline",
+      data: [{ label: "Qualified", value: 12 }, { label: "Closed", value: 5 }]
+    });
+    const nestedPairChart = await renderChart({
+      title: "Nested",
+      data: { labels: ["Q1", "Q2"], values: [10, 15] }
+    });
+
+    expect(labelValueChart.svg).toContain("North");
+    expect(labelValueChart.svg).toContain("South");
+    expect(labelValueChart.svg).toContain(">9</text>");
+    expect(rowChart.svg).toContain("Qualified");
+    expect(rowChart.svg).toContain(">12</text>");
+    expect(nestedPairChart.svg).toContain("Q2");
+    expect(nestedPairChart.svg).toContain(">15</text>");
+    await expect(renderChart({ title: "No Data" })).rejects.toThrow(/SCHEMA_INVALID: chart render requires chart data/);
+    await expect(renderChart({ labels: ["Only"], values: [] })).rejects.toThrow(/SCHEMA_INVALID: chart render requires chart data/);
   });
 
   it("extracts only PPTX a:t text objects", async () => {
@@ -424,6 +477,44 @@ describe("@officegen/formats MVP", () => {
     expect(sheet3Xml).toContain('<c r="D2"><f>SUM(A2:B2)</f></c>');
   });
 
+  it("sets XLSX formulas on existing formula cells selected by formula text and variant workbook rel targets", async () => {
+    const zip = new JSZip();
+    zip.file("xl/workbook.xml", [
+      '<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">',
+      '<sheets><sheet name="Data" sheetId="1" r:id="rIdData"/></sheets>',
+      "</workbook>"
+    ].join(""));
+    zip.file("xl/_rels/workbook.xml.rels", [
+      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">',
+      '<Relationship Id="rIdData" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="xl/worksheets/sheet7.xml"/>',
+      "</Relationships>"
+    ].join(""));
+    zip.file("xl/worksheets/sheet1.xml", '<worksheet><sheetData><row r="2"><c r="D2"><v>999</v></c></row></sheetData></worksheet>');
+    zip.file("xl/worksheets/sheet7.xml", [
+      '<worksheet><sheetData>',
+      '<row r="2"><c r="A2"><v>2</v></c><c r="B2"><v>3</v></c><c r="D2"><f>SUM(A2:A2)</f><v>2</v></c></row>',
+      '</sheetData></worksheet>'
+    ].join(""));
+    const bytes = await zip.generateAsync({ type: "uint8array" });
+
+    const edited = await edit(
+      { data: bytes, format: "xlsx" },
+      [
+        { op: "xlsx.setFormula", selector: { sheetName: "Data", contains: "SUM(A2:A2)" }, formula: "=SUM(A2:B2)" },
+        { op: "xlsx.setFormula", sheetName: "Data", cell: "E2", formula: "=SUM(B2:B2)" }
+      ]
+    );
+    const editedZip = await JSZip.loadAsync(edited.bytes as Uint8Array);
+    const sheet1Xml = await editedZip.file("xl/worksheets/sheet1.xml")?.async("string");
+    const sheet7Xml = await editedZip.file("xl/worksheets/sheet7.xml")?.async("string");
+
+    expect(edited.changed).toBe(true);
+    expect(edited.errors).toBeUndefined();
+    expect(sheet1Xml).toContain('<c r="D2"><v>999</v></c>');
+    expect(sheet7Xml).toContain('<c r="D2"><f>SUM(A2:B2)</f></c>');
+    expect(sheet7Xml).toContain('<c r="E2"><f>SUM(B2:B2)</f></c>');
+  });
+
   it("does not let XLSX formula selector cell fallback bypass failed selector guards", async () => {
     const rendered = await render({ title: "Guarded Formula", sheets: [{ name: "Data", rows: [["Name", "Value", "Len"], ["Alpha", 42, 5]] }] }, { target: "xlsx" });
     const guarded = await edit(
@@ -600,6 +691,36 @@ describe("@officegen/formats MVP", () => {
 
     expect(tableXml).toContain('ref="A1:B4"');
     expect(tableXml).toContain('<autoFilter ref="A1:B4"');
+  });
+
+  it("renders DOCX title only once when section headings are implicit or identical", async () => {
+    const implicit = await render({ title: "Doc", sections: [{ body: "Paragraph" }] }, { target: "docx" });
+    const identical = await render({ title: "Doc", sections: [{ title: "Doc", body: "Paragraph" }] }, { target: "docx" });
+
+    for (const rendered of [implicit, identical]) {
+      const inspected = await inspect({ data: rendered.bytes, format: "docx" }, { depth: "full" });
+      const paragraphTexts = inspected.objectMap.filter((entry) => entry.kind === "paragraph").map((entry) => entry.text);
+
+      expect(paragraphTexts.filter((text) => text === "Doc")).toHaveLength(1);
+      expect(paragraphTexts).toContain("Paragraph");
+    }
+  });
+
+  it("reports DOCX comment count separately from the comments part", async () => {
+    const rendered = await render({ title: "No comments", sections: [{ body: "Body" }] }, { target: "docx" });
+    const renderedInspect = await inspect({ data: rendered.bytes, format: "docx" });
+    expect(renderedInspect.trusted.summary.comments).toBe(0);
+
+    const zip = new JSZip();
+    zip.file("word/document.xml", "<w:document><w:body><w:p><w:r><w:t>Body</w:t></w:r></w:p></w:body></w:document>");
+    zip.file("word/comments.xml", '<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"></w:comments>');
+    const inspected = await inspect({ data: await zip.generateAsync({ type: "uint8array" }), format: "docx" });
+
+    expect(inspected.trusted.summary.comments).toBe(0);
+    expect(inspected.trusted.summary.commentParts).toBe(1);
+    expect(inspected.trusted.summary.commentsPartExists).toBe(true);
+    expect((inspected.untrusted.documentParts as any).comments).toEqual(["word/comments.xml"]);
+    expect((inspected.untrusted.documentParts as any).commentCount).toBe(0);
   });
 
   it("edits DOCX headers, comments, and tracked insertions without native Office", async () => {
@@ -978,13 +1099,42 @@ describe("@officegen/formats MVP", () => {
       version: 2,
       target: "pptx",
       wouldWrite: false,
+      planOnly: true,
       verify: {
         status: "not_run",
         requiredAfterRepair: true,
         command: expect.stringContaining("officegen verify")
       }
     });
+    expect(result.suggestedOps[0]).toEqual(expect.objectContaining({ op: "setText" }));
+    expect(result.suggestedOps[0]).not.toHaveProperty("type");
     expect(validateSchema("officegen.repairPlan@2", result.repairPlan).ok).toBe(true);
+  });
+
+  it("returns diagnose editOps and marks repair plans as written after output repair", async () => {
+    const rendered = await render({
+      title: "Repair Write",
+      slides: [{ title: "Repair Write", body: "Long ".repeat(90) }]
+    }, { target: "pptx" });
+    const diagnosed = await diagnose({ data: rendered.bytes, format: "pptx" });
+    const outDir = await mkdtemp(path.join(os.tmpdir(), "officegen-repair-"));
+    const out = path.join(outDir, "repaired.pptx");
+    const result = await repair({ data: rendered.bytes, format: "pptx" }, { issues: diagnosed, out });
+
+    expect(diagnosed.suggestedOps[0]).toEqual(expect.objectContaining({ op: "setText" }));
+    expect(diagnosed.editOps).toEqual(expect.objectContaining({
+      schema: "officegen.edit.ops@1.2",
+      target: "pptx",
+      ops: expect.arrayContaining([expect.objectContaining({ op: "setText" })])
+    }));
+    expect(validateSchema("officegen.edit.ops@1.2", diagnosed.editOps).ok).toBe(true);
+    expect(result.changed).toBe(true);
+    expect(result.out).toBe(out);
+    expect(result.repairPlan).toEqual(expect.objectContaining({
+      wouldWrite: true,
+      planOnly: false
+    }));
+    expect((await stat(out)).isFile()).toBe(true);
   });
 
   it("keeps XLSX summary inspect compact while full inspect keeps cells", async () => {
@@ -1317,6 +1467,24 @@ describe("@officegen/formats MVP", () => {
     expect(result.verificationReport.issues).toEqual(expect.arrayContaining([
       expect.objectContaining({ code: "ZIP_EMBEDDED_OBJECT", gate: "package" })
     ]));
+  });
+
+  it("deduplicates overflow top risks and repair recommendations", async () => {
+    const rendered = await render({
+      title: "Overflow",
+      slides: [
+        { title: "Overflow A", body: "Long ".repeat(120) },
+        { title: "Overflow B", body: "Long ".repeat(140) }
+      ]
+    }, { target: "pptx" });
+    const result = await verify({ data: rendered.bytes, format: "pptx" });
+    const overflowRisks = result.topRisks.filter((risk) => risk.code === "TEXT_OVERFLOW_RISK");
+    const overflowRepairs = result.recommendedRepairs.filter((repair) => repair.code === "TEXT_OVERFLOW_RISK");
+
+    expect(overflowRisks).toHaveLength(1);
+    expect(overflowRisks[0]?.count).toBeGreaterThan(1);
+    expect(overflowRisks[0]?.examples?.length).toBeGreaterThan(1);
+    expect(overflowRepairs).toHaveLength(1);
   });
 
   it("reports unavailable native proof when proof verify cannot run a native renderer", async () => {
@@ -1973,6 +2141,46 @@ describe("@officegen/formats MVP", () => {
     expect(after.untrusted.slides[0]?.text).toBe("Second");
     expect(afterIds.get("First")).toBe(beforeIds.get("First"));
     expect(afterIds.get("Second")).toBe(beforeIds.get("Second"));
+  });
+
+  it("preserves unknown PPTX package parts and reports package diff evidence after edits", async () => {
+    const rendered = await render({ title: "Package", slides: [{ title: "Keep", body: "Original" }] }, { target: "pptx" });
+    const zip = await JSZip.loadAsync(rendered.bytes as Uint8Array);
+    zip.file("customXml/item1.xml", "<root><unknown>preserve me</unknown></root>");
+    zip.file("customXml/_rels/item1.xml.rels", "<Relationships><Relationship Id=\"rId1\" Target=\"../itemProps1.xml\"/></Relationships>");
+    const bytes = await zip.generateAsync({ type: "uint8array", compression: "STORE" });
+    const edited = await edit(
+      { data: bytes, format: "pptx" },
+      [{ op: "setText", selector: { contains: "Original" }, text: "Changed" }]
+    );
+    const editedZip = await JSZip.loadAsync(edited.bytes as Uint8Array);
+
+    expect(await editedZip.file("customXml/item1.xml")?.async("string")).toContain("preserve me");
+    expect(await editedZip.file("customXml/_rels/item1.xml.rels")?.async("string")).toContain("itemProps1.xml");
+    expect(edited.packageDiff).toMatchObject({
+      schema: "officegen.packageDiff@1",
+      beforePartCount: expect.any(Number),
+      afterPartCount: expect.any(Number),
+      removedParts: []
+    });
+    expect(edited.packageDiff?.changedParts.map((part) => part.path)).toContain("ppt/slides/slide1.xml");
+    expect(edited.caveats.join("\n")).toContain("PACKAGE_DIFF:");
+  });
+
+  it("reports removed package parts when an edit intentionally drops stale OOXML metadata", async () => {
+    const rendered = await render({ title: "Calc", sheets: [{ rows: [["A"], [1]] }] }, { target: "xlsx" });
+    const zip = await JSZip.loadAsync(rendered.bytes as Uint8Array);
+    zip.file("xl/calcChain.xml", '<calcChain xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><c r="A1" i="1"/></calcChain>');
+    const bytes = await zip.generateAsync({ type: "uint8array" });
+    const edited = await edit(
+      { data: bytes, format: "xlsx" },
+      [{ op: "xlsx.setFormula", sheet: 1, cell: "B2", formula: "=A2*2" }]
+    );
+
+    expect(edited.packageDiff?.removedParts).toEqual([
+      expect.objectContaining({ path: "xl/calcChain.xml", status: "removed", beforeSha256: expect.stringMatching(/^sha256:/) })
+    ]);
+    expect(edited.packageDiff?.afterPartCount).toBe((edited.packageDiff?.beforePartCount ?? 0) - 1);
   });
 
   it("returns clear ambiguous selector errors and keeps atomic edits unwritten", async () => {

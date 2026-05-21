@@ -27,8 +27,8 @@ export interface RepairPlanV2 {
   target: string;
   input?: string;
   inputSha256: string;
-  wouldWrite: false;
-  planOnly: true;
+  wouldWrite: boolean;
+  planOnly: boolean;
   operations: EditOperation[];
   failureTaxonomy: RepairFailureTaxonomyEntry[];
   steps: Array<{ id: string; command: string; dryRun: boolean; reason: string }>;
@@ -63,7 +63,7 @@ export async function repair(input: InputLike, options: RepairOptions = {}): Pro
     : options.issues?.schema === "officegen.diagnose.result@1.2"
       ? options.issues.issues
       : (await diagnose({ data: normalized.bytes, path: normalized.path, format: normalized.format }, { config: options.config })).issues;
-  const suggestedOps = issueList.flatMap((issue) => (issue.suggestedOps ?? []) as EditOperation[]);
+  const suggestedOps = normalizeSuggestedOps(issueList.flatMap((issue) => issue.suggestedOps ?? []));
   const failureTaxonomy = buildFailureTaxonomy(issueList, suggestedOps, normalized.format);
   const inputSha256 = `sha256:${sha256(normalized.bytes)}`;
   const repairPlan = buildRepairPlan({
@@ -72,7 +72,9 @@ export async function repair(input: InputLike, options: RepairOptions = {}): Pro
     format: normalized.format,
     suggestedOps,
     failureTaxonomy,
-    out: options.out
+    out: options.out,
+    planOnly: true,
+    wouldWrite: false
   });
   const postRepairVerify = repairPlan.verify;
   if (!suggestedOps.length || options.dryRun) {
@@ -109,7 +111,9 @@ export async function repair(input: InputLike, options: RepairOptions = {}): Pro
       format: normalized.format,
       suggestedOps,
       failureTaxonomy,
-      out: edited.out ?? options.out
+      out: edited.out ?? options.out,
+      planOnly: false,
+      wouldWrite: Boolean(edited.out)
     }),
     readiness: readinessNotes ? "warning" : undefined,
     readinessNotes,
@@ -127,6 +131,8 @@ function buildRepairPlan(context: {
   suggestedOps: EditOperation[];
   failureTaxonomy: RepairFailureTaxonomyEntry[];
   out?: string;
+  planOnly: boolean;
+  wouldWrite: boolean;
 }): RepairPlanV2 {
   return {
     schema: "officegen.repairPlan@2",
@@ -134,8 +140,8 @@ function buildRepairPlan(context: {
     target: context.format,
     input: context.inputPath,
     inputSha256: context.inputSha256,
-    wouldWrite: false,
-    planOnly: true,
+    wouldWrite: context.wouldWrite,
+    planOnly: context.planOnly,
     operations: context.suggestedOps,
     failureTaxonomy: context.failureTaxonomy,
     steps: [
@@ -163,6 +169,20 @@ function buildPostRepairVerify(format: string, out?: string): RepairPlanV2["veri
     command: buildVerifyCommand(format, out),
     readinessNote: "Post-repair verify has not been run; do not treat the repaired artifact as release-ready until verify succeeds."
   };
+}
+
+function normalizeSuggestedOps(values: unknown[]): EditOperation[] {
+  return values
+    .map((value) => {
+      if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+      const record = { ...(value as Record<string, unknown>) };
+      if (typeof record.op !== "string" && typeof record.type === "string") {
+        record.op = record.type;
+        delete record.type;
+      }
+      return record as EditOperation;
+    })
+    .filter((value): value is EditOperation => Boolean(value));
 }
 
 function buildFailureTaxonomy(issues: DiagnoseIssue[], suggestedOps: EditOperation[], format: string): RepairFailureTaxonomyEntry[] {

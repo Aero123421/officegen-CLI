@@ -28,8 +28,8 @@ export interface RepairPlanV2 {
     target: string;
     input?: string;
     inputSha256: string;
-    wouldWrite: false;
-    planOnly: true;
+    wouldWrite: boolean;
+    planOnly: boolean;
     operations: EditOperation[];
     failureTaxonomy: RepairFailureTaxonomyEntry[];
     steps: Array<{

@@ -165,7 +165,7 @@ export const ERROR_CATALOG: Record<OfficegenErrorCode, ErrorCatalogEntry> = Obje
       message: messages[code] ?? code,
       typicalCause: messages[code] ?? code,
       suggestedOps: suggestedOps[code] ?? [],
-      nextSuggestedCommands: ["officegen capabilities --agent --json", "officegen errors inspect " + code + " --json"]
+      nextSuggestedCommands: ["officegen capabilities --agent --strict-json", "officegen errors inspect " + code + " --agent --strict-json"]
     }
   ])
 ) as Record<OfficegenErrorCode, ErrorCatalogEntry>;

@@ -293,6 +293,29 @@ export interface PatchPlan {
   blocked: EditOperationResult[];
 }
 
+export interface PackagePartDiffEntry {
+  path: string;
+  beforeSha256?: string;
+  afterSha256?: string;
+  beforeBytes?: number;
+  afterBytes?: number;
+  status: "added" | "removed" | "changed";
+}
+
+export interface PackageDiffEvidence {
+  schema: "officegen.packageDiff@1";
+  beforeZipBytes: number;
+  afterZipBytes?: number;
+  beforePartCount: number;
+  afterPartCount: number;
+  addedParts: PackagePartDiffEntry[];
+  removedParts: PackagePartDiffEntry[];
+  changedParts: PackagePartDiffEntry[];
+  unchangedParts: number;
+  byteDelta?: number;
+  compressionNote?: string;
+}
+
 export interface EditResult {
   schema: "officegen.edit.result@1.2";
   format: string;
@@ -313,6 +336,7 @@ export interface EditResult {
   partial?: boolean;
   allowPartial?: boolean;
   patchPlan?: PatchPlan;
+  packageDiff?: PackageDiffEvidence;
   caveats: string[];
 }
 
@@ -398,6 +422,7 @@ async function editOfficeXml(
   const zip = await loadZip(input, { zipSafety: { config: options.config } });
   const officeFormat = input.format as OfficeXmlFormat;
   const graph = await PackageGraph.fromZip(zip, { format: officeFormat });
+  const beforePackageInventory = await packageInventory(zip);
   const atomic = options.atomic ?? true;
   const continueOnError = options.continueOnError ?? false;
   const opResults: EditOperationResult[] = [];
@@ -555,7 +580,9 @@ async function editOfficeXml(
     ? await buildPatchPlan(input.format, input.bytes, operations, opResults, selectorResult, officeContext.transaction, officeContext.store, officeContext.initialPartPaths, zipPartPathSet(zip))
     : undefined;
   const commit = officeContext.transaction.closedForWrites ? undefined : await officeContext.transaction.commit();
+  const afterPackageInventory = await packageInventory(zip);
   const bytes = options.dryRun ? undefined : await zipToBytes(zip);
+  const packageDiff = packageDiffEvidence(beforePackageInventory, afterPackageInventory, input.bytes.byteLength, bytes?.byteLength);
   if (!options.dryRun) await writeOutput(options.out, bytes as Uint8Array);
   return {
     schema: "officegen.edit.result@1.2",
@@ -576,9 +603,11 @@ async function editOfficeXml(
     partial: errors.length ? true : undefined,
     allowPartial: options.allowPartial || undefined,
     patchPlan,
+    packageDiff,
     caveats: [
       "Office XML edits preserve unknown parts but do not recalculate native layout, formulas, or theme-derived rendering.",
       ...(commit ? [`EDIT_TRANSACTION: journaled ${commit.journaledParts} package part snapshot(s).`] : []),
+      packageDiffCaveat(packageDiff),
       ...zipSafetyCaveats(getLoadedZipSafetyReport(zip))
     ]
   };
@@ -1665,11 +1694,19 @@ function readXlsxWorkbookSheets(workbookXml: string): Array<{ name: string; rela
 async function xlsxWorkbookRelationshipTarget(zip: Awaited<ReturnType<typeof loadZip>>, relationshipId: string): Promise<string | undefined> {
   const relsXml = await readZipText(zip, "xl/_rels/workbook.xml.rels");
   const rel = parseRelationships(relsXml).find((item) => item.id === relationshipId);
-  return rel?.target ? relationshipTarget("xl", rel.target) : undefined;
+  return rel?.target ? normalizeXlsxWorkbookWorksheetTarget(rel.target) : undefined;
 }
 
 function normalizeXlsxCellRef(ref: string): string {
   return ref.trim().replace(/\$/g, "").toUpperCase();
+}
+
+function normalizeXlsxWorkbookWorksheetTarget(target: string): string {
+  const resolved = relationshipTarget("xl", target);
+  if (/^xl\/worksheets\//i.test(resolved)) return resolved;
+  if (/^worksheets\//i.test(resolved)) return `xl/${resolved}`;
+  const worksheetMatch = /(?:^|\/)(worksheets\/sheet\d+\.xml)$/i.exec(resolved);
+  return worksheetMatch ? `xl/${worksheetMatch[1]}` : resolved;
 }
 
 function formulaCellXml(ref: string, formula: string, existingAttrs = ""): string {
@@ -2661,6 +2698,99 @@ async function patchPlanTouchedParts(
   return [...byPath.values()].sort((left, right) => left.path.localeCompare(right.path));
 }
 
+interface PackageInventoryEntry {
+  path: string;
+  sha256: string;
+  byteLength: number;
+}
+
+async function packageInventory(zip: OfficeZip): Promise<Map<string, PackageInventoryEntry>> {
+  const inventory = new Map<string, PackageInventoryEntry>();
+  for (const path of zipPartPathSet(zip)) {
+    const file = zip.file(path);
+    if (!file) continue;
+    const bytes = await file.async("uint8array");
+    inventory.set(path, {
+      path,
+      sha256: sha256Part(bytes),
+      byteLength: bytes.byteLength
+    });
+  }
+  return inventory;
+}
+
+function packageDiffEvidence(
+  before: Map<string, PackageInventoryEntry>,
+  after: Map<string, PackageInventoryEntry>,
+  beforeZipBytes: number,
+  afterZipBytes?: number
+): PackageDiffEvidence {
+  const addedParts: PackagePartDiffEntry[] = [];
+  const removedParts: PackagePartDiffEntry[] = [];
+  const changedParts: PackagePartDiffEntry[] = [];
+  let unchangedParts = 0;
+  const paths = [...new Set([...before.keys(), ...after.keys()])].sort((left, right) => left.localeCompare(right));
+  for (const path of paths) {
+    const beforeEntry = before.get(path);
+    const afterEntry = after.get(path);
+    if (!beforeEntry && afterEntry) {
+      addedParts.push({
+        path,
+        status: "added",
+        afterSha256: afterEntry.sha256,
+        afterBytes: afterEntry.byteLength
+      });
+      continue;
+    }
+    if (beforeEntry && !afterEntry) {
+      removedParts.push({
+        path,
+        status: "removed",
+        beforeSha256: beforeEntry.sha256,
+        beforeBytes: beforeEntry.byteLength
+      });
+      continue;
+    }
+    if (!beforeEntry || !afterEntry) continue;
+    if (beforeEntry.sha256 === afterEntry.sha256) {
+      unchangedParts += 1;
+      continue;
+    }
+    changedParts.push({
+      path,
+      status: "changed",
+      beforeSha256: beforeEntry.sha256,
+      afterSha256: afterEntry.sha256,
+      beforeBytes: beforeEntry.byteLength,
+      afterBytes: afterEntry.byteLength
+    });
+  }
+  return {
+    schema: "officegen.packageDiff@1",
+    beforeZipBytes,
+    afterZipBytes,
+    beforePartCount: before.size,
+    afterPartCount: after.size,
+    addedParts,
+    removedParts,
+    changedParts,
+    unchangedParts,
+    byteDelta: afterZipBytes === undefined ? undefined : afterZipBytes - beforeZipBytes,
+    compressionNote: "Output packages are regenerated with deterministic DEFLATE compression, so ZIP byte size can change even when package parts are preserved."
+  };
+}
+
+function packageDiffCaveat(diff: PackageDiffEvidence): string {
+  const byteDelta = diff.byteDelta === undefined ? "not written" : `${diff.byteDelta >= 0 ? "+" : ""}${diff.byteDelta} bytes`;
+  return [
+    `PACKAGE_DIFF: ${diff.beforePartCount} -> ${diff.afterPartCount} parts`,
+    `${diff.addedParts.length} added`,
+    `${diff.removedParts.length} removed`,
+    `${diff.changedParts.length} changed`,
+    `zip byte delta ${byteDelta}.`
+  ].join(", ");
+}
+
 function inputSourceFingerprint(bytes: Uint8Array): EditSourceFingerprint {
   return {
     algorithm: "sha256",
@@ -2946,12 +3076,21 @@ function resolveMatches(objectMap: ObjectMapEntry[], selector: EditSelector, opt
   if (selector.tableName) candidates = candidates.filter((entry) => String(entry.selectorHints?.tableName ?? entry.label ?? "") === selector.tableName);
   if (selector.chartPath) candidates = candidates.filter((entry) => String(entry.selectorHints?.chartPath ?? entry.xmlPath ?? "") === selector.chartPath);
   const text = selector.textMatch?.text ?? selector.contains;
-  if (text) candidates = candidates.filter((entry) => selector.textMatch?.exact ? entry.text === text : entry.text?.includes(text));
+  if (text) candidates = candidates.filter((entry) => selectorTextMatches(entry, text, selector.textMatch?.exact === true));
   if (selector.nearestTo) return nearestMatches(candidates, selector);
   if (selector.rightOf) return rightOfMatches(objectMap, candidates, selector);
   if (selector.largestTextOnSlide) return largestTextMatches(candidates, selector);
   if (selector.nthBodyShape) return nthBodyShapeMatches(candidates, selector.nthBodyShape);
   return candidates === objectMap ? [] : candidates;
+}
+
+function selectorTextMatches(entry: ObjectMapEntry, text: string, exact: boolean): boolean {
+  const values = [
+    entry.text,
+    entry.textPreview,
+    entry.kind === "cell" ? entry.selectorHints?.formula : undefined
+  ].filter((value): value is string => typeof value === "string");
+  return values.some((value) => exact ? value === text : value.includes(text));
 }
 
 function singleMatch(objectMap: ObjectMapEntry[], selector: EditSelector, options?: ResolveMatchOptions): ObjectMapEntry {

@@ -203,13 +203,17 @@ async function renderPptx(ir: DocumentIR, options: RenderOptions): Promise<Rende
 
 async function renderDocx(ir: DocumentIR, options: RenderOptions): Promise<RenderResult> {
   const docx = await import("docx");
-  const sections = normalizedSections(ir);
+  const sections = normalizedDocxSections(ir);
+  const documentTitle = ir.title ?? "Untitled";
   const children = [
-    new docx.Paragraph({ text: ir.title ?? "Untitled", heading: docx.HeadingLevel.TITLE }),
-    ...sections.flatMap((section) => [
-      ...(section.title ? [new docx.Paragraph({ text: section.title, heading: docx.HeadingLevel.HEADING_1 })] : []),
-      ...docxChildrenFromBlocks(docx, section.blocks?.length ? section.blocks : blocksFromBody(section.body))
-    ])
+    new docx.Paragraph({ text: documentTitle, heading: docx.HeadingLevel.TITLE }),
+    ...sections.flatMap((section) => {
+      const heading = docxSectionHeading(section.title, documentTitle);
+      return [
+        ...(heading ? [new docx.Paragraph({ text: heading, heading: docx.HeadingLevel.HEADING_1 })] : []),
+        ...docxChildrenFromBlocks(docx, section.blocks?.length ? section.blocks : blocksFromBody(section.body))
+      ];
+    })
   ];
   const document = new docx.Document({
     styles: {
@@ -381,6 +385,20 @@ function normalizedSections(ir: DocumentIR): Array<{ title?: string; body?: stri
     title: section.title ?? ir.title ?? "Untitled",
     body: section.body ?? bodyFromBlocks(section.blocks)
   }));
+}
+
+function normalizedDocxSections(ir: DocumentIR): Array<{ title?: string; body?: string | string[]; blocks?: BlockIR[]; rows?: Array<Record<string, unknown> | unknown[]> }> {
+  const sections = ir.sections?.length ? ir.sections : [{ body: "" }];
+  return sections.map((section) => ({
+    ...section,
+    body: section.body ?? bodyFromBlocks(section.blocks)
+  }));
+}
+
+function docxSectionHeading(title: string | undefined, documentTitle: string): string | undefined {
+  const trimmed = title?.trim();
+  if (!trimmed) return undefined;
+  return trimmed === documentTitle.trim() ? undefined : trimmed;
 }
 
 function bodyFromBlocks(blocks?: Array<{ type?: string; text?: string; rows?: Array<Record<string, unknown> | unknown[]>; items?: string[] }>): string {

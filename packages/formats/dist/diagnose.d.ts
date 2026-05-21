@@ -13,6 +13,7 @@ export interface DiagnoseIssue {
     };
     metrics?: Record<string, unknown>;
     suggestedOps?: unknown[];
+    editOps?: EditOpsDocument;
 }
 export interface DiagnoseOptions {
     maxTextLength?: number;
@@ -21,7 +22,15 @@ export interface DiagnoseOptions {
 export interface DiagnoseResult {
     schema: "officegen.diagnose.result@1.2";
     issues: DiagnoseIssue[];
+    suggestedOps: unknown[];
+    editOps?: EditOpsDocument;
     caveats: string[];
+}
+interface EditOpsDocument {
+    schema: "officegen.edit.ops@1.2";
+    target: "pptx" | "docx" | "xlsx" | "pdf";
+    ops: unknown[];
 }
 export declare function diagnose(input: InputLike | InspectResult, options?: DiagnoseOptions): Promise<DiagnoseResult>;
 export declare const diagnoseDocument: typeof diagnose;
+export {};

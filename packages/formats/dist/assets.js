@@ -38,7 +38,8 @@ export async function inspectEmbeddedAssets(input, options = {}) {
         const bytes = (await readZipBytes(zip, zipPath)) ?? new Uint8Array();
         const mediaType = detectMediaType(bytes, zipPath);
         const usages = usageMap.get(zipPath) ?? [];
-        const stableAssetId = stableHashId(officeFormat, "package", zipPath.startsWith(embeddingPrefix) ? "embeddedObject" : "asset", zipPath);
+        const embeddingKind = embeddedPackageKind(zipPath, embeddingPrefix, usages);
+        const stableAssetId = stableHashId(officeFormat, "package", embeddingKind ?? "asset", zipPath);
         assets.push({
             schema: "officegen.asset.embedded.info@2.5",
             stableAssetId,
@@ -56,13 +57,15 @@ export async function inspectEmbeddedAssets(input, options = {}) {
             replaceCommand: zipPath.startsWith(mediaPrefix) ? `officegen asset replace <office-file> --asset ${zipPath} <replacement> --out <output-file> --agent --json` : "",
             extractCommand: zipPath.startsWith(mediaPrefix) ? `officegen asset extract <office-file> --images --out .officegen/assets --agent --json` : "",
             supportedActions: zipPath.startsWith(mediaPrefix) ? ["extract", "replace"] : ["inspect-only"],
-            ...(zipPath.startsWith(embeddingPrefix) ? { limitation: "Embedded OLE/package objects are inspect-only and blocked for mutation by default." } : {}),
+            ...(embeddingKind === "chartEmbeddedWorkbook" ? { limitation: "Editable chart backing workbooks are inspect-only through asset commands; use pptx.updateChartData for supported chart data edits." } : {}),
+            ...(embeddingKind === "embeddedObject" ? { limitation: "Embedded OLE/package objects are inspect-only and blocked for mutation by default." } : {}),
             trusted: false,
             untrusted: true
         });
     }
     const mediaAssets = assets.filter((asset) => asset.zipPath.startsWith(mediaPrefix)).length;
-    const embeddedObjects = assets.filter((asset) => asset.zipPath.startsWith(embeddingPrefix)).length;
+    const chartEmbeddedWorkbooks = assets.filter((asset) => embeddedPackageKind(asset.zipPath, embeddingPrefix, asset.usages) === "chartEmbeddedWorkbook").length;
+    const embeddedObjects = assets.filter((asset) => embeddedPackageKind(asset.zipPath, embeddingPrefix, asset.usages) === "embeddedObject").length;
     const usages = assets.reduce((sum, asset) => sum + asset.usageCount, 0);
     return {
         schema: "officegen.asset.embedded.result@2.5",
@@ -75,6 +78,7 @@ export async function inspectEmbeddedAssets(input, options = {}) {
             summary: {
                 assets: assets.length,
                 mediaAssets,
+                chartEmbeddedWorkbooks,
                 embeddedObjects,
                 usages,
                 orphanedAssets: assets.filter((asset) => asset.orphaned).length,
@@ -88,6 +92,11 @@ export async function inspectEmbeddedAssets(input, options = {}) {
         assets,
         caveats: ["Embedded asset paths and relationship metadata are untrusted document content.", ...zipSafetyCaveats(getLoadedZipSafetyReport(zip))]
     };
+}
+function embeddedPackageKind(zipPath, embeddingPrefix, usages) {
+    if (!zipPath.startsWith(embeddingPrefix))
+        return undefined;
+    return usages.some((usage) => usage.kind === "chartEmbeddedWorkbook") ? "chartEmbeddedWorkbook" : "embeddedObject";
 }
 export async function extractAssets(input, options = {}) {
     const normalized = await normalizeInput(input, "unknown");

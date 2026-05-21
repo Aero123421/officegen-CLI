@@ -57,6 +57,7 @@ export interface TemplateCandidate {
     artifactPaths?: PptxDesignSignals["artifactPaths"];
     trust?: PptxDesignSignals["trust"];
     generatedFromSource?: boolean;
+    generatedFromSourceOnly?: boolean;
 }
 export interface TemplateCreateOptions extends OptionalContext {
     template: Omit<TemplateDefinition, "createdAt" | "updatedAt" | "hash">;
@@ -67,6 +68,7 @@ export interface TemplateQueryOptions extends OptionalContext {
     tags?: string[];
     fields?: string[];
     sourcePath?: string;
+    sourceOnly?: boolean;
 }
 export interface TemplateIdOptions extends OptionalContext {
     id: string;

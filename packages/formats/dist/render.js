@@ -151,13 +151,17 @@ async function renderPptx(ir, options) {
 }
 async function renderDocx(ir, options) {
     const docx = await import("docx");
-    const sections = normalizedSections(ir);
+    const sections = normalizedDocxSections(ir);
+    const documentTitle = ir.title ?? "Untitled";
     const children = [
-        new docx.Paragraph({ text: ir.title ?? "Untitled", heading: docx.HeadingLevel.TITLE }),
-        ...sections.flatMap((section) => [
-            ...(section.title ? [new docx.Paragraph({ text: section.title, heading: docx.HeadingLevel.HEADING_1 })] : []),
-            ...docxChildrenFromBlocks(docx, section.blocks?.length ? section.blocks : blocksFromBody(section.body))
-        ])
+        new docx.Paragraph({ text: documentTitle, heading: docx.HeadingLevel.TITLE }),
+        ...sections.flatMap((section) => {
+            const heading = docxSectionHeading(section.title, documentTitle);
+            return [
+                ...(heading ? [new docx.Paragraph({ text: heading, heading: docx.HeadingLevel.HEADING_1 })] : []),
+                ...docxChildrenFromBlocks(docx, section.blocks?.length ? section.blocks : blocksFromBody(section.body))
+            ];
+        })
     ];
     const document = new docx.Document({
         styles: {
@@ -321,6 +325,19 @@ function normalizedSections(ir) {
         title: section.title ?? ir.title ?? "Untitled",
         body: section.body ?? bodyFromBlocks(section.blocks)
     }));
+}
+function normalizedDocxSections(ir) {
+    const sections = ir.sections?.length ? ir.sections : [{ body: "" }];
+    return sections.map((section) => ({
+        ...section,
+        body: section.body ?? bodyFromBlocks(section.blocks)
+    }));
+}
+function docxSectionHeading(title, documentTitle) {
+    const trimmed = title?.trim();
+    if (!trimmed)
+        return undefined;
+    return trimmed === documentTitle.trim() ? undefined : trimmed;
 }
 function bodyFromBlocks(blocks) {
     return (blocks ?? [])

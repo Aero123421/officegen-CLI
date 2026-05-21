@@ -302,7 +302,7 @@ function commandExamples(commandGroup: string, subcommand: string | undefined): 
     "officegen run prepare-reference --reference problem.pdf --target deck.pptx --out .officegen/run --json",
     "officegen run office-agent --input deck.pptx --goal goal.md --out .officegen/office-agent --agent --json"
   ];
-  if (commandGroup === "verify") return ["officegen verify deck.pptx --visual --json", "officegen verify deck.pptx --gates gates.json --json", "OFFICEGEN_PROFILE=enterprise officegen verify deck.pptx --native --out verify-report.json --json"];
+  if (commandGroup === "verify") return ["officegen verify deck.pptx --visual --json", "officegen verify deck.pptx --gates gates.json --json", profileCommand("enterprise", "officegen verify deck.pptx --native --out verify-report.json --json"), "officegen config set profile enterprise --scope project --json"];
   if (commandGroup === "asset" && subcommand === "replace") return ["officegen asset replace deck.pptx --asset ppt/media/image1.png logo.png --out deck-logo.pptx --json"];
   if (commandGroup === "asset" && subcommand === "inspect") return ["officegen asset inspect logo.png --json", "officegen asset inspect deck.pptx --embedded --agent --json"];
   if (commandGroup === "asset") return ["officegen asset inspect deck.pptx --embedded --agent --json", "officegen asset extract deck.pptx --images --out .officegen/assets --json"];
@@ -337,6 +337,11 @@ function commandExamples(commandGroup: string, subcommand: string | undefined): 
   if (commandGroup === "layout") return ["officegen layout apply plans/title-slide.layout.json --out .officegen/runs/title-slide.layout.apply.json --json"];
   if (commandGroup === "schema") return ["officegen schema list --agent --json", "officegen schema validate deck.ir.json --schema officegen.ir.document@1.2 --json"];
   return [`officegen ${subcommand ? `${commandGroup} ${subcommand}` : commandGroup} --json`];
+}
+
+function profileCommand(profile: "substrate" | "authoring" | "enterprise", command: string): string {
+  if (process.platform === "win32") return `$env:OFFICEGEN_PROFILE='${profile}'; ${command}`;
+  return `OFFICEGEN_PROFILE=${profile} ${command}`;
 }
 
 const optionHelpLines = (specs: OptionSpec[]): string[] =>

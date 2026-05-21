@@ -352,6 +352,7 @@ describe("schema registry", () => {
       target: "pptx",
       inputSha256: "sha256:abc",
       wouldWrite: false,
+      planOnly: true,
       operations: [{ op: "setText", selector: { stableObjectId: "pptx:s001:shape:0001" }, text: "Short" }],
       failureTaxonomy: [{
         code: "TEXT_OVERFLOW_RISK",
@@ -371,7 +372,7 @@ describe("schema registry", () => {
     };
 
     expect(validateSchema("officegen.repairPlan@2", plan).ok).toBe(true);
-    expect(validateSchema("officegen.repairPlan@2", { ...plan, wouldWrite: true }).ok).toBe(false);
+    expect(validateSchema("officegen.repairPlan@2", { ...plan, wouldWrite: true, planOnly: false }).ok).toBe(true);
   });
 
   it("validates capability contracts that disclose unsupported and limited editing surfaces", () => {

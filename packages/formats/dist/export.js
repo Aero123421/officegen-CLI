@@ -271,6 +271,8 @@ export async function nativeRendererDoctor(config) {
     const libreOffice = await findLibreOfficeExecutable();
     const office = await Promise.all(["pptx", "docx", "xlsx"].map((format) => findOfficeComRenderer(format)));
     const officeAvailable = office.filter((item) => Boolean(item));
+    const policyAllowsNative = config?.security.externalProcess === "allow" && config.security.renderers === "enabled";
+    const anyRendererAvailable = Boolean(libreOffice) || officeAvailable.length > 0;
     return {
         schema: "officegen.renderer.doctor@2.2",
         platform: process.platform,
@@ -278,6 +280,12 @@ export async function nativeRendererDoctor(config) {
             externalProcess: config?.security.externalProcess,
             renderers: config?.security.renderers
         },
+        nativeProof: policyAllowsNative
+            ? anyRendererAvailable
+                ? { status: "not_run", reason: "Native proof is available but no document was rendered by renderer doctor." }
+                : { status: "unavailable", reason: `Native renderer policy is enabled, but no renderer was discovered. ${nativeRendererSetupHint()}` }
+            : { status: "unavailable", reason: "Native proof is unavailable because security.externalProcess must be allow and security.renderers must be enabled." },
+        nextActions: nativeRendererNextActions(policyAllowsNative, anyRendererAvailable),
         renderers: [
             {
                 id: "libreoffice",
@@ -285,7 +293,7 @@ export async function nativeRendererDoctor(config) {
                 available: Boolean(libreOffice),
                 executable: libreOffice,
                 formats: ["pptx", "docx", "xlsx"],
-                message: libreOffice ? "LibreOffice headless conversion is available." : "LibreOffice/soffice was not found."
+                message: libreOffice ? "LibreOffice headless conversion is available." : `LibreOffice/soffice was not found. ${nativeRendererSetupHint()}`
             },
             ...officeAvailable.map((renderer) => ({
                 id: renderer.id,
@@ -297,6 +305,22 @@ export async function nativeRendererDoctor(config) {
             }))
         ]
     };
+}
+function nativeRendererNextActions(policyAllowsNative, anyRendererAvailable) {
+    const actions = ["officegen renderer doctor --json", "officegen config show --json"];
+    if (!policyAllowsNative) {
+        actions.push("officegen config set profile enterprise --scope project --json");
+    }
+    if (!anyRendererAvailable)
+        actions.push(nativeRendererSetupHint());
+    return actions;
+}
+function nativeRendererSetupHint() {
+    if (process.platform === "win32")
+        return "Windows setup: install Microsoft Office for COM automation or install LibreOffice and ensure soffice.exe is on PATH.";
+    if (process.platform === "darwin")
+        return "macOS setup: install LibreOffice and ensure soffice is on PATH.";
+    return "Linux setup: install LibreOffice, for example libreoffice or libreoffice-headless, and ensure soffice is on PATH.";
 }
 export async function findLibreOfficeExecutable() {
     const candidates = process.platform === "win32"
@@ -505,7 +529,13 @@ function assertNativeExportAllowed(config) {
         return;
     throw new OfficegenError("SECURITY_EXTERNAL_PROCESS_DENIED", "Native renderer export is disabled by the active configuration. This blocks PowerPoint/Word/Excel COM and LibreOffice renderers; set security.externalProcess to allow and security.renderers to enabled to use native export.", {
         externalProcess: config?.security.externalProcess ?? "deny",
-        renderers: config?.security.renderers ?? "disabled"
+        renderers: config?.security.renderers ?? "disabled",
+        nextActions: [
+            "officegen renderer doctor --json",
+            "officegen config show --json",
+            "officegen config set profile enterprise --scope project --json",
+            nativeRendererSetupHint()
+        ]
     }, { feature: "renderer" });
 }
 function assertPdfMutationAllowed(bytes, operation) {

@@ -17,36 +17,56 @@ export async function renderDiagram(source, options = {}) {
 export const diagramRender = renderDiagram;
 function parseSimpleMermaid(source) {
     const edges = [];
-    const nodes = new Set();
+    const nodes = new Map();
     for (const rawLine of source.split(/\r?\n/)) {
         const line = rawLine.trim();
         if (!line || /^(graph|flowchart|sequenceDiagram|classDiagram)\b/.test(line))
             continue;
         const match = /^(.+?)\s*[-=.]+>\s*(.+)$/.exec(line);
         if (match) {
-            const from = cleanNode(match[1] ?? "");
-            const to = cleanNode(match[2] ?? "");
-            if (from && to) {
-                nodes.add(from);
-                nodes.add(to);
-                edges.push([from, to]);
+            const from = parseNodeRef(match[1] ?? "");
+            const to = parseNodeRef(match[2] ?? "");
+            if (from.id && to.id) {
+                addNode(nodes, from);
+                addNode(nodes, to);
+                edges.push([from.id, to.id]);
             }
         }
         else {
-            const node = cleanNode(line);
-            if (node)
-                nodes.add(node);
+            const node = parseNodeRef(line);
+            if (node.id)
+                addNode(nodes, node);
         }
     }
     if (!nodes.size) {
-        nodes.add("Start");
-        nodes.add("Finish");
+        addNode(nodes, { id: "Start", label: "Start" });
+        addNode(nodes, { id: "Finish", label: "Finish" });
         edges.push(["Start", "Finish"]);
     }
-    return { nodes: [...nodes], edges };
+    return { nodes: [...nodes.values()], edges };
 }
-function cleanNode(value) {
-    return value.replace(/[\[\]{}()"]/g, "").replace(/\|.*?\|/g, "").trim();
+function addNode(nodes, node) {
+    const existing = nodes.get(node.id);
+    if (!existing || existing.label === existing.id)
+        nodes.set(node.id, node);
+}
+function parseNodeRef(value) {
+    const trimmed = value
+        .replace(/^\|.*?\|/, "")
+        .replace(/;$/, "")
+        .trim();
+    const labelled = /^([A-Za-z0-9_.:-]+)\s*(?:\[\s*([^\]]+?)\s*\]|\{\s*([^}]+?)\s*\}|\(\s*([^)]+?)\s*\))$/.exec(trimmed);
+    if (labelled) {
+        const id = labelled[1] ?? "";
+        return { id, label: labelled[2] ?? labelled[3] ?? labelled[4] ?? id };
+    }
+    const quoted = /^([A-Za-z0-9_.:-]+)\s*"([^"]+)"$/.exec(trimmed);
+    if (quoted) {
+        const id = quoted[1] ?? "";
+        return { id, label: quoted[2] ?? id };
+    }
+    const id = trimmed.replace(/["]/g, "");
+    return { id, label: id };
 }
 const DIAGRAM_NODE_HALF_WIDTH = 64;
 function buildDiagramSvg(graph, width, height, title) {
@@ -56,7 +76,7 @@ function buildDiagramSvg(graph, width, height, title) {
     const layoutWidth = Math.max(0, width - horizontalPad * 2);
     const gap = layoutWidth / Math.max(1, graph.nodes.length - 1);
     const positions = new Map(graph.nodes.map((node, index) => [
-        node,
+        node.id,
         {
             x: graph.nodes.length === 1 ? width / 2 : horizontalPad + index * gap,
             y: top + (index % 2) * 120
@@ -73,8 +93,8 @@ function buildDiagramSvg(graph, width, height, title) {
         .join("");
     const nodes = graph.nodes
         .map((node) => {
-        const pos = positions.get(node) ?? { x: 0, y: 0 };
-        return `<g><rect x="${pos.x - nodeHalfWidth}" y="${pos.y}" width="${nodeHalfWidth * 2}" height="56" rx="6" fill="#f6f8fa" stroke="#2f6f73" stroke-width="2"/><text x="${pos.x}" y="${pos.y + 34}" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" fill="#111">${escapeXml(node)}</text></g>`;
+        const pos = positions.get(node.id) ?? { x: 0, y: 0 };
+        return `<g><rect x="${pos.x - nodeHalfWidth}" y="${pos.y}" width="${nodeHalfWidth * 2}" height="56" rx="6" fill="#f6f8fa" stroke="#2f6f73" stroke-width="2"/><text x="${pos.x}" y="${pos.y + 34}" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" fill="#111">${escapeXml(node.label)}</text></g>`;
     })
         .join("");
     return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}"><defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#57606a"/></marker></defs><rect width="${width}" height="${height}" fill="#fff"/>${title ? `<text x="32" y="36" font-family="Arial, sans-serif" font-size="22" font-weight="700">${escapeXml(title)}</text>` : ""}${edges}${nodes}</svg>`;

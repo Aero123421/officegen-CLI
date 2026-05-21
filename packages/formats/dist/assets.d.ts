@@ -58,6 +58,7 @@ export interface InspectEmbeddedAssetsResult {
         summary: {
             assets: number;
             mediaAssets: number;
+            chartEmbeddedWorkbooks: number;
             embeddedObjects: number;
             usages: number;
             orphanedAssets: number;

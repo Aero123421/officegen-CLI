@@ -503,6 +503,27 @@ export interface PatchPlan {
     sourceFingerprints: EditSourceFingerprint[];
     blocked: EditOperationResult[];
 }
+export interface PackagePartDiffEntry {
+    path: string;
+    beforeSha256?: string;
+    afterSha256?: string;
+    beforeBytes?: number;
+    afterBytes?: number;
+    status: "added" | "removed" | "changed";
+}
+export interface PackageDiffEvidence {
+    schema: "officegen.packageDiff@1";
+    beforeZipBytes: number;
+    afterZipBytes?: number;
+    beforePartCount: number;
+    afterPartCount: number;
+    addedParts: PackagePartDiffEntry[];
+    removedParts: PackagePartDiffEntry[];
+    changedParts: PackagePartDiffEntry[];
+    unchangedParts: number;
+    byteDelta?: number;
+    compressionNote?: string;
+}
 export interface EditResult {
     schema: "officegen.edit.result@1.2";
     format: string;
@@ -523,6 +544,7 @@ export interface EditResult {
     partial?: boolean;
     allowPartial?: boolean;
     patchPlan?: PatchPlan;
+    packageDiff?: PackageDiffEvidence;
     caveats: string[];
 }
 export declare function edit(input: InputLike, operations: EditOperation[], options?: EditOptions): Promise<EditResult>;

@@ -196,9 +196,6 @@ function scanZipPreload(input, config, options = {}) {
             hasMacros = true;
             warnings.push(warning("ZIP_MACRO_DETECTED", `Macro part detected: ${entryName}`, entryName, "warning"));
         }
-        if (/embeddings\//i.test(entryName)) {
-            warnings.push(warning("ZIP_EMBEDDED_OBJECT", `Embedded object detected: ${entryName}`, entryName, "warning"));
-        }
         if (isXmlLike(entryName) && safeUncompressedSize > limits.maxSingleXmlPartBytes) {
             warnings.push(warning("ZIP_XML_PART_TOO_LARGE", `XML part exceeds safe size: ${entryName}`, entryName, "error"));
         }
@@ -260,6 +257,11 @@ export async function inspectZipSafety(input, config, options = {}) {
     let relationshipCount = 0;
     const hasMacros = preload.report.hasMacros;
     const externalRelationships = [];
+    const embeddedEntries = new Set(preload.entries
+        .filter((entry) => /(^|\/)embeddings\//i.test(entry.name) && !entry.name.replace(/\\/g, "/").endsWith("/"))
+        .map((entry) => entry.name.replace(/\\/g, "/")));
+    const referencedEmbeddedEntries = new Set();
+    const chartWorkbookEntries = new Set();
     for (const entry of preload.entries) {
         if (isXmlLike(entry.name)) {
             if (entry.uncompressedSize > limits.maxSingleXmlPartBytes) {
@@ -281,8 +283,32 @@ export async function inspectZipSafety(input, config, options = {}) {
                 externalRelationships.push(entry.name);
                 warnings.push(warning("ZIP_EXTERNAL_RELATIONSHIP", `External relationship detected: ${entry.name}`, entry.name, "warning"));
             }
+            if (/\.rels$/i.test(entry.name)) {
+                for (const rel of relationshipRecords(xml)) {
+                    if (/^https?:|^file:/i.test(rel.target) || rel.targetMode === "External")
+                        continue;
+                    const target = resolveRelationshipTarget(entry.name, rel.target);
+                    if (!/(^|\/)embeddings\//i.test(target))
+                        continue;
+                    referencedEmbeddedEntries.add(target);
+                    if (isPptxChartWorkbookRelationship(entry.name, rel, target)) {
+                        chartWorkbookEntries.add(target);
+                        warnings.push(warning("ZIP_CHART_EMBEDDED_WORKBOOK", `Editable PPTX chart workbook detected: ${target}`, target, "info"));
+                    }
+                    else if (!chartWorkbookEntries.has(target)) {
+                        warnings.push(warning("ZIP_EMBEDDED_OBJECT", `Embedded object detected: ${target}`, target, "warning"));
+                    }
+                }
+            }
             relationshipCount += (xml.match(/<Relationship\b/g) ?? []).length;
         }
+    }
+    for (const entryName of embeddedEntries) {
+        if (referencedEmbeddedEntries.has(entryName))
+            continue;
+        if (chartWorkbookEntries.has(entryName))
+            continue;
+        warnings.push(warning("ZIP_EMBEDDED_OBJECT", `Embedded object detected: ${entryName}`, entryName, "warning"));
     }
     if (relationshipCount > limits.maxRelationships) {
         warnings.push(warning("ZIP_RELATIONSHIP_LIMIT_EXCEEDED", `Archive has ${relationshipCount} relationships.`, undefined, "error"));
@@ -295,5 +321,52 @@ export async function inspectZipSafety(input, config, options = {}) {
         hasMacros,
         externalRelationships
     });
+}
+function relationshipRecords(xml) {
+    return [...xml.matchAll(/<Relationship\b([^>]*)\/?>/g)].flatMap((match) => {
+        const attrs = match[1] ?? "";
+        const target = attrValue(attrs, "Target");
+        if (!target)
+            return [];
+        return [{
+                type: attrValue(attrs, "Type") ?? "",
+                target,
+                targetMode: attrValue(attrs, "TargetMode")
+            }];
+    });
+}
+function attrValue(attrs, name) {
+    const match = new RegExp(`\\b${name}=["']([^"']*)["']`, "i").exec(attrs);
+    return match?.[1];
+}
+function isPptxChartWorkbookRelationship(relsPath, rel, target) {
+    return /^ppt\/charts\/_rels\/chart\d+\.xml\.rels$/i.test(relsPath) &&
+        /\/officeDocument\/2006\/relationships\/package$/i.test(rel.type) &&
+        /^ppt\/embeddings\/.+\.xlsx$/i.test(target);
+}
+function resolveRelationshipTarget(relsPath, target) {
+    const normalizedTarget = target.replace(/\\/g, "/");
+    if (normalizedTarget.startsWith("/"))
+        return normalizeZipPath(normalizedTarget.slice(1));
+    const ownerPart = relationshipOwnerPart(relsPath);
+    const base = ownerPart.includes("/") ? ownerPart.slice(0, ownerPart.lastIndexOf("/")) : "";
+    return normalizeZipPath(`${base ? `${base}/` : ""}${normalizedTarget}`);
+}
+function relationshipOwnerPart(relsPath) {
+    if (relsPath === "_rels/.rels")
+        return "";
+    return relsPath.replace(/\/_rels\/([^/]+)\.rels$/i, "/$1");
+}
+function normalizeZipPath(pathValue) {
+    const normalized = [];
+    for (const part of pathValue.split("/")) {
+        if (!part || part === ".")
+            continue;
+        if (part === "..")
+            normalized.pop();
+        else
+            normalized.push(part);
+    }
+    return normalized.join("/");
 }
 //# sourceMappingURL=zipSafety.js.map

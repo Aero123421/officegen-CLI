@@ -307,10 +307,13 @@ function evaluateObjective(context: RuntimeContext, command: string, result: unk
   if (schema === "officegen.verify.result@1.2") {
     const failedGates = verifyFailedGates(record);
     if (record.readiness === "blocked" || record.partial === true || failedGates.length) {
-      return objectiveFailure(defaultState, record.partial === true ? "TIMEOUT" : "RUN_STEP_FAILED", "Verification did not reach a passing readiness state.", {
+      const blockingIssues = extractArrayField(record, "blockingIssues").map(String);
+      const nativePolicyDenied = blockingIssues.some((issue) => /NATIVE_RENDERER_BLOCKED:.*(external process|externalProcess|denied|disabled)/i.test(issue));
+      return objectiveFailure(defaultState, nativePolicyDenied ? "SECURITY_EXTERNAL_PROCESS_DENIED" : record.partial === true ? "TIMEOUT" : "RUN_STEP_FAILED", "Verification did not reach a passing readiness state.", {
         readiness: record.readiness,
         partial: record.partial,
-        failedGates
+        failedGates,
+        blockingIssues
       });
     }
   }
@@ -591,24 +594,31 @@ function summarizeCounts(value: Record<string, unknown>): Record<string, number>
 }
 
 function errorSuggestedCommands(context: RuntimeContext, error: CliErrorPayload): string[] {
-  const agent = context.agent ? " --agent" : "";
+  const agent = context.agent || context.strictJson ? " --agent --strict-json" : "";
+  const json = context.agent || context.strictJson ? " --agent --strict-json" : " --json";
   const command = error.command ?? context.argv.slice(2).join(" ");
-  const suggestions: string[] = [];
+  const detailSuggestions = [
+    ...extractArrayField(error.details, "nextActions"),
+    ...extractArrayField(error.details, "nextSuggestedCommands")
+  ].map(String);
+  const suggestions: string[] = [...detailSuggestions];
   if (error.code === "UNKNOWN_COMMAND") {
     const attempted = String(error.command ?? "");
     const alias = commandAliasSuggestion(attempted, context);
     if (alias) suggestions.push(alias);
   } else if (error.code === "INPUT_PARSE_ERROR") {
-    suggestions.push(`officegen schema validate <input.json> --schema officegen.ir.document@1.2${agent} --json`);
+    suggestions.push(`officegen schema validate <input.json> --schema officegen.ir.document@1.2${json}`);
   } else if (error.code === "INPUT_NOT_FOUND") {
-    suggestions.push(`officegen inspect <existing-file> --depth summary${agent} --json`);
+    suggestions.push(`officegen inspect <existing-file> --depth summary${json}`);
   } else if (error.code === "SELECTOR_NOT_FOUND" || error.code === "SELECTOR_AMBIGUOUS") {
-    suggestions.push(`officegen inspect <input> --depth summary${agent} --json`);
+    suggestions.push(`officegen inspect <input> --depth summary${json}`);
     suggestions.push("officegen view <input> --out .officegen/runs/view --json");
     suggestions.push("officegen edit <input> --ops ops.json --dry-run --resolve-selectors --agent --json");
   } else if (error.code === "FEATURE_DISABLED") {
     suggestions.push("officegen config show --json");
-    suggestions.push(`OFFICEGEN_PROFILE=authoring officegen ${command}${agent} --json`);
+    if (command.startsWith("renderer")) suggestions.push("officegen renderer doctor --json");
+    suggestions.push("officegen config set profile authoring --scope project --json");
+    suggestions.push(profileCommand("authoring", `officegen ${command}${json}`));
   } else if (error.code === "ASSET_UNSUPPORTED_FORMAT") {
     suggestions.push("officegen asset inspect <replacement> --json");
     suggestions.push("officegen asset extract <input> --images --out .officegen/runs/assets --json");
@@ -617,6 +627,11 @@ function errorSuggestedCommands(context: RuntimeContext, error: CliErrorPayload)
   } else if (error.code === "SECURITY_ABSOLUTE_OUT_DENIED") {
     suggestions.push("officegen <command> <input> --out .officegen/outputs/output.ext --json");
     suggestions.push("officegen config show --json");
+  } else if (error.code === "SECURITY_EXTERNAL_PROCESS_DENIED") {
+    suggestions.push("officegen renderer doctor --json");
+    suggestions.push("officegen config show --json");
+    suggestions.push("officegen config set profile enterprise --scope project --json");
+    suggestions.push(nativeRendererSetupHint());
   } else if (error.code === "UNSUPPORTED_FORMAT") {
     suggestions.push("officegen inspect <input.pptx|input.docx|input.xlsx|input.pdf> --depth summary --agent --json");
     suggestions.push("officegen asset inspect <image-or-media-file> --json");
@@ -624,24 +639,33 @@ function errorSuggestedCommands(context: RuntimeContext, error: CliErrorPayload)
     suggestions.push("officegen schema get officegen.ir.document@1.2 --json");
     suggestions.push("officegen scaffold --kind pptx --title \"Draft\" --out draft.ir.json --json");
   } else if (error.code === "EXPECTED_ARTIFACT_MISSING") {
-    suggestions.push(`officegen run <workflow.json> --manifest .officegen/runs/run-manifest.json --log-jsonl .officegen/runs/events.jsonl${agent} --json`);
-    suggestions.push(`officegen inspect <expected-output> --depth summary${agent} --json`);
+    suggestions.push(`officegen run <workflow.json> --manifest .officegen/runs/run-manifest.json --log-jsonl .officegen/runs/events.jsonl${json}`);
+    suggestions.push(`officegen inspect <expected-output> --depth summary${json}`);
   } else if (error.code === "RUN_STEP_FAILED" && command.startsWith("benchmark")) {
     suggestions.push("npm run benchmark:fetch");
-    suggestions.push(`officegen benchmark run --manifest benchmarks/office-corpus/manifest.json${agent} --json --strict-json`);
-    suggestions.push(`officegen benchmark compare <before.json> <after.json>${agent} --json --strict-json`);
+    suggestions.push(`officegen benchmark run --manifest benchmarks/office-corpus/manifest.json${json}`);
+    suggestions.push(`officegen benchmark compare <before.json> <after.json>${json}`);
   } else if (error.code === "REPAIR_NO_SAFE_OPS") {
-    suggestions.push(`officegen diagnose <input> --report-out .officegen/runs/diagnose.json${agent} --json`);
-    suggestions.push(`officegen edit <input> --ops suggested-ops.json --dry-run --resolve-selectors${agent} --json`);
+    suggestions.push(`officegen diagnose <input> --report-out .officegen/runs/diagnose.json${json}`);
+    suggestions.push(`officegen edit <input> --ops suggested-ops.json --dry-run --resolve-selectors${json}`);
   } else if (error.code === "DESIGN_NOT_INITIALIZED") {
-    const detailSuggestions = Array.isArray(error.details?.nextSuggestedCommands) ? error.details.nextSuggestedCommands.map(String) : [];
-    suggestions.push(...detailSuggestions);
-    suggestions.push(`officegen design init --name <name>${agent} --json`);
-    suggestions.push(`officegen design capture <source.pptx> --name <name>${agent} --json`);
+    suggestions.push(`officegen design init --name <name>${json}`);
+    suggestions.push(`officegen design capture <source.pptx> --name <name>${json}`);
   } else if (error.code === "TIMEOUT") {
-    suggestions.push(`officegen ${command || "<command>"} --timeout-ms 120000${agent} --json`);
+    suggestions.push(`officegen ${command || "<command>"} --timeout-ms 120000${json}`);
   }
   return [...new Set([...suggestions, ...nextSuggestedCommands(context)])];
+}
+
+function profileCommand(profile: "substrate" | "authoring" | "enterprise", command: string): string {
+  if (process.platform === "win32") return `$env:OFFICEGEN_PROFILE='${profile}'; ${command}`;
+  return `OFFICEGEN_PROFILE=${profile} ${command}`;
+}
+
+function nativeRendererSetupHint(): string {
+  if (process.platform === "win32") return "Windows setup: install Microsoft Office for COM automation or install LibreOffice and ensure soffice.exe is on PATH.";
+  if (process.platform === "darwin") return "macOS setup: install LibreOffice and ensure soffice is on PATH.";
+  return "Linux setup: install LibreOffice, for example libreoffice or libreoffice-headless, and ensure soffice is on PATH.";
 }
 
 function recommendedNarrowCommands(command: string, context: RuntimeContext): string[] {
@@ -667,11 +691,11 @@ function recommendedNarrowCommands(command: string, context: RuntimeContext): st
 }
 
 function commandAliasSuggestion(command: string, context: RuntimeContext): string | undefined {
-  const agent = context.agent ? " --agent" : "";
+  const agent = context.agent ? " --agent --strict-json" : "";
   if (command.startsWith("schema fetch")) {
     const schemaId = command.split(/\s+/).slice(2).join(" ") || "officegen.ir.document@1.2";
-    return `officegen schema get ${schemaId}${agent} --json`;
+    return `officegen schema get ${schemaId}${agent || " --json"}`;
   }
-  if (command === "schema") return `officegen schema list${agent} --json`;
+  if (command === "schema") return `officegen schema list${agent || " --json"}`;
   return undefined;
 }

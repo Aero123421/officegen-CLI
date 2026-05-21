@@ -259,7 +259,7 @@ function commandExamples(commandGroup, subcommand) {
             "officegen run office-agent --input deck.pptx --goal goal.md --out .officegen/office-agent --agent --json"
         ];
     if (commandGroup === "verify")
-        return ["officegen verify deck.pptx --visual --json", "officegen verify deck.pptx --gates gates.json --json", "OFFICEGEN_PROFILE=enterprise officegen verify deck.pptx --native --out verify-report.json --json"];
+        return ["officegen verify deck.pptx --visual --json", "officegen verify deck.pptx --gates gates.json --json", profileCommand("enterprise", "officegen verify deck.pptx --native --out verify-report.json --json"), "officegen config set profile enterprise --scope project --json"];
     if (commandGroup === "asset" && subcommand === "replace")
         return ["officegen asset replace deck.pptx --asset ppt/media/image1.png logo.png --out deck-logo.pptx --json"];
     if (commandGroup === "asset" && subcommand === "inspect")
@@ -310,6 +310,11 @@ function commandExamples(commandGroup, subcommand) {
     if (commandGroup === "schema")
         return ["officegen schema list --agent --json", "officegen schema validate deck.ir.json --schema officegen.ir.document@1.2 --json"];
     return [`officegen ${subcommand ? `${commandGroup} ${subcommand}` : commandGroup} --json`];
+}
+function profileCommand(profile, command) {
+    if (process.platform === "win32")
+        return `$env:OFFICEGEN_PROFILE='${profile}'; ${command}`;
+    return `OFFICEGEN_PROFILE=${profile} ${command}`;
 }
 const optionHelpLines = (specs) => specs.map((spec) => `  ${optionSyntax(spec).padEnd(30)} ${spec.description}`);
 function commandSpecificHelpOptions(commandGroup, subcommand) {

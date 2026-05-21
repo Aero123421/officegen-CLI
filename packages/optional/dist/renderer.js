@@ -47,7 +47,9 @@ export async function doctorRenderer(options = {}) {
         ...doctor,
         trusted: true,
         guidance: [
-            "Use OFFICEGEN_PROFILE=enterprise or an equivalent config enabling externalProcess/renderers for native export/verify.",
+            process.platform === "win32"
+                ? "Use $env:OFFICEGEN_PROFILE='enterprise'; officegen ... or set config profile enterprise before native export/verify."
+                : "Use OFFICEGEN_PROFILE=enterprise officegen ... or set config profile enterprise before native export/verify.",
             "Windows Office COM is preferred when available; LibreOffice headless is the portable fallback."
         ]
     };

@@ -102,6 +102,34 @@ describe("@officegen/optional PPTX template and design signals", () => {
     expect(capture.schemaCandidates?.map((field) => field.name)).toContain("quarter");
   });
 
+  it("can return source-only template candidates without registry templates", async () => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), "officegen-optional-source-only-"));
+    const deckPath = path.join(cwd, "source.pptx");
+    await writeFile(deckPath, await makePptxFixture());
+    const optional = {
+      cwd,
+      capabilities: createOptionalCapabilities(["template", "design"])
+    };
+
+    await createTemplate({
+      ...optional,
+      template: {
+        id: "old-registry-template",
+        name: "Old Registry Template",
+        fields: [{ name: "legacy_title", type: "string" }]
+      }
+    });
+
+    const mixedCandidates = await templateCandidates({ ...optional, sourcePath: deckPath });
+    const sourceOnlyCandidates = await templateCandidates({ ...optional, sourcePath: deckPath, sourceOnly: true });
+
+    expect(mixedCandidates.some((candidate) => candidate.template.id === "old-registry-template")).toBe(true);
+    expect(sourceOnlyCandidates).toHaveLength(1);
+    expect(sourceOnlyCandidates[0]?.generatedFromSource).toBe(true);
+    expect(sourceOnlyCandidates[0]?.generatedFromSourceOnly).toBe(true);
+    expect(sourceOnlyCandidates[0]?.template.id).not.toBe("old-registry-template");
+  });
+
   it("returns explicit plan-only JSON and preserves object template mappings", async () => {
     const cwd = await mkdtemp(path.join(os.tmpdir(), "officegen-optional-plans-"));
     const optional = {

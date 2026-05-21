@@ -1,5 +1,5 @@
 export const OFFICEGEN_SCHEMA_VERSION = "1.2";
-export const OFFICEGEN_CLI_VERSION = "3.1.7";
+export const OFFICEGEN_CLI_VERSION = "3.1.8";
 export const SCHEMA_REGISTRY_VERSION = "1.2.0";
 
 export type JsonPrimitive = string | number | boolean | null;
@@ -367,6 +367,7 @@ export interface ZipSafetyWarning {
     | "ZIP_RELATIONSHIP_LIMIT_EXCEEDED"
     | "ZIP_EXTERNAL_RELATIONSHIP"
     | "ZIP_MACRO_DETECTED"
+    | "ZIP_CHART_EMBEDDED_WORKBOOK"
     | "ZIP_EMBEDDED_OBJECT";
   severity: ErrorSeverity;
   message: string;

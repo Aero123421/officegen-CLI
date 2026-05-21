@@ -60,6 +60,7 @@ const OPTION_SPECS = {
     sha256: option("--sha256", "<hash>", "expected sha256"),
     sheet: option("--sheet", "<name>", "limit XLSX inspect to a sheet"),
     slides: option("--slides", "<range>", "limit PPTX inspect to slide numbers or ranges"),
+    sourceOnly: option("--source-only", undefined, "return only candidates generated from the supplied source file"),
     strategy: option("--strategy", "<strategy>", "design apply strategy: theme-only, inspired, or faithful"),
     structure: option("--structure", undefined, "include DOCX structure map"),
     summary: option("--summary", "<path>", "write run Markdown summary"),
@@ -211,7 +212,7 @@ export const COMMAND_OPTION_SPECS = {
         OPTION_SPECS.overwrite,
         OPTION_SPECS.reportOut
     ],
-    "template candidates": [OPTION_SPECS.summaryOnly, OPTION_SPECS.reportOut],
+    "template candidates": [OPTION_SPECS.summaryOnly, OPTION_SPECS.sourceOnly, OPTION_SPECS.reportOut],
     "template create": [OPTION_SPECS.name, OPTION_SPECS.reportOut],
     "template apply-map": [OPTION_SPECS.name, OPTION_SPECS.map, OPTION_SPECS.out, OPTION_SPECS.overwrite, OPTION_SPECS.reportOut],
     "template fill": [OPTION_SPECS.name, OPTION_SPECS.data, OPTION_SPECS.out, OPTION_SPECS.validateOnly, OPTION_SPECS.overwrite, OPTION_SPECS.reportOut],

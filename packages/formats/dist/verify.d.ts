@@ -94,6 +94,12 @@ export interface VerifyResult {
         page?: number;
         stableObjectId?: string;
         repair?: string;
+        examples?: Array<{
+            slide?: number;
+            page?: number;
+            stableObjectId?: string;
+            message: string;
+        }>;
     }>;
     scoreBreakdown: Record<string, unknown>;
     recommendedRepairs: Array<{

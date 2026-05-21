@@ -1,19 +1,24 @@
 import { decodeXmlEntities, makeStableObjectId, readZipText, sortedZipFiles, stableHashId } from "../shared.js";
+import { parseRelationships, relationshipTarget } from "./relationships.js";
 import { exactText, localText, preview, xmlAttr } from "./xml.js";
 export async function inspectSheets(zip) {
     const paths = sortedZipFiles(zip);
     const sheetPaths = paths.filter((path) => /^xl\/worksheets\/sheet\d+\.xml$/i.test(path)).sort(naturalSort);
     const sharedStrings = await readSharedStrings(zip);
     const workbookXml = (await readZipText(zip, "xl/workbook.xml")) ?? "";
-    const sheetNames = readWorkbookSheetNames(workbookXml);
+    const workbookSheets = await readWorkbookSheets(zip, workbookXml);
+    const workbookSheetsByPath = new Map(workbookSheets.flatMap((sheet) => sheet.path ? [[sheet.path.toLowerCase(), sheet]] : []));
     const definedNames = readDefinedNameRefs(workbookXml);
     const externalLinkPaths = paths.filter((path) => /^xl\/externalLinks\//i.test(path));
     const workbookObjects = await readWorkbookObjectInventory(zip, paths);
     const objectMap = [];
     const sheets = [];
-    for (const [sheetIndex, sheetPath] of sheetPaths.entries()) {
+    for (const [physicalIndex, sheetPath] of sheetPaths.entries()) {
         const xml = (await readZipText(zip, sheetPath)) ?? "";
-        const sheetName = sheetNames[sheetIndex] ?? `Sheet${sheetIndex + 1}`;
+        const workbookSheet = workbookSheetsByPath.get(sheetPath.toLowerCase())
+            ?? workbookSheets.find((sheet) => !sheet.path && sheet.index === physicalIndex + 1);
+        const sheetIndex = workbookSheet?.index ?? physicalIndex + 1;
+        const sheetName = workbookSheet?.name ?? `Sheet${sheetIndex}`;
         const formulaCells = [];
         const sharedFormulas = new Map();
         const cells = extractWorksheetCells(xml).map((cell) => {
@@ -29,13 +34,13 @@ export async function inspectSheets(zip) {
                 formulaInfo.unsupported = !formulaInfo.formula;
             }
             const value = type === "s" ? sharedStrings[Number(raw)] ?? raw : type === "inlineStr" ? inlineText : type === "b" ? booleanText(raw) : raw;
-            const sheetScope = `s${String(sheetIndex + 1).padStart(3, "0")}`;
+            const sheetScope = `s${String(sheetIndex).padStart(3, "0")}`;
             const stableObjectId = stableHashId("xlsx", sheetScope, "cell", `${sheetPath}#${cell.ref}`);
             const bounds = boundsFromRef(cell.ref);
             const formulaCell = formulaInfo
                 ? buildFormulaCell({
                     stableObjectId,
-                    sheetIndex: sheetIndex + 1,
+                    sheetIndex,
                     sheetName,
                     cellRef: cell.ref,
                     sourcePath: sheetPath,
@@ -58,7 +63,7 @@ export async function inspectSheets(zip) {
                 bounds,
                 bbox: bounds ? [bounds.x, bounds.y, bounds.width, bounds.height] : undefined,
                 selectorHints: {
-                    sheet: sheetIndex + 1,
+                    sheet: sheetIndex,
                     sheetName,
                     cell: cell.ref,
                     formula: formulaCell?.formula,
@@ -99,24 +104,24 @@ export async function inspectSheets(zip) {
             const attrs = validation[1] ?? "";
             const range = xmlAttr(attrs, "sqref");
             objectMap.push({
-                stableObjectId: stableHashId("xlsx", `s${String(sheetIndex + 1).padStart(3, "0")}`, "validation", `${sheetPath}#${validationIndex + 1}`),
+                stableObjectId: stableHashId("xlsx", `s${String(sheetIndex).padStart(3, "0")}`, "validation", `${sheetPath}#${validationIndex + 1}`),
                 kind: "validation",
                 label: range,
                 sourcePath: sheetPath,
                 xmlPath: sheetPath,
-                selectorHints: { sheet: sheetIndex + 1, sheetName, range, regionRole: "validation" },
+                selectorHints: { sheet: sheetIndex, sheetName, range, regionRole: "validation" },
                 editableOps: ["xlsx.validation.set", "xlsx.validation.delete"],
                 trust: { level: "untrusted", reason: "document-content" },
                 untrusted: true
             });
         }
         sheets.push({
-            stableObjectId: makeStableObjectId("xlsx", "workbook", "sheet", sheetIndex + 1),
-            index: sheetIndex + 1,
+            stableObjectId: makeStableObjectId("xlsx", "workbook", "sheet", sheetIndex),
+            index: sheetIndex,
             name: sheetName,
             sourcePath: sheetPath,
             cells,
-            formulaGraph: buildSheetFormulaGraph(sheetIndex + 1, sheetName, formulaCells),
+            formulaGraph: buildSheetFormulaGraph(sheetIndex, sheetName, formulaCells),
             untrusted: true
         });
     }
@@ -572,8 +577,28 @@ function columnName(index) {
 function escapeXmlText(value) {
     return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
-function readWorkbookSheetNames(workbookXml) {
-    return [...workbookXml.matchAll(/<sheet\b([^>]*)/g)].map((match, index) => decodeXmlEntities(xmlAttr(match[1] ?? "", "name") ?? `Sheet${index + 1}`));
+async function readWorkbookSheets(zip, workbookXml) {
+    const relsXml = await readZipText(zip, "xl/_rels/workbook.xml.rels");
+    const relTargets = new Map(parseRelationships(relsXml).map((rel) => [rel.id, normalizeWorkbookWorksheetTarget(rel.target)]));
+    return [...workbookXml.matchAll(/<sheet\b([^>]*)/g)].map((match, index) => {
+        const attrs = match[1] ?? "";
+        const relationshipId = xmlAttr(attrs, "r:id") ?? xmlAttr(attrs, "id");
+        return {
+            index: index + 1,
+            name: decodeXmlEntities(xmlAttr(attrs, "name") ?? `Sheet${index + 1}`),
+            relationshipId,
+            path: relationshipId ? relTargets.get(relationshipId) : `xl/worksheets/sheet${index + 1}.xml`
+        };
+    });
+}
+function normalizeWorkbookWorksheetTarget(target) {
+    const resolved = relationshipTarget("xl", target);
+    if (/^xl\/worksheets\//i.test(resolved))
+        return resolved;
+    if (/^worksheets\//i.test(resolved))
+        return `xl/${resolved}`;
+    const worksheetMatch = /(?:^|\/)(worksheets\/sheet\d+\.xml)$/i.exec(resolved);
+    return worksheetMatch ? `xl/${worksheetMatch[1]}` : resolved;
 }
 function readDefinedNameRefs(workbookXml) {
     return [...workbookXml.matchAll(/<definedName\b([^>]*)>/g)]

@@ -64,6 +64,7 @@ async function editOfficeXml(input, operations, options, selectorResult) {
     const zip = await loadZip(input, { zipSafety: { config: options.config } });
     const officeFormat = input.format;
     const graph = await PackageGraph.fromZip(zip, { format: officeFormat });
+    const beforePackageInventory = await packageInventory(zip);
     const atomic = options.atomic ?? true;
     const continueOnError = options.continueOnError ?? false;
     const opResults = [];
@@ -215,7 +216,9 @@ async function editOfficeXml(input, operations, options, selectorResult) {
         ? await buildPatchPlan(input.format, input.bytes, operations, opResults, selectorResult, officeContext.transaction, officeContext.store, officeContext.initialPartPaths, zipPartPathSet(zip))
         : undefined;
     const commit = officeContext.transaction.closedForWrites ? undefined : await officeContext.transaction.commit();
+    const afterPackageInventory = await packageInventory(zip);
     const bytes = options.dryRun ? undefined : await zipToBytes(zip);
+    const packageDiff = packageDiffEvidence(beforePackageInventory, afterPackageInventory, input.bytes.byteLength, bytes?.byteLength);
     if (!options.dryRun)
         await writeOutput(options.out, bytes);
     return {
@@ -237,9 +240,11 @@ async function editOfficeXml(input, operations, options, selectorResult) {
         partial: errors.length ? true : undefined,
         allowPartial: options.allowPartial || undefined,
         patchPlan,
+        packageDiff,
         caveats: [
             "Office XML edits preserve unknown parts but do not recalculate native layout, formulas, or theme-derived rendering.",
             ...(commit ? [`EDIT_TRANSACTION: journaled ${commit.journaledParts} package part snapshot(s).`] : []),
+            packageDiffCaveat(packageDiff),
             ...zipSafetyCaveats(getLoadedZipSafetyReport(zip))
         ]
     };
@@ -1264,10 +1269,19 @@ function readXlsxWorkbookSheets(workbookXml) {
 async function xlsxWorkbookRelationshipTarget(zip, relationshipId) {
     const relsXml = await readZipText(zip, "xl/_rels/workbook.xml.rels");
     const rel = parseRelationships(relsXml).find((item) => item.id === relationshipId);
-    return rel?.target ? relationshipTarget("xl", rel.target) : undefined;
+    return rel?.target ? normalizeXlsxWorkbookWorksheetTarget(rel.target) : undefined;
 }
 function normalizeXlsxCellRef(ref) {
     return ref.trim().replace(/\$/g, "").toUpperCase();
+}
+function normalizeXlsxWorkbookWorksheetTarget(target) {
+    const resolved = relationshipTarget("xl", target);
+    if (/^xl\/worksheets\//i.test(resolved))
+        return resolved;
+    if (/^worksheets\//i.test(resolved))
+        return `xl/${resolved}`;
+    const worksheetMatch = /(?:^|\/)(worksheets\/sheet\d+\.xml)$/i.exec(resolved);
+    return worksheetMatch ? `xl/${worksheetMatch[1]}` : resolved;
 }
 function formulaCellXml(ref, formula, existingAttrs = "") {
     const preservedAttrs = preserveXlsxCellAttrs(existingAttrs);
@@ -2198,6 +2212,87 @@ async function patchPlanTouchedParts(transaction, store, initialPartPaths, curre
     }
     return [...byPath.values()].sort((left, right) => left.path.localeCompare(right.path));
 }
+async function packageInventory(zip) {
+    const inventory = new Map();
+    for (const path of zipPartPathSet(zip)) {
+        const file = zip.file(path);
+        if (!file)
+            continue;
+        const bytes = await file.async("uint8array");
+        inventory.set(path, {
+            path,
+            sha256: sha256Part(bytes),
+            byteLength: bytes.byteLength
+        });
+    }
+    return inventory;
+}
+function packageDiffEvidence(before, after, beforeZipBytes, afterZipBytes) {
+    const addedParts = [];
+    const removedParts = [];
+    const changedParts = [];
+    let unchangedParts = 0;
+    const paths = [...new Set([...before.keys(), ...after.keys()])].sort((left, right) => left.localeCompare(right));
+    for (const path of paths) {
+        const beforeEntry = before.get(path);
+        const afterEntry = after.get(path);
+        if (!beforeEntry && afterEntry) {
+            addedParts.push({
+                path,
+                status: "added",
+                afterSha256: afterEntry.sha256,
+                afterBytes: afterEntry.byteLength
+            });
+            continue;
+        }
+        if (beforeEntry && !afterEntry) {
+            removedParts.push({
+                path,
+                status: "removed",
+                beforeSha256: beforeEntry.sha256,
+                beforeBytes: beforeEntry.byteLength
+            });
+            continue;
+        }
+        if (!beforeEntry || !afterEntry)
+            continue;
+        if (beforeEntry.sha256 === afterEntry.sha256) {
+            unchangedParts += 1;
+            continue;
+        }
+        changedParts.push({
+            path,
+            status: "changed",
+            beforeSha256: beforeEntry.sha256,
+            afterSha256: afterEntry.sha256,
+            beforeBytes: beforeEntry.byteLength,
+            afterBytes: afterEntry.byteLength
+        });
+    }
+    return {
+        schema: "officegen.packageDiff@1",
+        beforeZipBytes,
+        afterZipBytes,
+        beforePartCount: before.size,
+        afterPartCount: after.size,
+        addedParts,
+        removedParts,
+        changedParts,
+        unchangedParts,
+        byteDelta: afterZipBytes === undefined ? undefined : afterZipBytes - beforeZipBytes,
+        compressionNote: "Output packages are regenerated with deterministic DEFLATE compression, so ZIP byte size can change even when package parts are preserved."
+    };
+}
+function packageDiffCaveat(diff) {
+    const byteDelta = diff.byteDelta === undefined ? "not written" : `${diff.byteDelta >= 0 ? "+" : ""}${diff.byteDelta} bytes`;
+    return [
+        `PACKAGE_DIFF: ${diff.beforePartCount} -> ${diff.afterPartCount} parts`,
+        `${diff.addedParts.length} added`,
+        `${diff.removedParts.length} removed`,
+        `${diff.changedParts.length} changed`,
+        `zip byte delta ${byteDelta}.`
+    ].join(", ");
+}
 function inputSourceFingerprint(bytes) {
     return {
         algorithm: "sha256",
@@ -2482,7 +2577,7 @@ function resolveMatches(objectMap, selector, options = {}) {
         candidates = candidates.filter((entry) => String(entry.selectorHints?.chartPath ?? entry.xmlPath ?? "") === selector.chartPath);
     const text = selector.textMatch?.text ?? selector.contains;
     if (text)
-        candidates = candidates.filter((entry) => selector.textMatch?.exact ? entry.text === text : entry.text?.includes(text));
+        candidates = candidates.filter((entry) => selectorTextMatches(entry, text, selector.textMatch?.exact === true));
     if (selector.nearestTo)
         return nearestMatches(candidates, selector);
     if (selector.rightOf)
@@ -2492,6 +2587,14 @@ function resolveMatches(objectMap, selector, options = {}) {
     if (selector.nthBodyShape)
         return nthBodyShapeMatches(candidates, selector.nthBodyShape);
     return candidates === objectMap ? [] : candidates;
+}
+function selectorTextMatches(entry, text, exact) {
+    const values = [
+        entry.text,
+        entry.textPreview,
+        entry.kind === "cell" ? entry.selectorHints?.formula : undefined
+    ].filter((value) => typeof value === "string");
+    return values.some((value) => exact ? value === text : value.includes(text));
 }
 function singleMatch(objectMap, selector, options) {
     const matches = resolveMatches(objectMap, selector, options);

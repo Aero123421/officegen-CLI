@@ -208,6 +208,11 @@ function examplesForHelp(commandGroup, subcommand) {
         "officegen edit deck.pptx --ops ops.json --dry-run --resolve-selectors --agent --json"
     ];
 }
+function profileCommand(profile, command) {
+    if (process.platform === "win32")
+        return `$env:OFFICEGEN_PROFILE='${profile}'; ${command}`;
+    return `OFFICEGEN_PROFILE=${profile} ${command}`;
+}
 function workflowHelp(id) {
     const workflows = [
         {
@@ -278,8 +283,9 @@ function workflowHelp(id) {
             id: "native-verify-export",
             summary: "Use a trusted native renderer to verify Office openability, repair risk, visual readiness, and PDF export.",
             steps: [
-                "OFFICEGEN_PROFILE=enterprise officegen verify input.pptx --native --visual --out verify-report.json --json",
-                "OFFICEGEN_PROFILE=enterprise officegen export input.pptx --to pdf --mode native --out output.pdf --json",
+                profileCommand("enterprise", "officegen verify input.pptx --native --visual --out verify-report.json --json"),
+                profileCommand("enterprise", "officegen export input.pptx --to pdf --mode native --out output.pdf --json"),
+                "officegen config set profile enterprise --scope project --json",
                 "officegen inspect output.pdf --depth summary --agent --json"
             ],
             fallbacks: [
@@ -488,6 +494,7 @@ function readDottedValue(target, key) {
 }
 export async function doctorPayload(context) {
     const nodeRuntime = evaluateNodeRuntime(await readPackageNodeEngine(), process.version);
+    const rendererDoctor = await nativeRendererDoctor(context.config);
     const checks = [
         {
             id: "node",
@@ -501,15 +508,37 @@ export async function doctorPayload(context) {
         },
         { id: "profile", ok: true, detail: context.config.profile, status: "pass", severity: "info" },
         { id: "command-metadata", ok: true, detail: `${COMMAND_METADATA.length} command groups registered`, status: "pass", severity: "info" },
-        { id: "optional-renderers", ok: true, detail: "disabled unless enabled by config", status: "pass", severity: "info" }
+        { id: "optional-renderers", ok: true, detail: "disabled unless enabled by config", status: "pass", severity: "info" },
+        {
+            id: "native-proof",
+            ok: true,
+            detail: String(asRecord(rendererDoctor.nativeProof).reason ?? rendererDoctor.nativeProof.status),
+            status: rendererDoctor.nativeProof.status === "unavailable" ? "warning" : "pass",
+            severity: rendererDoctor.nativeProof.status === "unavailable" ? "warning" : "info",
+            remediation: rendererDoctor.nativeProof.status === "unavailable"
+                ? "Run officegen renderer doctor --json and officegen config show --json before requiring native proof."
+                : undefined
+        }
     ];
     const failedChecks = checks.filter((check) => !check.ok);
+    const warningChecks = checks.filter((check) => check.status === "warning" || check.severity === "warning");
+    const readiness = failedChecks.length ? "blocked" : warningChecks.length ? "warning" : "pass";
     return {
         schema: "officegen.doctor@1.2",
-        summary: failedChecks.length ? "Officegen CLI runtime readiness is blocked." : "Officegen CLI command surface is wired.",
-        readiness: failedChecks.length ? "blocked" : "pass",
-        status: failedChecks.length ? "fail" : "pass",
-        checks
+        summary: failedChecks.length
+            ? "Officegen CLI runtime readiness is blocked."
+            : warningChecks.length
+                ? "Officegen CLI command surface is wired with environment gaps."
+                : "Officegen CLI command surface is wired.",
+        readiness,
+        status: failedChecks.length ? "fail" : warningChecks.length ? "warning" : "pass",
+        checks,
+        nativeProof: rendererDoctor.nativeProof,
+        nativeRendererDoctor: {
+            policy: rendererDoctor.policy,
+            renderers: rendererDoctor.renderers,
+            nextActions: rendererDoctor.nextActions
+        }
     };
 }
 export function evaluateNodeRuntime(requiredRange, actualVersion) {
@@ -3658,12 +3687,21 @@ export async function templatePayload(context, subcommand) {
         const sourcePath = sourceOrQuery && /\.[A-Za-z0-9]+$/.test(sourceOrQuery)
             ? await validateInputPath(context, sourceOrQuery)
             : undefined;
-        const fullCandidates = await templateCandidates({ ...optional, query: sourcePath ? undefined : sourceOrQuery, sourcePath });
+        const sourceOnly = hasFlag(context.argv, "--source-only");
+        if (sourceOnly && !sourcePath) {
+            throw new CliFailure({
+                code: "SCHEMA_INVALID",
+                command: "template candidates",
+                message: "template candidates --source-only requires a source Office file path."
+            }, 2);
+        }
+        const fullCandidates = await templateCandidates({ ...optional, query: sourcePath ? undefined : sourceOrQuery, sourcePath, sourceOnly });
         const summaryOnly = hasFlag(context.argv, "--summary-only");
         const candidates = summaryOnly ? fullCandidates.map(summarizeTemplateCandidate) : fullCandidates;
         return {
             schema: "officegen.template.candidates.result@2.5",
             ...(summaryOnly ? { summaryOnly: true } : {}),
+            ...(sourceOnly ? { sourceOnly: true } : {}),
             candidates,
             count: candidates.length,
             artifacts: summaryOnly ? [] : await templateCandidateArtifacts(candidates)
@@ -3813,6 +3851,7 @@ function summarizeTemplateCandidate(candidate) {
         score: record.score,
         reasons: record.reasons,
         generatedFromSource: record.generatedFromSource,
+        generatedFromSourceOnly: record.generatedFromSourceOnly,
         sourceMetadata: record.sourceMetadata,
         counts: {
             previewCandidates: asArray(record.previewCandidates).length,

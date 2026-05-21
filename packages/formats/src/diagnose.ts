@@ -11,6 +11,7 @@ export interface DiagnoseIssue {
   location?: { slide?: number; page?: number; stableObjectId?: string };
   metrics?: Record<string, unknown>;
   suggestedOps?: unknown[];
+  editOps?: EditOpsDocument;
 }
 
 export interface DiagnoseOptions {
@@ -21,7 +22,15 @@ export interface DiagnoseOptions {
 export interface DiagnoseResult {
   schema: "officegen.diagnose.result@1.2";
   issues: DiagnoseIssue[];
+  suggestedOps: unknown[];
+  editOps?: EditOpsDocument;
   caveats: string[];
+}
+
+interface EditOpsDocument {
+  schema: "officegen.edit.ops@1.2";
+  target: "pptx" | "docx" | "xlsx" | "pdf";
+  ops: unknown[];
 }
 
 export async function diagnose(input: InputLike | InspectResult, options: DiagnoseOptions = {}): Promise<DiagnoseResult> {
@@ -32,6 +41,7 @@ export async function diagnose(input: InputLike | InspectResult, options: Diagno
   for (const entry of inspected.objectMap) {
     const overflow = overflowRiskForEntry(entry, maxTextLength, inspected.trusted.format);
     if (overflow) {
+      const op = { op: "setText", selector: { stableObjectId: entry.stableObjectId }, text: `${String(entry.text ?? entry.textPreview ?? "").slice(0, maxTextLength - 1)}…` };
       issues.push({
         code: "TEXT_OVERFLOW_RISK",
         severity: "warning",
@@ -39,7 +49,8 @@ export async function diagnose(input: InputLike | InspectResult, options: Diagno
         stableObjectId: entry.stableObjectId,
         location: objectLocation(entry),
         metrics: overflow.metrics,
-        suggestedOps: [{ type: "setText", selector: { stableObjectId: entry.stableObjectId }, text: `${String(entry.text ?? entry.textPreview ?? "").slice(0, maxTextLength - 1)}…` }]
+        suggestedOps: [op],
+        editOps: editOpsDocument(inspected.trusted.format, [op])
       });
     }
   }
@@ -64,9 +75,13 @@ export async function diagnose(input: InputLike | InspectResult, options: Diagno
     issues.push(...await officeRepairRiskIssues(input, inspected.trusted.format as "pptx" | "docx" | "xlsx", options.config));
   }
 
+  const suggestedOps = issues.flatMap((issue) => issue.suggestedOps ?? []);
+
   return {
     schema: "officegen.diagnose.result@1.2",
     issues,
+    suggestedOps,
+    editOps: suggestedOps.length ? editOpsDocument(inspected.trusted.format, suggestedOps) : undefined,
     caveats: ["Diagnosis is based on approximate inspect/view data and does not execute external renderers."]
   };
 }
@@ -113,6 +128,15 @@ function objectLocation(entry: ObjectMapEntry): { slide?: number; page?: number;
 
 function asPlainRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function editOpsDocument(format: string, ops: unknown[]): EditOpsDocument | undefined {
+  if (format !== "pptx" && format !== "docx" && format !== "xlsx" && format !== "pdf") return undefined;
+  return {
+    schema: "officegen.edit.ops@1.2",
+    target: format,
+    ops
+  };
 }
 
 function median(values: number[]): number | undefined {

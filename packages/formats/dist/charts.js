@@ -18,21 +18,72 @@ export async function renderChart(spec, options = {}) {
 }
 export const chartRender = renderChart;
 function normalizeChartSpec(spec, options) {
-    const record = typeof spec === "object" && spec !== null ? spec : {};
-    const dataValues = Array.isArray(record.data?.values)
-        ? record.data.values
-        : Array.isArray(record.values)
-            ? record.values
-            : [];
+    const record = asRecord(spec);
+    const rowData = chartRows(record);
+    const pairData = rowData ? undefined : chartLabelValuePairs(record);
     const xField = readField(record.encoding, "x") ?? "label";
     const yField = readField(record.encoding, "y") ?? "value";
-    const labels = dataValues.map((row, index) => String(row[xField] ?? row.label ?? row.name ?? index + 1));
-    const values = dataValues.map((row) => Number(row[yField] ?? row.value ?? row.y ?? 0));
+    const labels = rowData
+        ? rowData.map((row, index) => String(row[xField] ?? row.label ?? row.name ?? index + 1))
+        : pairData?.labels ?? [];
+    const values = rowData
+        ? rowData.map((row) => Number(row[yField] ?? row.value ?? row.y))
+        : pairData?.values ?? [];
+    assertChartData(labels, values);
     return {
         title: options.title ?? String(record.title ?? "Chart"),
-        labels: labels.length ? labels : ["A", "B", "C"],
-        values: values.length ? values : [3, 7, 5]
+        labels,
+        values
     };
+}
+function asRecord(value) {
+    if (typeof value === "object" && value !== null && !Array.isArray(value))
+        return value;
+    throw new Error("SCHEMA_INVALID: chart render requires a JSON object with data.values rows, data rows, or labels/values arrays.");
+}
+function chartRows(record) {
+    const data = record.data;
+    if (Array.isArray(data))
+        return rowsOrThrow(data, "data");
+    if (isRecord(data) && Array.isArray(data.values) && data.values.every(isRecord))
+        return rowsOrThrow(data.values, "data.values");
+    if (Array.isArray(record.values) && record.values.every(isRecord))
+        return rowsOrThrow(record.values, "values");
+    return undefined;
+}
+function chartLabelValuePairs(record) {
+    const nested = isRecord(record.data) ? record.data : undefined;
+    const labels = arrayValue(record.labels) ?? arrayValue(record.categories) ?? arrayValue(nested?.labels) ?? arrayValue(nested?.categories);
+    const values = arrayValue(record.values) ?? arrayValue(nested?.values);
+    if (!labels && !values)
+        return undefined;
+    return {
+        labels: (labels ?? []).map((label) => String(label)),
+        values: (values ?? []).map((value) => Number(value))
+    };
+}
+function rowsOrThrow(rows, path) {
+    if (!rows.every(isRecord)) {
+        throw new Error(`SCHEMA_INVALID: chart render ${path} must contain row objects with label/value fields.`);
+    }
+    return rows;
+}
+function assertChartData(labels, values) {
+    if (!labels.length || !values.length) {
+        throw new Error("SCHEMA_INVALID: chart render requires chart data; supported shapes are {labels, values}, {data:[{label,value}]}, or {data:{values:[...]}}.");
+    }
+    if (labels.length !== values.length) {
+        throw new Error(`SCHEMA_INVALID: chart render labels/values length mismatch (${labels.length} labels, ${values.length} values).`);
+    }
+    if (values.some((value) => !Number.isFinite(value))) {
+        throw new Error("SCHEMA_INVALID: chart render values must be finite numbers.");
+    }
+}
+function isRecord(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function arrayValue(value) {
+    return Array.isArray(value) ? value : undefined;
 }
 function readField(encoding, channel) {
     const channelSpec = typeof encoding === "object" && encoding !== null ? encoding[channel] : undefined;

@@ -161,9 +161,71 @@ describe("officegen CLI command surface", () => {
 
     expect(envelope.ok).toBe(true);
     expect(envelope.result.schema).toBe("officegen.renderer.doctor@2.2");
+    expect(envelope.result.nativeProof).toEqual(expect.objectContaining({ status: "unavailable" }));
+    expect(envelope.result.nextActions).toEqual(expect.arrayContaining([
+      "officegen renderer doctor --json",
+      "officegen config show --json",
+      "officegen config set profile enterprise --scope project --json"
+    ]));
     expect(envelope.result.renderers).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: "libreoffice" })
     ]));
+  });
+
+  it("surfaces native proof policy gaps from top-level doctor", async () => {
+    const captured = await run(["doctor", "--agent", "--json", "--json-budget-bytes", "80000"]);
+    const envelope = parseEnvelope(captured);
+    const nativeProofCheck = envelope.result.checks.find((check: any) => check.id === "native-proof");
+
+    expect(envelope.ok).toBe(true);
+    expect(envelope.result.nativeProof).toEqual(expect.objectContaining({ status: "unavailable" }));
+    expect(nativeProofCheck).toEqual(expect.objectContaining({
+      ok: true,
+      status: "warning",
+      severity: "warning"
+    }));
+    expect(envelope.result.nativeRendererDoctor.nextActions).toContain("officegen config show --json");
+  });
+
+  it("uses agent strict-json in error catalog suggestions", async () => {
+    const captured = await run(["errors", "inspect", "TEXT_OVERFLOW", "--json"]);
+    const envelope = parseEnvelope(captured);
+
+    expect(envelope.result.error.nextSuggestedCommands).toEqual(expect.arrayContaining([
+      "officegen capabilities --agent --strict-json",
+      "officegen errors inspect TEXT_OVERFLOW --agent --strict-json"
+    ]));
+  });
+
+  it("uses OS-appropriate native profile examples in workflow help", async () => {
+    const captured = await run(["help", "workflow", "native-verify-export", "--json"]);
+    const envelope = parseEnvelope(captured);
+    const steps = envelope.result.workflowDetails[0].steps.join("\n");
+
+    if (process.platform === "win32") {
+      expect(steps).toContain("$env:OFFICEGEN_PROFILE='enterprise'; officegen verify");
+      expect(steps).not.toContain("OFFICEGEN_PROFILE=enterprise officegen verify");
+    } else {
+      expect(steps).toContain("OFFICEGEN_PROFILE=enterprise officegen verify");
+    }
+    expect(steps).toContain("officegen config set profile enterprise --scope project --json");
+  });
+
+  it("recommends renderer doctor and config when native verify is policy-blocked", async () => {
+    const cwd = await tempWorkspace();
+    const input = path.join(cwd, "deck.pptx");
+    await writeFile(input, await minimalPptxWithImage(false));
+    const captured = await run(["verify", input, "--native", "--agent", "--json", "--json-budget-bytes", "80000"], cwd);
+    const envelope = parseEnvelope(captured);
+
+    expect(envelope.ok).toBe(false);
+    expect(envelope.error.code).toBe("SECURITY_EXTERNAL_PROCESS_DENIED");
+    expect(envelope.nextActions).toEqual(expect.arrayContaining([
+      "officegen renderer doctor --json",
+      "officegen config show --json",
+      "officegen config set profile enterprise --scope project --json"
+    ]));
+    expect(envelope.nextActions.join("\n")).toMatch(/setup:/i);
   });
 
   it("treats successful error inspection lookup as an ok envelope", async () => {
@@ -229,18 +291,24 @@ describe("officegen CLI command surface", () => {
     const captured = await run(["doctor", "--agent", "--json", "--json-budget-bytes", "80000"]);
     const envelope = parseEnvelope(captured);
     const nodeCheck = envelope.result.checks.find((check: any) => check.id === "node");
+    const nativeProofCheck = envelope.result.checks.find((check: any) => check.id === "native-proof");
 
     expect(envelope.ok).toBe(true);
     expect(envelope.objectiveOk).toBe(true);
-    expect(envelope.readiness).toBe("pass");
-    expect(envelope.result.readiness).toBe("pass");
-    expect(envelope.result.status).toBe("pass");
+    expect(envelope.readiness).toBe("warning");
+    expect(envelope.result.readiness).toBe("warning");
+    expect(envelope.result.status).toBe("warning");
     expect(nodeCheck).toEqual(expect.objectContaining({
       ok: true,
       required: ">=24.0.0",
       actual: process.version.replace(/^v/, ""),
       status: "pass",
       severity: "info"
+    }));
+    expect(nativeProofCheck).toEqual(expect.objectContaining({
+      ok: true,
+      status: "warning",
+      severity: "warning"
     }));
   });
 
@@ -2149,6 +2217,27 @@ describe("officegen CLI command surface", () => {
     expect(firstCandidate.counts.schemaCandidates).toBeGreaterThan(0);
     expect(firstCandidate.schemaCandidates.items.length).toBeGreaterThan(0);
     expect(validateSchema("officegen.envelope@1.2", envelope).ok).toBe(true);
+  });
+
+  it("returns source-only template candidates from the current source without registry entries", async () => {
+    const cwd = await tempWorkspace();
+    await writeFile(path.join(cwd, "deck.pptx"), await minimalPptxWithImage(false));
+    await mkdir(path.join(cwd, ".officegen", "optional", "template"), { recursive: true });
+    await writeFile(path.join(cwd, ".officegen", "optional", "template", "old.json"), `${JSON.stringify({
+      id: "old",
+      name: "Old",
+      fields: [{ name: "legacy_title", type: "string" }]
+    })}\n`, "utf8");
+
+    const captured = await run(["template", "candidates", "deck.pptx", "--source-only", "--summary-only", "--json"], cwd);
+    const envelope = parseEnvelope(captured);
+
+    expect(envelope.ok).toBe(true);
+    expect(envelope.result.sourceOnly).toBe(true);
+    expect(envelope.result.count).toBe(1);
+    expect(envelope.result.candidates[0].generatedFromSource).toBe(true);
+    expect(envelope.result.candidates[0].generatedFromSourceOnly).toBe(true);
+    expect(envelope.result.candidates.map((candidate: any) => candidate.template.id)).not.toContain("old");
   });
 
   it("returns concrete inspect-edit-export workflow help", async () => {

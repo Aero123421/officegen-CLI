@@ -23,4 +23,13 @@ describe("diagram SVG render", () => {
       expect(rect.x + rect.width).toBeLessThanOrEqual(96);
     }
   });
+
+  it("splits Mermaid node ids from bracket labels", async () => {
+    const diagram = await renderDiagram("flowchart LR\nA[Inspect] --> B[Edit]", { width: 420, height: 220 });
+
+    expect(diagram.svg).toContain("Inspect");
+    expect(diagram.svg).toContain("Edit");
+    expect(diagram.svg).not.toContain("AInspect");
+    expect(diagram.svg).not.toContain("BEdit");
+  });
 });

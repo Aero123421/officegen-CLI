@@ -7,6 +7,7 @@ export async function diagnose(input, options = {}) {
     for (const entry of inspected.objectMap) {
         const overflow = overflowRiskForEntry(entry, maxTextLength, inspected.trusted.format);
         if (overflow) {
+            const op = { op: "setText", selector: { stableObjectId: entry.stableObjectId }, text: `${String(entry.text ?? entry.textPreview ?? "").slice(0, maxTextLength - 1)}…` };
             issues.push({
                 code: "TEXT_OVERFLOW_RISK",
                 severity: "warning",
@@ -14,7 +15,8 @@ export async function diagnose(input, options = {}) {
                 stableObjectId: entry.stableObjectId,
                 location: objectLocation(entry),
                 metrics: overflow.metrics,
-                suggestedOps: [{ type: "setText", selector: { stableObjectId: entry.stableObjectId }, text: `${String(entry.text ?? entry.textPreview ?? "").slice(0, maxTextLength - 1)}…` }]
+                suggestedOps: [op],
+                editOps: editOpsDocument(inspected.trusted.format, [op])
             });
         }
     }
@@ -35,9 +37,12 @@ export async function diagnose(input, options = {}) {
     if (!isInspectResult(input) && ["pptx", "docx", "xlsx"].includes(inspected.trusted.format)) {
         issues.push(...await officeRepairRiskIssues(input, inspected.trusted.format, options.config));
     }
+    const suggestedOps = issues.flatMap((issue) => issue.suggestedOps ?? []);
     return {
         schema: "officegen.diagnose.result@1.2",
         issues,
+        suggestedOps,
+        editOps: suggestedOps.length ? editOpsDocument(inspected.trusted.format, suggestedOps) : undefined,
         caveats: ["Diagnosis is based on approximate inspect/view data and does not execute external renderers."]
     };
 }
@@ -81,6 +86,15 @@ function objectLocation(entry) {
 }
 function asPlainRecord(value) {
     return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+function editOpsDocument(format, ops) {
+    if (format !== "pptx" && format !== "docx" && format !== "xlsx" && format !== "pdf")
+        return undefined;
+    return {
+        schema: "officegen.edit.ops@1.2",
+        target: format,
+        ops
+    };
 }
 function median(values) {
     const sorted = values.filter((value) => Number.isFinite(value)).sort((left, right) => left - right);

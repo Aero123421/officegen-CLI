@@ -76,7 +76,8 @@ export async function inspectTemplate(options) {
     return readJsonFile(templatePath(options, options.id));
 }
 export async function templateCandidates(options = {}) {
-    const templates = await listTemplates(options);
+    requireFeature(options, "template", "template candidates");
+    const templates = options.sourceOnly ? [] : await listTemplates(options);
     const query = options.query?.trim().toLowerCase();
     const tags = new Set((options.tags ?? []).map((tag) => tag.toLowerCase()));
     const fields = new Set((options.fields ?? []).map((field) => field.toLowerCase()));
@@ -143,7 +144,9 @@ export async function templateCandidates(options = {}) {
         };
     })
         .filter((candidate) => candidate.score > 0);
-    const sourceDerivedCandidate = sourceSignals && resolvedSourcePath ? makeSourceDerivedTemplateCandidate(resolvedSourcePath, sourceSignals) : undefined;
+    const sourceDerivedCandidate = sourceSignals && resolvedSourcePath
+        ? makeSourceDerivedTemplateCandidate(resolvedSourcePath, sourceSignals, options.sourceOnly)
+        : undefined;
     return [...(sourceDerivedCandidate ? [sourceDerivedCandidate] : []), ...registryCandidates]
         .sort((left, right) => right.score - left.score || left.template.id.localeCompare(right.template.id));
 }
@@ -512,7 +515,7 @@ function matchTemplateMapCandidates(template, sourceSignals) {
     }
     return matched;
 }
-function makeSourceDerivedTemplateCandidate(sourcePath, sourceSignals) {
+function makeSourceDerivedTemplateCandidate(sourcePath, sourceSignals, sourceOnly = false) {
     const name = path.basename(sourcePath, path.extname(sourcePath));
     const fields = sourceSignals.schemaCandidates.map((field) => ({
         name: field.name,
@@ -564,7 +567,8 @@ function makeSourceDerivedTemplateCandidate(sourcePath, sourceSignals) {
         templateMapSuggested: sourceSignals.templateMapSuggested,
         artifactPaths: sourceSignals.artifactPaths,
         trust: sourceSignals.trust,
-        generatedFromSource: true
+        generatedFromSource: true,
+        ...(sourceOnly ? { generatedFromSourceOnly: true } : {})
     };
 }
 function normalizeTemplateMapping(value) {

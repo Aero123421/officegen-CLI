@@ -130,7 +130,10 @@ export async function verify(input, options = {}) {
     if (!openable)
         blockingIssues.push("INPUT_NOT_OPENABLE");
     const warningSummary = aggregateWarnings(warnings, blockingIssues);
-    const topRisks = warningSummary.slice(0, 8).map((item) => ({
+    const topRisks = warningSummary
+        .filter((item) => !(item.code === "TEXT_OVERFLOW_RISK" && overflowIssues.length > 0))
+        .slice(0, 8)
+        .map((item) => ({
         code: item.code,
         severity: item.severity,
         category: item.category,
@@ -138,17 +141,25 @@ export async function verify(input, options = {}) {
         message: item.examples[0] ?? item.code,
         repair: repairForCode(item.code)
     }));
-    for (const issue of worstOverflowIssues(overflowIssues).slice(0, 5)) {
+    const worstOverflows = worstOverflowIssues(overflowIssues).slice(0, 5);
+    if (worstOverflows.length) {
+        const first = worstOverflows[0];
         topRisks.push({
-            code: issue.code,
+            code: "TEXT_OVERFLOW_RISK",
             severity: "warning",
             category: "quality",
             count: overflowIssues.length,
-            message: issue.message,
-            slide: issue.slide,
-            page: issue.page,
-            stableObjectId: issue.stableObjectId,
-            repair: issue.repair
+            message: `${overflowIssues.length} text overflow risk(s) detected; worst ${worstOverflows.length} candidate(s) are listed in examples.`,
+            slide: first.slide,
+            page: first.page,
+            stableObjectId: first.stableObjectId,
+            repair: first.repair,
+            examples: worstOverflows.map((issue) => ({
+                slide: issue.slide,
+                page: issue.page,
+                stableObjectId: issue.stableObjectId,
+                message: issue.message
+            }))
         });
     }
     const hasNonEnvironmentWarnings = warningSummary.some((item) => item.severity === "warning" && item.category !== "environment");
@@ -163,9 +174,9 @@ export async function verify(input, options = {}) {
         cappedWarningKinds: warningSummary.length,
         repeatedWarningsCapped: true
     };
-    const recommendedRepairs = topRisks
+    const recommendedRepairs = uniqueRepairs(topRisks
         .filter((risk) => risk.repair)
-        .map((risk) => ({ code: risk.code, reason: risk.repair ?? "", command: commandForRisk(risk.code, normalized.format) }));
+        .map((risk) => ({ code: risk.code, reason: risk.repair ?? "", command: commandForRisk(risk.code, normalized.format) })));
     const nativeProof = nativeProofFromRenderer(nativeRenderer, nativeRequested, normalized.format);
     const result = {
         schema: "officegen.verify.result@1.2",
@@ -306,8 +317,23 @@ function commandForRisk(code, format) {
     if (code === "PDF_TEXT_BLOCKS_ZERO")
         return "officegen view input.pdf --out .officegen/runs/pdf-view --json";
     if (code === "NATIVE_RENDERER_NOT_RUN")
-        return `OFFICEGEN_PROFILE=enterprise officegen verify input.${format} --native --visual --json`;
+        return profileCommand("enterprise", `officegen verify input.${format} --native --visual --json`);
     return undefined;
+}
+function uniqueRepairs(repairs) {
+    const seen = new Set();
+    return repairs.filter((repair) => {
+        const key = `${repair.code}:${repair.command ?? ""}:${repair.reason}`;
+        if (seen.has(key))
+            return false;
+        seen.add(key);
+        return true;
+    });
+}
+function profileCommand(profile, command) {
+    if (process.platform === "win32")
+        return `$env:OFFICEGEN_PROFILE='${profile}'; ${command}`;
+    return `OFFICEGEN_PROFILE=${profile} ${command}`;
 }
 function evaluateGates(gates, inspected, visual, warningCount, noRepairDialogExpected, nativeRenderer) {
     if (!gates)
@@ -459,9 +485,12 @@ function nativeProofFromRenderer(nativeRenderer, requested, format) {
         };
     }
     const reason = nativeRenderer.message ?? "Native renderer verification did not complete.";
+    const policyHint = /external process|externalProcess|denied|disabled/i.test(reason)
+        ? " Run officegen renderer doctor --json and officegen config show --json to confirm native renderer policy before retrying."
+        : "";
     return {
         status: /not found|requires|disabled|denied|unavailable/i.test(reason) ? "unavailable" : "failed",
-        reason
+        reason: `${reason}${policyHint}`
     };
 }
 function nativeProofRenderer(message) {

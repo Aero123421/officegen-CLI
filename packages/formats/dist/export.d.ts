@@ -53,6 +53,8 @@ export interface NativeRendererDoctorResult {
         externalProcess?: string;
         renderers?: string;
     };
+    nativeProof: NativeProof;
+    nextActions: string[];
     renderers: Array<{
         id: string;
         backend: "office-com" | "libreoffice";

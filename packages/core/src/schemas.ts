@@ -1092,7 +1092,7 @@ const patchPlanV2Schema: JsonObject = {
 const repairPlanV2Schema: JsonObject = {
   $id: "officegen.repairPlan@2",
   type: "object",
-  required: ["schema", "version", "target", "inputSha256", "wouldWrite", "operations", "failureTaxonomy", "steps", "verify"],
+  required: ["schema", "version", "target", "inputSha256", "wouldWrite", "planOnly", "operations", "failureTaxonomy", "steps", "verify"],
   additionalProperties: true,
   properties: {
     schema: schemaField("officegen.repairPlan@2"),
@@ -1100,7 +1100,8 @@ const repairPlanV2Schema: JsonObject = {
     target: { enum: ["pptx", "docx", "xlsx", "pdf", "svg", "html", "unknown"] },
     input: { type: "string" },
     inputSha256: { type: "string", pattern: "^sha256:" },
-    wouldWrite: { const: false },
+    wouldWrite: { type: "boolean" },
+    planOnly: { type: "boolean" },
     operations: { type: "array", items: { type: "object", additionalProperties: true } },
     failureTaxonomy: {
       type: "array",
@@ -1444,6 +1445,7 @@ const entries: SchemaRegistryEntry[] = [
   entry("officegen.edit.ops@1.2", editOpsSchema, "edit"),
   entry("officegen.editPlan@2", editPlanV2Schema, "edit"),
   entry("officegen.patchPlan@2", patchPlanV2Schema, "edit"),
+  entry("officegen.packageDiff@1", looseSchema("officegen.packageDiff@1"), "edit"),
   entry("officegen.repairPlan@2", repairPlanV2Schema, "repair"),
   entry("officegen.ir.document@1.2", documentIrSchema, "render"),
   entry("officegen.manifest@1.2", looseSchema("officegen.manifest@1.2"), "run"),

@@ -166,7 +166,7 @@ export const ERROR_CATALOG = Object.fromEntries(REQUIRED_ERROR_CODES.map((code) 
         message: messages[code] ?? code,
         typicalCause: messages[code] ?? code,
         suggestedOps: suggestedOps[code] ?? [],
-        nextSuggestedCommands: ["officegen capabilities --agent --json", "officegen errors inspect " + code + " --json"]
+        nextSuggestedCommands: ["officegen capabilities --agent --strict-json", "officegen errors inspect " + code + " --agent --strict-json"]
     }
 ]));
 export class OfficegenError extends Error {
