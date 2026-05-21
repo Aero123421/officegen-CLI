@@ -39,7 +39,7 @@ Manual GitHub Release assets are also published with SHA-256 checksum files:
 - `officegen-v5.0.0-x86_64-pc-windows-msvc.zip`
 - `officegen-v5.0.0-aarch64-pc-windows-msvc.zip`
 
-The GitHub Release may also include `officegen-v5.0.0.tgz` as a legacy compatibility artifact for existing CI smoke tests. The native binary assets above are the primary v5 runtime path. The `officegen` package name is not published from this project to the public npm registry, because that name is owned separately on npm.
+GitHub Release native assets are the supported v5 install path. This repository no longer exposes an npm `bin` entry for `officegen`, and `npm install` is not a supported runtime installation method.
 
 Smoke check:
 
@@ -297,9 +297,10 @@ Enterprise profile:
 
 ```bash
 npm install
-npm run typecheck
-npm test
-npm run build
+cargo fmt --check
+cargo test --locked
+cargo build --release --locked
+npm run v5:acceptance -- --bin target/release/officegen --expected-version 5.0.0
 ```
 
 Release checks:
@@ -319,11 +320,6 @@ npm run v5:acceptance -- --bin target/release/officegen.exe --expected-version 5
 npm run typecheck
 npm test
 npm run build
-npm run pack:smoke
-npm run perfect-spec:evidence
-npm run perfect-spec:check
-npm run github-install:smoke
-npm run release-tarball:smoke
 npm run remediation:check
 ```
 
@@ -333,27 +329,19 @@ All-up local pre-tag gate after the release binary exists:
 npm run release:gate
 ```
 
-After pushing the release commit, but before tagging:
-
-```bash
-npm run github-install:head-smoke
-OFFICEGEN_GITHUB_INSTALL_SPEC=github:Aero123421/officegen-CLI#<commit-sha> npm run github-install:smoke
-```
-
 Post-tag checks:
 
 ```bash
-npm run perfect-spec:post-tag-smoke
-npm run perfect-spec:evidence
-npm run perfect-spec:check -- --gate=publish
-npm run github-install:tag-smoke
-npm run github-install:remote-smoke
-OFFICEGEN_RELEASE_TARBALL_SPEC=https://github.com/Aero123421/officegen-CLI/releases/download/v5.0.0/officegen-v5.0.0.tgz npm run release-tarball:smoke
+npm run native:assets:check -- --version 5.0.0 --dist-dir dist --include-installers
 ```
 
-The pre-tag visibility gate may show `L7-A009` as pending because tag and release install checks need a real tag or released asset. The release workflow must collect `.officegen/acceptance/perfect-spec/post-tag-smoke.json` plus the tag/remote smoke logs, regenerate the perfect-spec evidence bundle, and pass `npm run perfect-spec:check -- --gate=publish` before packaging release assets. The workflow uploads `.officegen/acceptance/perfect-spec` as CI evidence.
+The release workflow packages native binaries plus `install.sh` and `install.ps1`, checks the v5 acceptance evidence, verifies native asset completeness, and smoke-tests the curl/irm installers.
 
-This project intentionally does not publish the `officegen` package name to npm. `npm publish` is blocked by `prepublishOnly`; use `npm pack`, `npm run pack:smoke`, and the GitHub Release tarball flow instead.
+This project intentionally does not publish or expose an npm CLI package. Use the GitHub Release native assets and installers.
+
+## Legacy TypeScript Reference
+
+The pre-v5 TypeScript implementation is retained under `legacy/typescript-v3-reference/` only for historical comparison and migration archaeology. It is not the supported runtime, is not wired to a root `bin` entry, and should not be treated as the active CLI implementation. New runtime work belongs in the Rust source tree under `src/`.
 
 Optional public corpus benchmark:
 
@@ -373,9 +361,9 @@ npm run version:bump -- 5.0.0
 npm run version:check
 ```
 
-The version bump script updates root/workspace manifests, `package-lock.json`, `Cargo.toml`, `OFFICEGEN_CLI_VERSION`, and README release URLs together.
+The version bump script updates the root tooling manifest, `package-lock.json`, `Cargo.toml`, `Cargo.lock`, and README release URLs together.
 
-GitHub Actions run CI, CodeQL, release packaging, Rust native binary packaging, installer smoke tests, tarball smoke tests, GitHub direct-install smoke tests, and release asset upload for `vX.Y.Z` tags.
+GitHub Actions run CI, CodeQL, release packaging, Rust native binary packaging, installer smoke tests, and release asset upload for `vX.Y.Z` tags.
 
 Clean generated build output:
 

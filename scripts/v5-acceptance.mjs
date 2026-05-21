@@ -191,6 +191,9 @@ try {
     for (const script of ["v5:acceptance", "native:smoke", "installer:smoke", "release:gate"]) {
       if (!pkg.scripts?.[script]) throw new Error(`package.json is missing script ${script}`);
     }
+    if (pkg.bin?.officegen || pkg.scripts?.officegen) {
+      throw new Error("package.json must not expose an npm officegen CLI path");
+    }
     for (const target of ["x86_64-unknown-linux-gnu", "aarch64-apple-darwin", "x86_64-pc-windows-msvc"]) {
       if (!docs.includes(`officegen-v5.0.0-${target}`)) throw new Error(`v5 matrix is missing ${target} asset`);
     }
@@ -213,8 +216,7 @@ try {
       "cargo build --release --locked",
       "npm run typecheck",
       "npm test",
-      "npm run build",
-      "npm run pack:smoke"
+      "npm run build"
     ];
     for (const command of required) {
       if (!gateDoc.includes(command)) throw new Error(`release gate doc is missing: ${command}`);

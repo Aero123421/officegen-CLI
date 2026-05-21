@@ -75,8 +75,8 @@ async function reviewDocument(id, input, outRoot) {
 }
 
 function runOfficegen(args) {
-  const bin = path.join("packages", "cli", "dist", "main.js");
-  const result = spawnSync(process.execPath, [bin, ...args], {
+  const bin = process.env.OFFICEGEN_NATIVE_BIN ?? path.join("target", "release", process.platform === "win32" ? "officegen.exe" : "officegen");
+  const result = spawnSync(bin, args, {
     encoding: "utf8",
     timeout: timeoutMs,
     maxBuffer: 20 * 1024 * 1024

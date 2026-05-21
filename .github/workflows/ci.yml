@@ -44,6 +44,12 @@ jobs:
       - name: Install without lifecycle scripts
         run: npm ci --ignore-scripts --prefer-online --no-audit --no-fund
 
+      - name: Version sync check
+        run: npm run version:check
+
+      - name: Remediation matrix check
+        run: npm run remediation:check
+
       - name: Native CLI smoke
         shell: bash
         run: |
@@ -57,60 +63,6 @@ jobs:
           bin="target/release/officegen"
           if [ "$RUNNER_OS" = "Windows" ]; then bin="target/release/officegen.exe"; fi
           npm run v5:acceptance -- --bin "$bin" --expected-version current
-
-      - name: Installer smoke
-        run: npm run installer:smoke
-
-  node-compat:
-    name: Legacy contract checks (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-
-      - name: Setup Node
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
-        with:
-          node-version: "24"
-
-      - name: Install without lifecycle scripts
-        run: npm ci --ignore-scripts --prefer-online --no-audit --no-fund
-
-      - name: npm audit
-        if: runner.os != 'Windows'
-        run: npm audit --audit-level=moderate
-
-      - name: Version sync check
-        run: npm run version:check
-
-      - name: Remediation matrix check
-        run: npm run remediation:check
-
-      - name: Contract check
-        run: npm run contract:check
-
-      - name: Schema coverage check
-        run: npm run schema:coverage
-
-      - name: Typecheck
-        run: npm run typecheck
-
-      - name: Test
-        run: npm test
-
-      - name: Security fixtures
-        run: npm run security:fixtures
-
-      - name: Benchmark local fixtures
-        run: npm run benchmark:local-fixtures
-
-      - name: Build legacy TypeScript package
-        run: npm run build
 
       - name: Installer smoke
         run: npm run installer:smoke

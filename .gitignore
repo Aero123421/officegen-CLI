@@ -1,8 +1,8 @@
 node_modules/
 target/
 dist/
-packages/*/dist/
-packages/*/tsconfig.tsbuildinfo
+legacy/typescript-v3-reference/packages/*/dist/
+legacy/typescript-v3-reference/packages/*/tsconfig.tsbuildinfo
 .officegen/
 npm-debug.log*
 
